@@ -346,8 +346,17 @@ test("UsageTracker defaults its auth and cache paths to the agent dir", async ()
 	assert.ok(cache.accounts, "the shared cache landed in the agent dir");
 });
 
+const authDirectories: string[] = [];
+
+// Keep writeAuthFile's call sites context-free while cleaning each test's fixtures.
+// The shared batch relies on this file's root tests remaining sequential.
+test.afterEach(async () => {
+	await Promise.all(authDirectories.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
 async function writeAuthFile(auth: unknown): Promise<string> {
 	const dir = await mkdtemp(join(tmpdir(), "pi-statusline-usage-"));
+	authDirectories.push(dir);
 	const authPath = join(dir, "auth.json");
 	await writeFile(authPath, JSON.stringify(auth));
 	return authPath;
