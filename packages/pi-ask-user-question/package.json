@@ -1,0 +1,56 @@
+{
+  "name": "@hank-warren/pi-ask-user-question",
+  "version": "0.6.0",
+  "description": "Structured questionnaire tool for Pi with numbered options, digit hotkeys and Tab-to-comment, composed from the shared permission-selector component.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "questionnaire",
+    "prompt",
+    "tui",
+    "coding-agent"
+  ],
+  "author": "Hank Warren",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hank-warren/pi-extensions.git",
+    "directory": "packages/pi-ask-user-question"
+  },
+  "bugs": {
+    "url": "https://github.com/hank-warren/pi-extensions/issues"
+  },
+  "homepage": "https://github.com/hank-warren/pi-extensions/tree/main/packages/pi-ask-user-question#readme",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "ask-user-question.ts",
+    "reconcile.ts",
+    "events.ts",
+    "questionnaire.ts",
+    "tool/schema.ts",
+    "tool/validate.ts",
+    "tool/envelope.ts",
+    "view/dialog.ts",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "dependencies": {
+    "@hank-warren/pi-permission-selector": "^1.4.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  }
+}

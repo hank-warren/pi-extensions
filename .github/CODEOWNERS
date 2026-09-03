@@ -1,0 +1,5 @@
+# Every change requires review from the repository owner.
+# Paired with a ruleset requiring code-owner review, this keeps `main`
+# maintainer-only while still letting anyone open a pull request from a fork.
+
+* @hank-warren

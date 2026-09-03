@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question about Pi itself
+    url: https://github.com/earendil-works/pi
+    about: This repo only covers the @hank-warren/* packages. Pi bugs belong upstream.
+  - name: Report a security vulnerability
+    url: https://github.com/hank-warren/pi-extensions/security/advisories/new
+    about: Please report security issues privately, not as a public issue.

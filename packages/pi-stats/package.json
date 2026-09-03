@@ -1,0 +1,47 @@
+{
+  "name": "@hank-warren/pi-stats",
+  "version": "0.4.1",
+  "description": "A compact /stats dashboard for all-time Pi token usage, including persisted subagents.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "stats",
+    "tokens",
+    "usage",
+    "dashboard"
+  ],
+  "author": "Hank Warren",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hank-warren/pi-extensions.git",
+    "directory": "packages/pi-stats"
+  },
+  "bugs": {
+    "url": "https://github.com/hank-warren/pi-extensions/issues"
+  },
+  "homepage": "https://github.com/hank-warren/pi-extensions/tree/main/packages/pi-stats#readme",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "cache.ts",
+    "stats.ts",
+    "types.ts",
+    "widget.ts",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}

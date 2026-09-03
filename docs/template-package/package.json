@@ -1,0 +1,41 @@
+{
+  "name": "@hank-warren/pi-TEMPLATE",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Template for a new public Pi package. Copy to packages/pi-<name>/ and replace every TEMPLATE placeholder.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "coding-agent"
+  ],
+  "author": "Hank Warren",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hank-warren/pi-extensions.git",
+    "directory": "packages/pi-TEMPLATE"
+  },
+  "bugs": {
+    "url": "https://github.com/hank-warren/pi-extensions/issues"
+  },
+  "homepage": "https://github.com/hank-warren/pi-extensions/tree/main/packages/pi-TEMPLATE#readme",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  }
+}

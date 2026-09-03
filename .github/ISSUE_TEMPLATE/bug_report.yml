@@ -1,0 +1,67 @@
+name: Bug report
+description: Something in a package does not work the way it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. If this is a **security** issue, please close this
+        and use [private vulnerability reporting](https://github.com/hank-warren/pi-extensions/security/advisories/new) instead.
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package
+      description: Which package is affected?
+      options:
+        - pi-statusline
+        - pi-stats
+        - pi-permission-selector
+        - pi-auto-permissions
+        - pi-plan-mode
+        - pi-ask-user-question
+        - pi-simplify
+        - pi-multi-login
+        - pi-loop
+        - pi-stash
+        - "more than one / not sure"
+    validations:
+      required: true
+  - type: input
+    id: package-version
+    attributes:
+      label: Package version
+      placeholder: "0.7.3"
+    validations:
+      required: true
+  - type: input
+    id: pi-version
+    attributes:
+      label: Pi version
+      description: Output of `pi --version`
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: A minimal reproduction is the single most useful thing you can include.
+      placeholder: |
+        1. Start Pi with `pi -e npm:@hank-warren/...`
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Any errors or diagnostics. Please redact tokens and paths you would rather not share.
+      render: text
+    validations:
+      required: false

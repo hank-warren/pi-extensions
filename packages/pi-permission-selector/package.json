@@ -1,0 +1,37 @@
+{
+  "name": "@hank-warren/pi-permission-selector",
+  "version": "1.4.1",
+  "description": "OptionSelector: a composable Pi TUI selector with numbered options, digit hotkeys, and inline notes, shared by pi-auto-permissions and pi-ask-user-question.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "permissions",
+    "select",
+    "tui",
+    "coding-agent"
+  ],
+  "author": "Hank Warren",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hank-warren/pi-extensions.git",
+    "directory": "packages/pi-permission-selector"
+  },
+  "bugs": {
+    "url": "https://github.com/hank-warren/pi-extensions/issues"
+  },
+  "homepage": "https://github.com/hank-warren/pi-extensions/tree/main/packages/pi-permission-selector#readme",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "files": [
+    "keys.ts",
+    "selector.ts",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-tui": "*"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "name": "@hank-warren/pi-simplify",
+  "version": "0.2.0",
+  "description": "Single-agent simplify skill for Pi: review recently changed code and apply behavior-preserving cleanups, adapted from Matt Devy's pi-simplify.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-skill",
+    "skill",
+    "simplify",
+    "cleanup"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hank-warren/pi-extensions.git",
+    "directory": "packages/pi-simplify"
+  },
+  "pi": {
+    "skills": [
+      "./simplify"
+    ]
+  },
+  "files": [
+    "simplify/",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ]
+}

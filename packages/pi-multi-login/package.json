@@ -1,0 +1,47 @@
+{
+  "name": "@hank-warren/pi-multi-login",
+  "version": "0.3.2",
+  "description": "Register additional OAuth logins for Pi's built-in providers under aliased provider ids, managed with /multi-login.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "oauth",
+    "login",
+    "provider",
+    "coding-agent"
+  ],
+  "author": "Hank Warren",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hank-warren/pi-extensions.git",
+    "directory": "packages/pi-multi-login"
+  },
+  "bugs": {
+    "url": "https://github.com/hank-warren/pi-extensions/issues"
+  },
+  "homepage": "https://github.com/hank-warren/pi-extensions/tree/main/packages/pi-multi-login#readme",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "config.ts",
+    "provider.ts",
+    "removal.ts",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}

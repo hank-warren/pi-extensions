@@ -1,0 +1,91 @@
+name: drift
+
+# Advisory check against the *latest* published pi runtime, split out of ci.yml.
+#
+# Upstream pi can publish a breaking change at any time, which is a time-based
+# event, not a commit-based one. Running this on every pull request and every push
+# meant a release cycle paid for it five times while telling us nothing new about
+# our own commits. Nightly plus workflow_dispatch gives the same signal.
+#
+# A red cross here is a signal to investigate, not a merge blocker: nothing gates
+# on this workflow.
+on:
+  schedule:
+    # 07:00 UTC daily, comfortably after most upstream publishes.
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: drift
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  latest-pi:
+    name: drift (latest pi)
+    runs-on: ubuntu-latest
+    # Same work as ci.yml's gate plus two registry round trips. Nothing gates on
+    # this job, so a hang here should expire quickly rather than idle for hours.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Resolve latest pi version
+        id: latest
+        run: |
+          set -euo pipefail
+          version=$(npm view @earendil-works/pi-coding-agent@latest version)
+          if [[ -z "$version" ]]; then
+            echo "could not resolve latest @earendil-works/pi-coding-agent version" >&2
+            exit 1
+          fi
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "latest @earendil-works/pi-coding-agent is $version"
+
+      # --no-save keeps package.json and the lockfile untouched so this job can never
+      # smuggle a dependency bump into the repo; --prefer-online bypasses a stale cache.
+      - name: Install latest pi runtime packages
+        run: |
+          set -euo pipefail
+          npm install --no-save --prefer-online \
+            "@earendil-works/pi-coding-agent@${{ steps.latest.outputs.version }}" \
+            "@earendil-works/pi-ai@${{ steps.latest.outputs.version }}" \
+            "@earendil-works/pi-tui@${{ steps.latest.outputs.version }}"
+
+      - name: Put workspace binaries on PATH
+        run: echo "$PWD/node_modules/.bin" >>"$GITHUB_PATH"
+
+      # Assert the install actually took effect. Without this the job could silently
+      # re-test the pinned version and report a false green.
+      # The version is read straight off disk: the package's exports map does not
+      # expose ./package.json, so require()-ing it throws ERR_PACKAGE_PATH_NOT_EXPORTED.
+      - name: Assert installed version matches resolved latest
+        run: |
+          set -euo pipefail
+          expected='${{ steps.latest.outputs.version }}'
+          installed=$(node -p "JSON.parse(require('fs').readFileSync('node_modules/@earendil-works/pi-coding-agent/package.json','utf8')).version")
+          cli=$(pi --version)
+          echo "expected=$expected installed=$installed cli=$cli"
+          if [[ "$installed" != "$expected" ]]; then
+            echo "installed @earendil-works/pi-coding-agent $installed != resolved latest $expected" >&2
+            exit 1
+          fi
+          if [[ "$cli" != "$expected" ]]; then
+            echo "pi CLI reports $cli but expected $expected" >&2
+            exit 1
+          fi
+
+      # npm test typechecks against the freshly installed runtime before it runs
+      # anything else (scripts/test.sh), so a separate Typecheck step adds nothing.
+      - name: Test against latest pi
+        run: npm test

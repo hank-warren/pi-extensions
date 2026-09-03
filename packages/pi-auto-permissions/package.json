@@ -1,0 +1,86 @@
+{
+  "name": "@hank-warren/pi-auto-permissions",
+  "version": "0.16.1",
+  "description": "Fork of @ogulcancelik/pi-auto-permissions with dialog-answer user evidence: context-aware Bash permissions for Pi with automated guardian review.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "safety",
+    "permissions",
+    "auto-approval",
+    "command-review"
+  ],
+  "author": "Hank Warren",
+  "contributors": [
+    {
+      "name": "Can Celik",
+      "url": "https://github.com/ogulcancelik"
+    }
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hank-warren/pi-extensions.git",
+    "directory": "packages/pi-auto-permissions"
+  },
+  "bugs": {
+    "url": "https://github.com/hank-warren/pi-extensions/issues"
+  },
+  "homepage": "https://github.com/hank-warren/pi-extensions/tree/main/packages/pi-auto-permissions#readme",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [
+      "./auto-permissions-setup"
+    ]
+  },
+  "files": [
+    "NOTICE.md",
+    "auto-permissions-setup",
+    "index.ts",
+    "approval-pulse.ts",
+    "config.ts",
+    "config-writer.ts",
+    "default-rules.ts",
+    "denial-log.ts",
+    "settings-menu.ts",
+    "guardian-transport.ts",
+    "openai-codex-transport.ts",
+    "subagent-context.ts",
+    "loop-context.ts",
+    "loop-revise-budget.ts",
+    "evaluation-log.ts",
+    "gates.ts",
+    "override-evidence.ts",
+    "review.ts",
+    "review-queue.ts",
+    "session-environment.ts",
+    "standing-overrides.ts",
+    "usage-log.ts",
+    "widget-status.ts",
+    "classify.ts",
+    "prompt-select.ts",
+    "review-display.ts",
+    "review-scope.ts",
+    "session-overrides.ts",
+    "guardian-reviewer.ts",
+    "settings-command.ts",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "dependencies": {
+    "@hank-warren/pi-permission-selector": "^1.4.1"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  }
+}

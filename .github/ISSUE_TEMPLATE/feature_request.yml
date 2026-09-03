@@ -1,0 +1,34 @@
+name: Feature or package idea
+description: Suggest a change, or a new package
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the workflow you are trying to fix, not just the feature you have
+        in mind — that is usually what makes the right shape obvious.
+
+        Heads up: these packages track how I personally work, so a good idea can
+        still be declined as out of scope. If you are about to spend real effort,
+        ask here first.
+  - type: input
+    id: package
+    attributes:
+      label: Package
+      description: Which package, or "new package"?
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The workflow or friction behind the request.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like to see?
+      description: Optional. A rough sketch is fine.
+    validations:
+      required: false

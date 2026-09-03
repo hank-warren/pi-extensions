@@ -1,0 +1,72 @@
+name: ci
+
+# Full-repo pull request gate, unfiltered by path so scripts/ and docs changes get
+# CI signal too.
+#
+# Deliberately NOT run on push to main: publish.yml's `gate` job already runs npm
+# test and npm run scan-secrets on every main commit before anything can publish,
+# so a second ci run there only duplicated work on an identical tree. That job is outside publish.yml's concurrency group precisely
+# so it cannot be cancelled by a back-to-back merge.
+on:
+  pull_request:
+  workflow_dispatch:
+
+# One in-flight run per ref. Superseded pull request pushes are cancelled because
+# only the newest commit matters.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: gate (pinned pi)
+    runs-on: ubuntu-latest
+    # The whole gate runs in a couple of minutes; this only stops a hung install
+    # or a wedged pi self-test from burning the six-hour default.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # ubuntu-latest ships neither gitleaks nor ripgrep, so scripts/scan-secrets.sh
+      # had nothing to run: the old `if rg ...` form read rg's 127 as "no matches"
+      # and the scan reported ok without reading the tree. The script now hard-fails
+      # when no scanner is present, so the runner must provide one. Keep this in
+      # sync with publish.yml, which runs the same scan.
+      - name: Install ripgrep
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ripgrep
+          rg --version
+
+      - name: Install dependencies
+        run: npm ci
+
+      # scripts/test.sh shells out to `pi` for the package-discovery check.
+      # @earendil-works/pi-coding-agent is already a devDependency and ships a `pi`
+      # bin, so npm ci alone provides the CLI at the exact version the lockfile
+      # pins. No global install, no version drift.
+      - name: Put workspace binaries on PATH
+        run: echo "$PWD/node_modules/.bin" >>"$GITHUB_PATH"
+
+      - name: Verify pi CLI is available
+        run: |
+          set -euo pipefail
+          command -v pi
+          echo "pi version: $(pi --version)"
+
+      # npm test runs the typecheck itself (scripts/test.sh), so there is no
+      # separate Typecheck step here. Keep this in sync with publish.yml's gate.
+      - name: Test
+        run: npm test
+
+      - name: Scan secrets
+        run: npm run scan-secrets

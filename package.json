@@ -1,0 +1,56 @@
+{
+  "name": "@hank-warren/pi-extensions",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "description": "Native Pi package for Hank Warren workflows",
+  "keywords": [
+    "pi-package"
+  ],
+  "scripts": {
+    "validate": "python3 scripts/validate.py",
+    "test": "bash scripts/test.sh",
+    "test:unit": "node --import tsx --import ./test/support/hermetic.ts --test \"packages/*/test/*.test.ts\" \"test/*.test.ts\" \"docs/template-package/test/*.test.ts\" \"scripts/test/*.test.mjs\"",
+    "test:pkg": "node --import tsx --import ./test/support/hermetic.ts --test",
+    "test:smoke-load": "node scripts/smoke-load.mjs",
+    "demo:statusline-cache-wave": "node --import tsx scripts/demo-statusline-cache-wave.ts",
+    "demo:cache-flash-variants": "node --import tsx scripts/demo-cache-flash-variants.ts",
+    "demo:celebrations": "node --import tsx scripts/demo-statusline-celebrations.ts",
+    "typecheck": "tsc --noEmit",
+    "scan-secrets": "bash scripts/scan-secrets.sh",
+    "changeset": "changeset",
+    "version-packages": "changeset version && npm install --package-lock-only",
+    "publish-packages": "changeset publish"
+  },
+  "pi": {
+    "extensions": [
+      "./packages/pi-statusline/index.ts",
+      "./packages/pi-stats/index.ts",
+      "./packages/pi-auto-permissions/index.ts",
+      "./packages/pi-plan-mode/index.ts",
+      "./packages/pi-ask-user-question/index.ts",
+      "./packages/pi-multi-login/index.ts",
+      "./packages/pi-loop/index.ts",
+      "./packages/pi-stash/index.ts"
+    ],
+    "skills": [
+      "./packages/pi-auto-permissions/auto-permissions-setup",
+      "./packages/pi-simplify/simplify",
+      "./packages/pi-loop/skills/pi-loop",
+      "./packages/pi-plan-mode/skills/pi-plan-mode"
+    ]
+  },
+  "devDependencies": {
+    "@changesets/cli": "2.29.7",
+    "@earendil-works/pi-ai": "^0.84.0",
+    "@earendil-works/pi-coding-agent": "^0.84.0",
+    "@earendil-works/pi-tui": "^0.84.0",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.20.0",
+    "typebox": "1.1.38",
+    "typescript": "^5.9.0"
+  }
+}

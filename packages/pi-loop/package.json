@@ -1,0 +1,54 @@
+{
+  "name": "@hank-warren/pi-loop",
+  "version": "1.1.0",
+  "description": "Long-running work for Pi: settle-paced loops with a durable ledger, adaptive waits, no-progress breakers, evidence-gated completion, and a task scheduler.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "loop",
+    "scheduler",
+    "cron",
+    "automation"
+  ],
+  "author": "Hank Warren",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hank-warren/pi-extensions.git",
+    "directory": "packages/pi-loop"
+  },
+  "bugs": {
+    "url": "https://github.com/hank-warren/pi-extensions/issues"
+  },
+  "homepage": "https://github.com/hank-warren/pi-extensions/tree/main/packages/pi-loop#readme",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [
+      "./skills/pi-loop"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "src",
+    "skills",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "dependencies": {
+    "@narumitw/pi-tui-kit": "^0.49.3"
+  }
+}

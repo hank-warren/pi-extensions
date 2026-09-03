@@ -1,0 +1,52 @@
+{
+  "name": "@hank-warren/pi-statusline",
+  "version": "0.7.3",
+  "description": "Compact Pi footer statusline with Git/worktree context, token usage, and neon celebrations for exceptional prompt-cache hits.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "statusline",
+    "footer",
+    "git",
+    "coding-agent"
+  ],
+  "author": "Hank Warren",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hank-warren/pi-extensions.git",
+    "directory": "packages/pi-statusline"
+  },
+  "bugs": {
+    "url": "https://github.com/hank-warren/pi-extensions/issues"
+  },
+  "homepage": "https://github.com/hank-warren/pi-extensions/tree/main/packages/pi-statusline#readme",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "cache-celebration.ts",
+    "celebration-preview.ts",
+    "celebration-styles.ts",
+    "redraw.ts",
+    "settings.ts",
+    "settings-menu.ts",
+    "themes.ts",
+    "usage.ts",
+    "worktrees.ts",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}
