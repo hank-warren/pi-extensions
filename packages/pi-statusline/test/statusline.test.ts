@@ -271,6 +271,9 @@ test("each disabled element removes exactly its segment, never a stray separator
 		showDirectory: ["gpt-5.6-sol | 40k/1.0m | \uec81 80", "⑂ infrastructure:fix/alerts #9", "session-id"],
 		showContext: ["gpt-5.6-sol | pi-extensions:main | \uec81 80", "⑂ infrastructure:fix/alerts #9", "session-id"],
 		showUsage: ["gpt-5.6-sol | pi-extensions:main | 40k/1.0m", "⑂ infrastructure:fix/alerts #9", "session-id"],
+		// No custom values in this fixture, so hiding them changes nothing; the
+		// custom-item render tests cover the segment itself.
+		showCustomItems: full,
 		showWorktrees: ["gpt-5.6-sol | pi-extensions:main | 40k/1.0m | \uec81 80", "session-id"],
 		showSessionId: [
 			"gpt-5.6-sol | pi-extensions:main | 40k/1.0m | \uec81 80",

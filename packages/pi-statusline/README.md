@@ -10,7 +10,7 @@ gpt-5.6-sol | pi-extensions:main* ⇣1 | 40k/1.0m |  97·54  80
 
 ## What it shows
 
-- **Line 1** — active model ID, optionally the provider of that model, current directory basename and Git branch, current context usage/window, and subscription usage headroom (see below). A yellow `*` marks a dirty checkout and `⇣N` shows how many commits it is behind its locally known upstream ref. Unknown context usage is rendered as `?/<window>` until Pi can provide an estimate. Exceptional prompt-cache hits trigger the celebration described below.
+- **Line 1** — active model ID, optionally the provider of that model, current directory basename and Git branch, current context usage/window, subscription usage headroom (see below), and any [custom items](#custom-items) you configure. A yellow `*` marks a dirty checkout and `⇣N` shows how many commits it is behind its locally known upstream ref. Unknown context usage is rendered as `?/<window>` until Pi can provide an estimate. Exceptional prompt-cache hits trigger the celebration described below.
 - **Worktree lines** — when the session works in or sends tool calls into linked worktrees, one line shows the same branch/dirty/behind state for each worktree plus its associated PR number.
 - **Final line** — the full Pi session ID.
 
@@ -22,6 +22,7 @@ Colors come from a selectable [theme](#themes), with context warning thresholds.
 
 - **Theme** — the color palette, cycled with Enter or Space. See [Themes](#themes).
 - **Cache celebration** — `off` or one of five badge animations, cycled with Enter or Space and previewed live in the statusline below. See [Animation styles](#animation-styles).
+- **Custom items** — `on`/`off` for the whole custom-item segment, and **Custom item list** below the alias row enables or disables each configured item and shows what it is currently doing. See [Custom items](#custom-items).
 - **Model**, **Provider**, **Directory & git**, **Context**, **Subscription usage**, **Worktree line**, **Session ID line** — `on`/`off`, cycled with Enter or Space. **Provider** is the only one that starts `off`; it shows the provider id exactly as Pi reports it, so a [pi-multi-login](../pi-multi-login) alias renders as `anthropic-team` and names the login actually spending — something a model id like `claude-opus-5` never carries. With no model, or a model reporting no provider, the segment is simply absent. Disabled segments are dropped from line 1 without leaving a stray ` | ` separator; hiding the worktree line also stops its `git`/`gh` polling, and hiding usage stops the usage poller. With every element off the footer collapses to a single blank row.
 - **Worktree root** — the directory whose immediate children are tracked as session worktrees (default `~/repos/worktrees`). `~` and `$HOME` are expanded; a relative path is rejected and the previous value kept.
 - **Repo aliases** — short display names for repositories on the worktree line. Enter edits the selected `repo → alias` pair, `d` deletes it, and `Add alias…` creates one from a `repo=alias` line.
@@ -100,6 +101,162 @@ Cache entries stay compatible in both directions: a Codex entry written by a sta
 An account answering `429` is parked for fifteen minutes (tracked per account, so a rate-limited Anthropic never stops codex from updating) and stops counting as pending, since retrying harder is what earns the rate limit in the first place. Every cache entry is keyed to a fingerprint (a sha256 prefix, never the token itself) of the credential that fetched it: switching accounts — or rotating a token — discards that entry's numbers and backoff and polls immediately, so an exhausted old account's meters never masquerade as the new account's. A logged-out account fails the same check, so the file garbage-collects itself.
 
 Requires a Nerd Font new enough to include the codicon brand glyphs (v3.5.0+); older fonts render them as replacement boxes.
+
+## Custom items
+
+Everything above is built in. **Custom items** are the escape hatch: each one runs a shell command, and its output becomes a segment on line 1, after the usage meters and before the worktree line. This is how a personal metric — a self-hosted quota pool, a deploy status, an on-call flag — gets onto the statusline without being packaged for everybody else.
+
+The contract is deliberately [Claude Code's status line](https://docs.claude.com/en/docs/claude-code/statusline) contract: a command, JSON about the session on **stdin**, one line on **stdout**, ANSI colors passed through. A script written for Claude Code runs here mostly unchanged (see [differences](#differences-from-claude-codes-status-line)).
+
+There is no default item, and with an empty list the feature costs nothing: no process is spawned and no timer runs.
+
+### Configuring one
+
+Items live under `customItems` in `~/.pi/agent/statusline-settings.json`. The file is not created for you until a setting is changed, so write it if it is absent:
+
+```json
+{
+  "customItems": [
+    {
+      "id": "cpa",
+      "command": "~/bin/cpa-quota --statusline",
+      "refreshInterval": 60,
+      "timeout": 5
+    }
+  ]
+}
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `command` | yes | Shell command line. Run through `sh -c` (`cmd /d /s /c` on Windows), so pipes, `$VARS`, and `~` work. |
+| `id` | no | Stable name, used by the `/statusline` submenu and in error messages. Defaults to `item-1`, `item-2`, …; duplicates get a `#2` suffix. |
+| `refreshInterval` | no | Seconds between forced re-runs, on top of the event-driven ones. Omit for event-driven only. |
+| `timeout` | no | Seconds before the command is killed. Default `5`, capped at `30`. |
+| `enabled` | no | `false` hides the item and stops it running. This is the one field `/statusline` writes. |
+| `type` | no | `"command"`, the only supported kind. Any other value is preserved but not run. |
+
+Items render in configuration order, each as its own ` | `-separated segment.
+
+### When a command runs
+
+- at session start,
+- at the end of every turn,
+- every `refreshInterval` seconds, if set.
+
+A run is skipped while that item's previous run is still going, so a slow command degrades to a lower refresh rate instead of piling up processes. Two runs of the same item are never closer than one second, whatever triggers them. The timer only exists if some enabled item asked for one, ticks at the shortest interval among them, and is `unref`ed and stopped with the footer — turning **Custom items** off in `/statusline` stops all of it.
+
+Use `refreshInterval` for anything whose value moves on a wall clock rather than on your turns: a quota pool refills while you are reading a diff, and an idle session would otherwise show the number from your last turn.
+
+### What the command receives
+
+One JSON object on stdin, and `COLUMNS` in the environment (the footer's current width, exactly as Claude Code provides it):
+
+```json
+{
+  "version": 1,
+  "session_id": "019fafa7-29c0-7e99-9f82-5794d5721848",
+  "cwd": "/home/hank/repos/pi-extensions",
+  "model": { "id": "gpt-5.6-sol", "provider": "openai-codex" },
+  "git": { "branch": "main", "dirty": false, "behind": 0 },
+  "context_window": { "used_tokens": 40000, "context_window_size": 1000000, "used_percentage": 4 },
+  "usage_remaining": {
+    "claude": { "five_hour": 97, "seven_day": 54, "scoped_weekly": 24 },
+    "codex": { "five_hour": 92, "weekly": 99 }
+  }
+}
+```
+
+`git` is `null` outside a repository, `usage_remaining.claude` / `.codex` are `null` without credentials for that provider, and `context_window.used_tokens` is `null` before Pi can estimate it. Handle absence rather than assuming a field.
+
+### What the command should print
+
+The **first line of stdout** becomes the segment. Anything after it is ignored — this is a segment on a shared line, not a row the item owns.
+
+- **Colors work.** SGR escapes (`\033[32m`) pass through. Every other escape sequence is stripped, because a cursor move or an erase-line would corrupt the frame the footer is drawn into. Control characters go too, and tabs become spaces.
+- **Print nothing to hide.** Empty output is a valid answer, not a failure: it is how an item shows itself only when it has something to say.
+- **Output is capped** at 120 characters before the statusline's own truncation.
+- **Exit non-zero to signal failure.** The first line of stderr is kept and shown in `/statusline`.
+
+### When a command fails
+
+Failures never reach the agent — the statusline is best-effort and stays silent. A failing item keeps its last good value for up to three consecutive failures, then drops it. That grace is deliberate in both directions: one blip (a laptop between networks) should not blank a working display, and a value that has quietly gone stale is worse than an empty slot, because the number stays plausible while describing a world that has moved on.
+
+To see what an item is doing, open `/statusline` → **Custom item list**. Each row shows its current value, or why there isn't one: `disabled`, `missing command`, `exit 3: …`, `timed out after 5s`, `empty output`, or `no value yet`. Enter toggles an item on or off; commands themselves are edited in the file.
+
+### Keep it fast
+
+The command runs on the footer's schedule, so treat it like a prompt segment. Do slow work elsewhere — a systemd timer, a cron job, a background daemon — and let the item read the result:
+
+```json
+{ "id": "quota", "command": "cat /run/user/1000/quota.txt 2>/dev/null", "refreshInterval": 30 }
+```
+
+If the item must do the work itself, cache it keyed by `session_id` from the payload (a PID changes every run and defeats the cache).
+
+### Examples
+
+A clock, the smallest possible item:
+
+```json
+{ "id": "clock", "command": "date +%H:%M", "refreshInterval": 30 }
+```
+
+Kubernetes context, colored, hidden when unset:
+
+```json
+{ "id": "k8s", "command": "kubectl config current-context 2>/dev/null | sed 's/.*/\\x1b[35m&\\x1b[0m/'", "refreshInterval": 300 }
+```
+
+Pooled subscription headroom across several accounts behind a self-hosted gateway — the case this feature was built for, where the built-in meters cannot help because they read *this* session's credential, not a round-robin pool:
+
+```bash
+#!/usr/bin/env bash
+# ~/bin/cpa-quota --statusline
+curl -sf -m 3 -H "Authorization: Bearer $CPAMP_ADMIN_KEY" \
+  "$CPAMP_URL/v0/management/auth-files" |
+  jq -r '[.files[] | select(.disabled != true) | .quota.signals]
+         | map(select(."X-Codex-Primary-Used-Percent"))
+         | if length == 0 then empty else
+             "\u001b[36mcpa\u001b[0m " +
+             (map(100 - (."X-Codex-Primary-Used-Percent"|tonumber)) | add / length | floor | tostring) + "/" +
+             (map(100 - (."X-Codex-Secondary-Used-Percent"|tonumber)) | add / length | floor | tostring)
+           end'
+```
+
+Using the session payload — warn only when this session's model is on a nearly exhausted account:
+
+```json
+{ "id": "low", "command": "jq -r '.usage_remaining.codex.five_hour // 100 | if . < 15 then \"\\u001b[31mLOW \\(.)%\\u001b[0m\" else empty end'" }
+```
+
+### Testing an item
+
+The command is an ordinary program, so run it the way the statusline does:
+
+```bash
+echo '{"model":{"id":"gpt-5.6-sol"},"usage_remaining":{"codex":{"five_hour":22,"weekly":55}}}' \
+  | COLUMNS=120 sh -c '~/bin/cpa-quota --statusline'
+```
+
+If that prints one short line, the item will render.
+
+### Differences from Claude Code's status line
+
+| | Claude Code | pi-statusline |
+|---|---|---|
+| Scope | one command owns the whole status line | many items, each a segment after the built-in ones |
+| Config | `statusLine` object in `settings.json` | `customItems` array in `statusline-settings.json` |
+| Multi-line output | each line becomes a row | only the first line is used |
+| Rate-limit fields | `rate_limits.*.used_percentage` | `usage_remaining.*` — **remaining**, the inverse |
+| Refresh | every assistant message, 300 ms debounce | session start, turn end, optional `refreshInterval` |
+| Width | `COLUMNS` and `LINES` | `COLUMNS` |
+
+The naming of `usage_remaining` is the one difference worth checking when porting: reading a *remaining* percentage as a *used* one silently inverts the meaning, and a green bar that means "nearly out" is worse than no bar.
+
+### A note on trust
+
+An item is a command that runs automatically in every TUI session, so `customItems` is executable configuration, exactly like Claude Code's `statusLine` or a shell rc file. Write there is code execution: keep `~/.pi/agent/statusline-settings.json` under your own account (Pi writes it `0600`), and treat an item copied from the internet with the same suspicion as a shell script from the internet.
 
 ## Cache-hit celebration
 

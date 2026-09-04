@@ -14,12 +14,14 @@ import {
 } from "./cache-celebration.ts";
 import { CelebrationPreview, trackSelectedLabel } from "./celebration-preview.ts";
 import { DEFAULT_CELEBRATION_STYLE, renderCacheBadge } from "./celebration-styles.ts";
+import { CustomItemsTracker } from "./custom.ts";
 import { FullRedrawScheduler } from "./redraw.ts";
 import {
 	applySettingChange,
 	buildSettingItems,
 	CACHE_CELEBRATION_LABEL,
 	createAliasSubmenu,
+	createCustomItemsSubmenu,
 	createWorktreeRootSubmenu,
 } from "./settings-menu.ts";
 import {
@@ -50,6 +52,8 @@ export interface StatuslineData {
 	sessionId: string;
 	cacheCelebration?: CacheCelebrationSnapshot;
 	usage?: UsageSnapshot;
+	/** Rendered output of each enabled custom item, in configuration order. */
+	customValues?: string[];
 }
 
 const RESET = "\x1b[0m";
@@ -177,6 +181,10 @@ export function renderStatusline(
 					formatTokenCount(data.contextTokens),
 				);
 	const usageSegment = settings.showUsage && data.usage ? renderUsageSegment(data.usage, palette) : undefined;
+	// Custom items own their own colours, so they are passed through unstyled;
+	// they sit after the usage meters, which is where the built-in segments stop
+	// and anything the user added begins.
+	const customSegments = settings.showCustomItems ? (data.customValues ?? []).filter((value) => value.length > 0) : [];
 	const segments = [
 		settings.showModel ? styled(palette.model, data.model) : undefined,
 		// No provider is a missing segment, not a placeholder: the model id already
@@ -191,6 +199,7 @@ export function renderStatusline(
 			? `${used}${styled(palette.dim, "/")}${styled(palette.text, formatTokenCount(data.contextWindow))}`
 			: undefined,
 		usageSegment,
+		...customSegments,
 	].filter((segment): segment is string => segment !== undefined);
 
 	const showWorktreeLine = settings.showWorktrees && data.worktrees.length > 0;
@@ -227,6 +236,7 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 	const cacheCelebration = new CacheCelebrationController(() => requestRender?.());
 	let tracker: SessionWorktreeTracker | undefined;
 	const usageTracker = new UsageTracker({ onChange: () => requestRender?.() });
+	const customItems = new CustomItemsTracker({ onChange: () => requestRender?.() });
 	let cwdGit: GitRepositoryStatus | null = null;
 	let cwdStatusAbort: AbortController | undefined;
 	let cwdStatusInFlight: Promise<void> | undefined;
@@ -267,6 +277,48 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 		return refresh;
 	};
 
+	/**
+	 * The JSON handed to every custom command on stdin.
+	 *
+	 * Field names follow Claude Code's statusline payload where the two agents
+	 * describe the same thing, so a script written for it needs no rewrite. The
+	 * exception is deliberate: pi's meters are *remaining* headroom, the inverse
+	 * of Claude Code's `rate_limits.*.used_percentage`, so those fields live
+	 * under `usage_remaining` where a ported script cannot read them by accident.
+	 */
+	const customPayload = (ctx: ExtensionContext): Record<string, unknown> => {
+		const context = ctx.getContextUsage();
+		const window = context?.contextWindow ?? ctx.model?.contextWindow ?? 0;
+		const tokens = context?.tokens ?? null;
+		const usage = usageTracker.snapshot();
+		return {
+			version: 1,
+			session_id: ctx.sessionManager.getSessionId(),
+			cwd: ctx.cwd,
+			model: { id: ctx.model?.id ?? null, provider: ctx.model?.provider ?? null },
+			git: cwdGit
+				? { branch: cwdGit.branch, dirty: cwdGit.dirty, behind: cwdGit.behind }
+				: null,
+			context_window: {
+				used_tokens: tokens,
+				context_window_size: window,
+				used_percentage: tokens !== null && window > 0 ? Math.round((tokens * 100) / window) : null,
+			},
+			usage_remaining: {
+				claude: usage.claude
+					? {
+							five_hour: usage.claude.fiveHour,
+							seven_day: usage.claude.sevenDay,
+							scoped_weekly: usage.claude.scopedWeekly ?? null,
+						}
+					: null,
+				codex: usage.codex
+					? { five_hour: usage.codex.fiveHour ?? null, weekly: usage.codex.weekly ?? null }
+					: null,
+			},
+		};
+	};
+
 	const resetTracker = (ctx: ExtensionContext): void => {
 		tracker?.dispose();
 		tracker = undefined;
@@ -279,6 +331,9 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 			usageTracker.setActiveProvider(ctx.model?.provider);
 			runInBackground(usageTracker.refresh());
 		}
+		customItems.setContext({ cwd: ctx.cwd });
+		customItems.setPayloadFactory(() => customPayload(ctx));
+		if (settings.showCustomItems) customItems.refresh();
 		// A hidden worktree line must not pay for git/gh polling.
 		if (!settings.showWorktrees) return;
 		const next = new SessionWorktreeTracker({
@@ -297,6 +352,18 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 		const previous = settings;
 		settings = next;
 		settingsStore.set(next);
+
+		// Items are adopted before the visibility check so a disabled segment
+		// still shows current config in the submenu; nothing runs while it is off.
+		customItems.setItems(next.customItems);
+		if (next.showCustomItems) {
+			customItems.restartTimer();
+			customItems.start();
+			customItems.refresh();
+		} else if (previous.showCustomItems) {
+			// A hidden segment must not keep spawning commands, matching usage above.
+			customItems.stop();
+		}
 
 		if (!next.showWorktrees) {
 			tracker?.dispose();
@@ -347,6 +414,7 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 				const settingsTheme = tracked.theme;
 				const submenuHost = {
 					getSettings: () => settings,
+					customItemStates: () => customItems.states(),
 					commit: (next: StatuslineSettings) => applySettings(ctx, next),
 					notify: (message: string) => ctx.ui.notify(message, "warning"),
 					requestRender: () => tui.requestRender(),
@@ -360,6 +428,7 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 						{
 							worktreeRoot: createWorktreeRootSubmenu(submenuHost),
 							repoAliases: createAliasSubmenu(submenuHost),
+							customItems: createCustomItemsSubmenu(submenuHost),
 						},
 						home,
 					),
@@ -416,6 +485,7 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 			// still needs them to move, and a sibling process's poll is worth adopting
 			// before the next turn ends.
 			if (settings.showUsage) usageTracker.start();
+			if (settings.showCustomItems) customItems.start();
 			const stopBranchUpdates = footerData.onBranchChange(() => {
 				runInBackground(refreshCwdStatus(ctx));
 				tui.requestRender();
@@ -428,6 +498,7 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 					celebrationPreview.dispose();
 					fullRedraw.detach();
 					usageTracker.stop();
+					customItems.dispose();
 					requestRender = undefined;
 				},
 				invalidate(): void {},
@@ -435,6 +506,9 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 					const usage = ctx.getContextUsage();
 					const cwd = basename(ctx.cwd) || ctx.cwd;
 					const model = ctx.model?.id.split("/").pop() || "no-model";
+					// Commands size themselves with COLUMNS, so the tracker needs the
+					// width the footer is actually being drawn at.
+					customItems.setContext({ columns: width });
 
 					return fullRedraw.decorate(
 						renderStatusline(
@@ -449,6 +523,7 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 								sessionId: ctx.sessionManager.getSessionId(),
 								cacheCelebration: celebrationPreview.snapshot() ?? cacheCelebration.snapshot(),
 								usage: usageTracker.snapshot(),
+								customValues: customItems.values(),
 							},
 							width,
 							settings,
@@ -476,6 +551,9 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 			usageTracker.setActiveProvider(ctx.model?.provider);
 			runInBackground(usageTracker.refresh());
 		}
+		// Turn end is the event-driven trigger, mirroring how Claude Code re-runs a
+		// statusline command when a new assistant message arrives.
+		if (settings.showCustomItems) customItems.refresh();
 	});
 	// The meters follow the main model's account, so a switch between two logins
 	// of the same provider family has to re-point the tracker before it repaints.
@@ -491,6 +569,7 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 		cacheCelebration.dispose();
 		fullRedraw.detach();
 		usageTracker.stop();
+		customItems.dispose();
 		tracker?.dispose();
 		tracker = undefined;
 		cwdStatusAbort?.abort();
