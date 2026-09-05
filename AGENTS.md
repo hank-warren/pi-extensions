@@ -15,6 +15,7 @@ packages/                      # public, npm-published pi packages
   pi-plan-mode/                # Plan mode + Auto Permissions integration
   pi-ask-user-question/        # structured questionnaire tool (numbered options, multi-select)
   pi-simplify/                 # skill-only package: single-agent simplify skill (no extension code)
+  pi-orchestrator/             # skill-only package: supervise pi sessions in Herdr panes (replaces pi-loop)
   pi-multi-login/              # additional OAuth logins for built-in providers (/multi-login)
   pi-loop/                     # deprecated: /loop long-running work (published, tested, not in the aggregate)
   pi-stash/                    # park an unsent prompt with Ctrl+S and restore it

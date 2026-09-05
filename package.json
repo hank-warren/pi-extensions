@@ -37,7 +37,8 @@
     ],
     "skills": [
       "./packages/pi-auto-permissions/auto-permissions-setup",
-      "./packages/pi-simplify/simplify"
+      "./packages/pi-simplify/simplify",
+      "./packages/pi-orchestrator/pi-orchestrator"
     ]
   },
   "devDependencies": {

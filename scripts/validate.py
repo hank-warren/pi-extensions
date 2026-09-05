@@ -22,7 +22,7 @@ EXPECTED_EXTENSION_ENTRYPOINTS = [
 # Deprecated packages stay in PUBLIC_PACKAGES (published, tested, packable)
 # but are left out of the aggregate above, so a git install of this repository
 # no longer loads them. pi-loop is deprecated in favour of the pi-orchestrator
-# skill: a supervising session watching real pi sessions in Herdr panes does
+# skill package: a supervising session watching real pi sessions in Herdr panes does
 # by judgment what the loop engine did by pacing and gates.
 DEPRECATED_PACKAGES = {"packages/pi-loop"}
 # Public resources must live in inventoried packages: a top-level extensions/
@@ -40,7 +40,7 @@ LIBRARY_PACKAGES = {"packages/pi-permission-selector"}
 # a SKILL.md whose frontmatter name matches the directory name, and the root
 # manifest must re-export every skill path so the aggregate git install loads
 # them.
-SKILL_PACKAGES = {"packages/pi-simplify"}
+SKILL_PACKAGES = {"packages/pi-simplify", "packages/pi-orchestrator"}
 # Hybrid packages: an extension *and* the skills that document how to drive it.
 # They version together on purpose — a skill describing an engine the installed
 # extension does not have is a coupling failure waiting to happen. Their `pi`
@@ -65,6 +65,7 @@ PUBLIC_PACKAGES = {
     "packages/pi-plan-mode": "@hank-warren/pi-plan-mode",
     "packages/pi-ask-user-question": "@hank-warren/pi-ask-user-question",
     "packages/pi-simplify": "@hank-warren/pi-simplify",
+    "packages/pi-orchestrator": "@hank-warren/pi-orchestrator",
     "packages/pi-multi-login": "@hank-warren/pi-multi-login",
     "packages/pi-loop": "@hank-warren/pi-loop",
     "packages/pi-stash": "@hank-warren/pi-stash",
