@@ -17,9 +17,14 @@ EXPECTED_EXTENSION_ENTRYPOINTS = [
     "./packages/pi-plan-mode/index.ts",
     "./packages/pi-ask-user-question/index.ts",
     "./packages/pi-multi-login/index.ts",
-    "./packages/pi-loop/index.ts",
     "./packages/pi-stash/index.ts",
 ]
+# Deprecated packages stay in PUBLIC_PACKAGES (published, tested, packable)
+# but are left out of the aggregate above, so a git install of this repository
+# no longer loads them. pi-loop is deprecated in favour of the pi-orchestrator
+# skill: a supervising session watching real pi sessions in Herdr panes does
+# by judgment what the loop engine did by pacing and gates.
+DEPRECATED_PACKAGES = {"packages/pi-loop"}
 # Public resources must live in inventoried packages: a top-level extensions/
 # or skills/ directory would bypass package validation and ship through the
 # aggregate repository install. Skill and hybrid *packages* are different:
@@ -187,6 +192,15 @@ def main() -> int:
     pi_manifest = manifest.get("pi", {})
     if pi_manifest.get("extensions") != EXPECTED_EXTENSION_ENTRYPOINTS:
         errors.append("package.json: pi.extensions must expose all expected entrypoints")
+    for rel_dir in sorted(DEPRECATED_PACKAGES):
+        if rel_dir not in PUBLIC_PACKAGES:
+            errors.append(f"{rel_dir}: deprecated package must still be in PUBLIC_PACKAGES")
+        entry = f"./{rel_dir}/index.ts"
+        if entry in EXPECTED_EXTENSION_ENTRYPOINTS or entry in pi_manifest.get("extensions", []):
+            errors.append(f"{rel_dir}: deprecated package must not be in the aggregate")
+        readme = ROOT / rel_dir / "README.md"
+        if not (readme.is_file() and "**Deprecated.**" in readme.read_text(encoding="utf-8")):
+            errors.append(f"{rel_dir}: deprecated package README must open with a **Deprecated.** block")
     if set(pi_manifest) != {"extensions", "skills"}:
         errors.append("package.json: pi manifest may expose only extensions and skills")
     for name in FORBIDDEN_DIRS:

@@ -16,7 +16,7 @@ packages/                      # public, npm-published pi packages
   pi-ask-user-question/        # structured questionnaire tool (numbered options, multi-select)
   pi-simplify/                 # skill-only package: single-agent simplify skill (no extension code)
   pi-multi-login/              # additional OAuth logins for built-in providers (/multi-login)
-  pi-loop/                     # /loop long-running work: planning, ledger, settle-paced continuations
+  pi-loop/                     # deprecated: /loop long-running work (published, tested, not in the aggregate)
   pi-stash/                    # park an unsent prompt with Ctrl+S and restore it
 docs/                          # template-package/ (copy-to-create package skeleton)
 scripts/                       # validate.py, test.sh, scan-secrets.sh, smoke-load.mjs, create-releases.sh
@@ -123,6 +123,8 @@ The workflows are split so each run has a distinct job — a release costs exact
 
 Changes that touch only `scripts/` or docs do not need a changeset.
 
+A **deprecated** package (`DEPRECATED_PACKAGES` in `scripts/validate.py`; currently `pi-loop`) stays in `PUBLIC_PACKAGES`, the workspace, the test glob and on npm, but is removed from the root `pi.extensions` aggregate and from `EXPECTED_SURFACES` in `scripts/smoke-load.mjs`, so a git install of this repository stops loading it. Its README carries a deprecation block naming the replacement. Do not delete a deprecated package's directory: npm keeps the last version either way, and the source is what lets a bug report against it be answered.
+
 `changeset publish` skips any version already on npm, so re-runs are safe. The `workflow_dispatch` trigger re-drives a publish that failed on infrastructure rather than package content, and also recovers a run that went red on the version-commit push race.
 
 Manual fallback (logged-in `hank-warren` npm account; 2FA is a passkey, so use an interactive terminal): `npm publish --access public` from the package directory. CI skips versions that already exist, so a manual publish never conflicts with the workflow.
@@ -166,6 +168,8 @@ Unit tests here mock `ExtensionAPI`, so they pin what the extension *asks* Pi to
 # a scratch agent dir so the canary can never write real settings or sessions
 PI_CODING_AGENT_DIR=$(mktemp -d) pi -ne -e .
 ```
+
+The checklist below was written for pi-loop and is kept as the worked example of what a canary has to cover — every step is a state a mock cannot reach. pi-loop is deprecated and out of the aggregate, so run it with `-e ./packages/pi-loop` explicitly when the loop package itself is being released; for any other package, write the equivalent list of states before canarying, not after.
 
 In that session, with pi-loop loaded:
 

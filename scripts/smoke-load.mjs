@@ -82,25 +82,6 @@ const EXPECTED_SURFACES = {
 		commands: ["multi-login"],
 		handlers: ["session_start"],
 	},
-	// Timers are armed only in session_start or the command handler, never at
-	// load. The input handler arms the one-turn inline-invocation hint that
-	// before_agent_start appends; loop_start is the model-invoked start it
-	// points at, refused on any turn the hint did not arm.
-	"./packages/pi-loop/index.ts": {
-		// No loop_start: a loop is started by the user approving a card, never by
-		// a tool. No `input` handler either — it existed only to arm the inline
-		// invocation that tool served.
-		tools: ["loop_complete", "loop_progress", "loop_propose", "loop_wait"],
-		commands: ["loop"],
-		handlers: [
-			"agent_end",
-			"agent_start",
-			"agent_settled",
-			"before_agent_start",
-			"session_shutdown",
-			"session_start",
-		],
-	},
 	// One shortcut and nothing else: no tool, no command, no session hook. The
 	// stash list lives in the extension instance, so there is nothing to persist
 	// or restore and no lifecycle to observe.

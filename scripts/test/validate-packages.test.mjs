@@ -278,3 +278,19 @@ test("shared test support importing node and pi modules is allowed", () => {
   });
   assert.equal(result.status, 0, result.stderr);
 });
+
+test("a deprecated package is out of the aggregate but still published and documented", () => {
+  const backIn = validate(({ read, write }) => {
+    const root = read("package.json");
+    root.pi.extensions = [...root.pi.extensions, "./packages/pi-loop/index.ts"];
+    write("package.json", root);
+  });
+  assert.equal(backIn.status, 1);
+  assert.match(backIn.stderr, /pi-loop: deprecated package must not be in the aggregate/);
+
+  const undocumented = validate(({ replace }) =>
+    replace("packages/pi-loop/README.md", "> **Deprecated.**", "> Note:"),
+  );
+  assert.equal(undocumented.status, 1);
+  assert.match(undocumented.stderr, /README must open with a \*\*Deprecated\.\*\* block/);
+});
