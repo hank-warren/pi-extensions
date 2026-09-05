@@ -17,6 +17,7 @@
  * gone: both authored an acceptance gate in one line, unreviewed.
  */
 
+import { LOOP_CRAFT_DOC } from "./docs.js";
 import { deriveCriteria, type LoopCriterion } from "./ledger.js";
 import { formatDuration } from "./interval.js";
 
@@ -132,7 +133,7 @@ export function renderProposalCard(proposal: LoopProposal): string[] {
 export const LOOP_PLANNING_HINT = [
 	"<system-reminder>",
 	"The user opened loop planning. You are drafting a loop with them; no loop is running and none starts until they approve one on the card.",
-	"Read the pi-loop skill before drafting if it is available: it carries the objective, criteria, cadence and evidence craft in depth.",
+	`Before drafting, read ${LOOP_CRAFT_DOC}: it carries the objective, criteria, cadence and evidence craft in depth.`,
 	"Cover three things in the conversation, then call loop_propose:",
 	"- The objective, written as an acceptance test. One requirement per bullet; a conjunction inside a sentence does not split, so 'fix the flaky test and update the docs' becomes one criterion whose evidence must cover both halves. Name the check in the requirement itself ('…, verified by npm test passing'). The two questions that fix most objectives: how will we know it is done, and what command proves it?",
 	"- The cadence: how long the loop may run before it expires, and the fallback heartbeat for a session that goes quiet. The loop advances whenever the session settles, so the heartbeat only matters when it is waiting on something.",

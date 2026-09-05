@@ -41,11 +41,17 @@ SKILL_PACKAGES = {"packages/pi-simplify"}
 # extension does not have is a coupling failure waiting to happen. Their `pi`
 # manifest exposes both keys, and their skills re-export from the root manifest
 # exactly like a skill package's.
-HYBRID_PACKAGES = {
-    "packages/pi-auto-permissions",
-    "packages/pi-loop",
-    "packages/pi-plan-mode",
-}
+#
+# A skill earns its always-on description line only when the model should act
+# on it in sessions where nothing has been invoked yet. `auto-permissions-setup`
+# does: the user asks for it by name. pi-loop and pi-plan-mode used to be here
+# and were moved off: ~220 sessions showed every read of their skill files was
+# triggered by the mode's own prompt, never by the description, so the line
+# was a tax on every session that never entered the mode. Their craft docs now
+# ship as plain markdown under `docs/` and the mode prompt injects the absolute
+# path. Do not re-add a package here on the theory that the description will
+# help; add it when a session shows the model acting on it unprompted.
+HYBRID_PACKAGES = {"packages/pi-auto-permissions"}
 PUBLIC_PACKAGES = {
     "packages/pi-statusline": "@hank-warren/pi-statusline",
     "packages/pi-stats": "@hank-warren/pi-stats",

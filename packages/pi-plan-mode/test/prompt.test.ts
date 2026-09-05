@@ -8,10 +8,13 @@
  */
 
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import test from "node:test";
 import {
 	ASK_USER_QUESTION_TOOL,
 	buildPlanModePrompt,
+	PLAN_CRAFT_DOC,
 	PLAN_MODE_QUESTION_TOOL,
 } from "../src/prompt.js";
 
@@ -70,5 +73,19 @@ test("everything outside the question-tool references is identical between modes
 	);
 	for (const line of ["## Completion rule", "## Ending each turn", "[PLAN MODE ACTIVE]"]) {
 		assert.ok(preferred.includes(line), `${line} must survive the rewrite`);
+	}
+});
+
+test("the prompt points at the plan-craft doc, once, by absolute path", () => {
+	// The doc replaced a skill: a skill's description line was paid by every
+	// session and observed to trigger nothing, where a pointer injected only
+	// while Plan Mode is active costs nothing outside it. The pointer has to be
+	// a real absolute path, because "read the X skill if it is available" gave
+	// the model a way to skip it.
+	assert.ok(isAbsolute(PLAN_CRAFT_DOC));
+	assert.ok(existsSync(PLAN_CRAFT_DOC), `${PLAN_CRAFT_DOC} is not shipped`);
+	for (const tool of [null, PLAN_MODE_QUESTION_TOOL, ASK_USER_QUESTION_TOOL]) {
+		const prompt = buildPlanModePrompt(tool);
+		assert.ok(prompt.includes(`read ${PLAN_CRAFT_DOC}`));
 	}
 });

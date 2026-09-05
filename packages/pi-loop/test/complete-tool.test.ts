@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { existsSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import { auditEvidence, LOOP_COMPLETE_TOOL, registerLoopCompleteTool } from "../src/complete-tool.js";
+import { LOOP_CRAFT_DOC } from "../src/docs.js";
 import type { LoopCriterion } from "../src/ledger.js";
 import type { LoopController } from "../src/loop.js";
 import type { LoopState } from "../src/state.js";
@@ -176,12 +179,16 @@ test("an already-stopped loop is not completed twice", async () => {
 	assert.match(result.content[0]?.text ?? "", /already stopped/);
 });
 
-test("a guideline points at the pi-loop skill for what the gate accepts", () => {
+test("a guideline points at the loop-craft doc by absolute path", () => {
 	// The refusal rules are mechanical and live in the tool; what counts as a
-	// citation is judgment, loaded on demand from the companion skill. The tool
+	// citation is judgment, loaded on demand from the shipped doc. The tool
 	// itself is staged — absent from a session that never runs a loop — so this
-	// guidance costs nothing until there is a loop to complete.
+	// guidance costs nothing until there is a loop to complete. The path is
+	// absolute and real so the model can `read` it from any cwd, and so a
+	// renamed or unshipped doc fails here rather than in a live loop.
 	const h = harness(STANDALONE);
 	const guidelines = (h.tool as unknown as { promptGuidelines: string[] }).promptGuidelines;
-	assert.ok(guidelines.some((line) => /read the pi-loop skill/.test(line)));
+	assert.ok(isAbsolute(LOOP_CRAFT_DOC));
+	assert.ok(existsSync(LOOP_CRAFT_DOC), `${LOOP_CRAFT_DOC} is not shipped`);
+	assert.ok(guidelines.some((line) => line.includes(`read ${LOOP_CRAFT_DOC}`)));
 });
