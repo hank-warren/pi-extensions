@@ -7,7 +7,7 @@
  * tree — cannot exist, because the validator's inventories name every real
  * package by path.
  *
- * The hybrid rules (an extension *and* its companion skills, pi-loop) are the
+ * The hybrid rules (an extension *and* its companion skills, pi-auto-permissions) are the
  * reason this file exists: they widened three exact-set checks, and an
  * exact-set check that silently stopped covering a package is exactly the
  * failure a green test suite hides.
@@ -65,8 +65,8 @@ function validate(edit = () => {}) {
   return { status: result.status, stderr: result.stderr, stdout: result.stdout };
 }
 
-const HYBRID = "packages/pi-loop/package.json";
-const SKILL_MD = "packages/pi-loop/skills/pi-loop/SKILL.md";
+const HYBRID = "packages/pi-auto-permissions/package.json";
+const SKILL_MD = "packages/pi-auto-permissions/auto-permissions-setup/SKILL.md";
 
 test("the working tree validates, hybrid and skill packages included", () => {
   const result = validate();
@@ -77,23 +77,23 @@ test("the working tree validates, hybrid and skill packages included", () => {
 test("a hybrid skill entry with no SKILL.md fails", () => {
   const result = validate(({ remove }) => remove(SKILL_MD));
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /skill entry has no SKILL.md: \.\/skills\/pi-loop/);
+  assert.match(result.stderr, /skill entry has no SKILL.md: \.\/auto-permissions-setup/);
 });
 
 test("a frontmatter name that does not match the directory fails", () => {
-  const result = validate(({ replace }) => replace(SKILL_MD, "name: pi-loop", "name: loop"));
+  const result = validate(({ replace }) => replace(SKILL_MD, "name: auto-permissions-setup", "name: setup"));
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /frontmatter name 'loop' must match directory name 'pi-loop'/);
+  assert.match(result.stderr, /frontmatter name 'setup' must match directory name 'auto-permissions-setup'/);
 });
 
 test("a hybrid skill missing from the files allowlist fails", () => {
   const result = validate(({ read, write }) => {
     const pkg = read(HYBRID);
-    pkg.files = pkg.files.filter((entry) => entry !== "skills");
+    pkg.files = pkg.files.filter((entry) => entry !== "auto-permissions-setup");
     write(HYBRID, pkg);
   });
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /skill missing from files allowlist: \.\/skills\/pi-loop/);
+  assert.match(result.stderr, /skill missing from files allowlist: \.\/auto-permissions-setup/);
 });
 
 test("a hybrid manifest that drops its extensions entry fails", () => {
@@ -129,7 +129,7 @@ test("a hybrid package still obeys extension peerDependency rules", () => {
 test("root pi.skills drift fails in both directions", () => {
   const dropped = validate(({ read, write }) => {
     const root = read("package.json");
-    root.pi.skills = root.pi.skills.filter((entry) => !entry.includes("pi-loop"));
+    root.pi.skills = root.pi.skills.filter((entry) => !entry.includes("auto-permissions-setup"));
     write("package.json", root);
   });
   assert.equal(dropped.status, 1);
@@ -137,7 +137,7 @@ test("root pi.skills drift fails in both directions", () => {
 
   const invented = validate(({ read, write }) => {
     const root = read("package.json");
-    root.pi.skills = [...root.pi.skills, "./packages/pi-loop/skills/pi-nope"];
+    root.pi.skills = [...root.pi.skills, "./packages/pi-loop/docs/pi-nope"];
     write("package.json", root);
   });
   assert.equal(invented.status, 1);

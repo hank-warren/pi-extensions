@@ -68,6 +68,10 @@ Skill-only packages ship a `SKILL.md` (plus README/LICENSE) and no code — no `
 
 Skill packages publish through changesets exactly like extension packages.
 
+### When a skill is the wrong shape
+
+A skill's description line sits in every system prompt of every session with the package loaded, so it must buy something only that placement can: the model acting on it in a session where nothing has been invoked yet. `simplify` and `auto-permissions-setup` qualify — the user asks for them by name. Guidance that only matters once a mode is already active (how to draft a loop, what a decision-complete plan is, how to write a statusline item) does not: the mode's own prompt can inject an absolute path to a shipped markdown file, resolved with `import.meta.dirname`, and the model reads it then at zero cost to every other session. `pi-loop` and `pi-plan-mode` were converted this way after ~220 sessions showed every read of their skill files was triggered by the mode prompt and never by the description. The bar for adding a hybrid package is a session in which the model acted on the description unprompted, not the theory that it might.
+
 Note on skill-name collisions: pi deduplicates packages, not skill names. If the same skill also exists in another installed package, both load and the name collides — remove or rename the duplicate when promoting a skill to a public package.
 
 ## Publishing

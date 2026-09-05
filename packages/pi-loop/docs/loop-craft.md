@@ -1,9 +1,3 @@
----
-name: pi-loop
-description: Draft loop objectives that become falsifiable criteria, set cadence and ground rules, and complete a loop with evidence the gate accepts. Use while drafting a loop in /loop planning, before calling loop_propose, before assembling loop_complete evidence, and when deciding whether work belongs in a loop at all.
-license: MIT
----
-
 # pi-loop
 
 The engine handles pacing, wakes, compaction, and the ledger. It cannot handle the three things that decide whether a loop is worth running: **what end state the objective names**, **what constraints bound the work**, and **what evidence proves it is done**. That is this file.

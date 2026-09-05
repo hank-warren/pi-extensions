@@ -1,9 +1,3 @@
----
-name: pi-plan-mode
-description: Craft decision-complete implementation plans in Plan mode — explore before asking, ask questions worth answering, and write a plan another agent can execute without guessing. Use while Plan mode is active, before calling plan_mode_complete, and when deciding whether a request needs a plan at all.
-license: MIT
----
-
 # pi-plan-mode
 
 The extension enforces the mechanics: `edit` and `write` are blocked, the plan is written to a durable file, and `plan_mode_complete` is the only way out. It cannot enforce the thing that decides whether the plan was worth making: **whether a competent implementer could execute it without asking you anything.** That is this file.
