@@ -15,7 +15,8 @@ import {
 	serializeCustomItems,
 } from "../custom.ts";
 import { renderStatusline, type StatuslineData } from "../index.ts";
-import { customItemRows, customItemsSummary } from "../settings-menu.ts";
+import { buildCustomItemSetupPrompt } from "../custom-setup.ts";
+import { ADD_CUSTOM_ITEM_VALUE, customItemRows, customItemsSummary } from "../settings-menu.ts";
 import { defaultSettings, normalizeSettings, serializeSettings } from "../settings.ts";
 
 const HOME = "/home/hank";
@@ -350,10 +351,42 @@ test("the submenu explains why an item is not showing", () => {
 	]);
 	assert.deepEqual(
 		rows.map((row) => row.description),
-		["cpa 22/55", "disabled", "missing command"],
+		["cpa 22/55", "disabled", "missing command", "Ask the agent to write one; it gets the contract and the settings path."],
 	);
 	assert.deepEqual(
 		rows.map((row) => row.label),
-		["on  cpa", "off  off", "off  broken"],
+		["on  cpa", "off  off", "off  broken", "Add custom item…"],
 	);
+	assert.equal(rows[3]?.value, ADD_CUSTOM_ITEM_VALUE);
+	assert.equal(customItemRows(defaultSettings(HOME)).length, 1, "with no items, adding one is the only row");
+});
+
+test("the setup prompt carries the whole contract, the path, and the request", () => {
+	// This message is the only place the contract reaches the agent — there is
+	// deliberately no skill — so it has to be self-sufficient: the README's
+	// install path is not guessable from inside a session.
+	const prompt = buildCustomItemSetupPrompt("~/.pi/agent/statusline-settings.json", "  pooled codex quota across my gateway  ");
+	assert.match(prompt, /^I want a custom statusline item that shows: pooled codex quota across my gateway\n/);
+	for (const needle of [
+		"exactly `~/.pi/agent/statusline-settings.json`",
+		"do not search for or edit any other settings file",
+		"customItems",
+		"stdin",
+		"COLUMNS",
+		"usage_remaining",
+		"**remaining** headroom",
+		"first line of stdout",
+		"Empty output hides the item",
+		"refreshInterval",
+		`${DEFAULT_TIMEOUT_MS / 1000}s`,
+		`${MAX_TIMEOUT_MS / 1000}s`,
+		"COLUMNS=120 sh -c",
+		"run `/statusline` to reload",
+	]) {
+		assert.ok(prompt.includes(needle), `prompt lacks ${needle}`);
+	}
+	assert.doesNotMatch(prompt, /skill/iu, "the contract is injected, not looked up");
+
+	const open = buildCustomItemSetupPrompt("/tmp/s.json", "");
+	assert.match(open, /^I want to add a custom statusline item\. Ask me what it should show/);
 });

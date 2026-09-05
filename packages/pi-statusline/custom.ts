@@ -107,9 +107,9 @@ export function normalizeCustomItems(value: unknown): CustomItem[] {
 		);
 		const refreshInterval = positiveSeconds(entry.refreshInterval);
 		const base = { id, enabled, timeoutMs, source: entry, ...(refreshInterval ? { refreshInterval } : {}) };
-		// `type` is carried for forward compatibility with Claude Code's schema,
-		// where it selects the mechanism. "command" is the only one pi runs, and an
-		// unrecognised value is a newer version's item rather than a mistake.
+		// Claude Code's `statusLine` carries `type: "command"`, so a pasted entry
+		// may too. That value is accepted; any other is not a mistake this version
+		// can judge, so the entry is kept and flagged rather than run or dropped.
 		const type = entry.type ?? "command";
 		if (type !== "command") {
 			items.push({ ...base, enabled: false, error: `unsupported type: ${String(type)}` });

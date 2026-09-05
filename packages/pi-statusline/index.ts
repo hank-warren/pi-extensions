@@ -15,6 +15,7 @@ import {
 import { CelebrationPreview, trackSelectedLabel } from "./celebration-preview.ts";
 import { DEFAULT_CELEBRATION_STYLE, renderCacheBadge } from "./celebration-styles.ts";
 import { CustomItemsTracker } from "./custom.ts";
+import { buildCustomItemSetupPrompt } from "./custom-setup.ts";
 import { FullRedrawScheduler } from "./redraw.ts";
 import {
 	applySettingChange,
@@ -26,6 +27,7 @@ import {
 } from "./settings-menu.ts";
 import {
 	changedSettingKeys,
+	collapseHome,
 	defaultSettings,
 	repoAlias,
 	SettingsStore,
@@ -415,6 +417,15 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 				const submenuHost = {
 					getSettings: () => settings,
 					customItemStates: () => customItems.states(),
+					// The contract reaches the agent as a user message, sent when the
+					// menu asks for it. This is the whole reason there is no skill: the
+					// text costs nothing until someone wants an item, and a message from
+					// the menu is discoverable exactly where the feature is.
+					requestCustomItem: (request: string) => {
+						const prompt = buildCustomItemSetupPrompt(collapseHome(settingsStore.getPath(), home), request);
+						if (ctx.isIdle()) pi.sendUserMessage(prompt);
+						else pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+					},
 					commit: (next: StatuslineSettings) => applySettings(ctx, next),
 					notify: (message: string) => ctx.ui.notify(message, "warning"),
 					requestRender: () => tui.requestRender(),

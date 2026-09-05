@@ -22,7 +22,7 @@ Colors come from a selectable [theme](#themes), with context warning thresholds.
 
 - **Theme** — the color palette, cycled with Enter or Space. See [Themes](#themes).
 - **Cache celebration** — `off` or one of five badge animations, cycled with Enter or Space and previewed live in the statusline below. See [Animation styles](#animation-styles).
-- **Custom items** — `on`/`off` for the whole custom-item segment, and **Custom item list** below the alias row enables or disables each configured item and shows what it is currently doing. See [Custom items](#custom-items).
+- **Custom item list** — below the alias row: enables or disables each configured item, shows what it is currently doing, and **Add custom item…** hands the job to the agent. A **Custom items** `on`/`off` row for the whole segment appears once at least one item is configured. See [Custom items](#custom-items).
 - **Model**, **Provider**, **Directory & git**, **Context**, **Subscription usage**, **Worktree line**, **Session ID line** — `on`/`off`, cycled with Enter or Space. **Provider** is the only one that starts `off`; it shows the provider id exactly as Pi reports it, so a [pi-multi-login](../pi-multi-login) alias renders as `anthropic-team` and names the login actually spending — something a model id like `claude-opus-5` never carries. With no model, or a model reporting no provider, the segment is simply absent. Disabled segments are dropped from line 1 without leaving a stray ` | ` separator; hiding the worktree line also stops its `git`/`gh` polling, and hiding usage stops the usage poller. With every element off the footer collapses to a single blank row.
 - **Worktree root** — the directory whose immediate children are tracked as session worktrees (default `~/repos/worktrees`). `~` and `$HOME` are expanded; a relative path is rejected and the previous value kept.
 - **Repo aliases** — short display names for repositories on the worktree line. Enter edits the selected `repo → alias` pair, `d` deletes it, and `Add alias…` creates one from a `repo=alias` line.
@@ -110,9 +110,11 @@ The contract is deliberately [Claude Code's status line](https://docs.claude.com
 
 There is no default item, and with an empty list the feature costs nothing: no process is spawned and no timer runs.
 
-### Configuring one
+### Adding one
 
-Items live under `customItems` in `~/.pi/agent/statusline-settings.json`. The file is not created for you until a setting is changed, so write it if it is absent:
+The quickest way is `/statusline` → **Custom item list** → **Add custom item…**. Type one line describing what the item should show (or press Enter and let the agent ask), and the menu closes and sends the agent a message carrying the whole contract below plus the settings path. The agent writes the script, tests it the way the statusline will run it, adds the entry, and tells you to reopen `/statusline`. That message is the only place the contract is injected — it costs nothing until you ask for an item, which is why this package ships no skill for it.
+
+By hand, items live under `customItems` in `~/.pi/agent/statusline-settings.json`. The file is not created for you until a setting is changed, so write it if it is absent:
 
 ```json
 {
@@ -134,9 +136,11 @@ Items live under `customItems` in `~/.pi/agent/statusline-settings.json`. The fi
 | `refreshInterval` | no | Seconds between forced re-runs, on top of the event-driven ones. Omit for event-driven only. |
 | `timeout` | no | Seconds before the command is killed. Default `5`, capped at `30`. |
 | `enabled` | no | `false` hides the item and stops it running. This is the one field `/statusline` writes. |
-| `type` | no | `"command"`, the only supported kind. Any other value is preserved but not run. |
+| `type` | no | Accepted for entries pasted from Claude Code, where it is `"command"`. Any other value is preserved but not run. |
 
 Items render in configuration order, each as its own ` | `-separated segment.
+
+**The file is read when a session starts and whenever `/statusline` opens.** After editing it by hand, open `/statusline` and press Esc to load the change into the running session; nothing watches the file.
 
 ### When a command runs
 

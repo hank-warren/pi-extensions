@@ -248,6 +248,7 @@ test("buildSettingItems mirrors the settings object", () => {
 		cacheCelebrationStyle: "wave",
 		worktreeRoot: "/home/hank/code/trees",
 		repoAliases: { frontend: "fe" },
+		customItems: normalizeCustomItems([{ id: "clock", command: "date +%H:%M" }]),
 	};
 	const items = buildSettingItems(settings, {}, HOME);
 
@@ -309,7 +310,7 @@ test("buildSettingItems mirrors the settings object", () => {
 			"off",
 			"~/code/trees",
 			"1 alias",
-			"none configured",
+			"1/1 on",
 		],
 	);
 	assert.deepEqual(items[0]?.values, [...THEME_NAMES], "Enter cycles through every theme");
@@ -524,4 +525,14 @@ test("a merging save still works when the file is missing or corrupt", async (t)
 		{ showModel: false },
 		"unreadable content is discarded rather than propagated",
 	);
+});
+
+test("the custom-items toggle row appears only once there is something to toggle", () => {
+	// With no items the toggle is a row that does nothing; the list row is where
+	// an item gets created, and the toggle earns its place after that.
+	const ids = (settings: StatuslineSettings) => buildSettingItems(settings, {}, HOME).map((item) => item.id);
+	assert.ok(!ids(defaultSettings(HOME)).includes("showCustomItems"));
+	assert.ok(ids(defaultSettings(HOME)).includes(CUSTOM_ITEMS_ID), "the list row is always offered");
+	const configured = { ...defaultSettings(HOME), customItems: normalizeCustomItems([{ command: "date" }]) };
+	assert.ok(ids(configured).includes("showCustomItems"));
 });
