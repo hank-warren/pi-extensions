@@ -10,6 +10,7 @@ import {
 	truncateToWidth,
 } from "@earendil-works/pi-tui";
 import { type BooleanSettingKey, collapseHome, resolveWorktreeRoot, type StatuslineSettings } from "./settings.ts";
+import type { CustomItemState } from "./custom.ts";
 import { CELEBRATION_STYLE_NAMES, isCelebrationStyleName } from "./celebration-styles.ts";
 import { isThemeName, THEME_NAMES } from "./themes.ts";
 
@@ -17,7 +18,9 @@ export const THEME_ID = "theme";
 export const CACHE_CELEBRATION_ID = "showCacheCelebration";
 export const WORKTREE_ROOT_ID = "worktreeRoot";
 export const REPO_ALIASES_ID = "repoAliases";
+export const CUSTOM_ITEMS_ID = "customItems";
 export const ADD_ALIAS_VALUE = "\u0000add";
+export const ADD_CUSTOM_ITEM_VALUE = "\u0000add-item";
 
 export const ON = "on";
 export const OFF = "off";
@@ -36,6 +39,7 @@ export const BOOLEAN_ROWS: readonly BooleanRow[] = [
 	{ id: "showDirectory", label: "Directory & git", description: "Show the working directory and its git branch." },
 	{ id: "showContext", label: "Context", description: "Show context tokens used against the window." },
 	{ id: "showUsage", label: "Subscription usage", description: "Show Claude/Codex remaining-headroom meters." },
+	{ id: "showCustomItems", label: "Custom items", description: "Run your configured commands and show their output." },
 	{ id: "showWorktrees", label: "Worktree line", description: "Show touched worktrees and their pull requests." },
 	{ id: "showSessionId", label: "Session ID line", description: "Show the full Pi session id on its own line." },
 ];
@@ -57,9 +61,67 @@ export function aliasSummary(settings: StatuslineSettings): string {
 	return `${count} alias${count === 1 ? "" : "es"}`;
 }
 
+/** Row value for the custom-items submenu: how many items are switched on. */
+export function customItemsSummary(settings: StatuslineSettings): string {
+	const total = settings.customItems.length;
+	if (total === 0) return "none configured";
+	return `${settings.customItems.filter((item) => item.enabled).length}/${total} on`;
+}
+
+/**
+ * Rows in the custom-items submenu: each item, what it shows and why, then the
+ * one action that creates an item. Adding hands the job to the agent rather
+ * than opening a form: a statusline command is a script plus a JSON entry plus
+ * a test run, which is a conversation, not a field.
+ */
+export function customItemRows(
+	settings: StatuslineSettings,
+	states: readonly CustomItemState[] = [],
+): SelectItem[] {
+	return [
+		...customItemStateRows(settings, states),
+		{
+			value: ADD_CUSTOM_ITEM_VALUE,
+			label: "Add custom item…",
+			description: "Ask the agent to write one; it gets the contract and the settings path.",
+		},
+	];
+}
+
+function customItemStateRows(settings: StatuslineSettings, states: readonly CustomItemState[]): SelectItem[] {
+	const byId = new Map(states.map((state) => [state.id, state]));
+	return settings.customItems.map((item) => {
+		const state = byId.get(item.id);
+		// Configuration errors outrank run errors: an item that cannot be parsed
+		// never ran, so a stale run error from a previous config would mislead.
+		const error = item.error ?? state?.error;
+		// A broken entry reads as "disabled" unless its reason wins here: it is off
+		// *because* it cannot run, and "disabled" would suggest the user chose that.
+		const detail = item.error !== undefined
+			? item.error
+			: !item.enabled
+				? "disabled"
+				: error !== undefined
+				? error
+				: state?.running === true && state.value === undefined
+					? "running…"
+					: state?.value !== undefined && state.value.length > 0
+						? state.value
+						: state?.value !== undefined
+							? "empty output"
+							: "no value yet";
+		return {
+			value: item.id,
+			label: `${item.enabled ? toggleValue(true) : toggleValue(false)}  ${item.id}`,
+			description: detail,
+		};
+	});
+}
+
 export interface SettingSubmenus {
 	worktreeRoot?: SettingItem["submenu"];
 	repoAliases?: SettingItem["submenu"];
+	customItems?: SettingItem["submenu"];
 }
 
 /** Build the `/statusline` rows for a settings snapshot. */
@@ -81,6 +143,10 @@ export function buildSettingItems(
 	// Rows follow the order their elements render in, so the celebration sits
 	// after the usage meters it is appended to on line 1.
 	for (const row of BOOLEAN_ROWS) {
+		// A toggle for a segment with nothing in it is a row that does nothing;
+		// the list row below is where an item gets created, and the toggle
+		// appears once there is something to switch off.
+		if (row.id === "showCustomItems" && settings.customItems.length === 0) continue;
 		items.push({
 			id: row.id,
 			label: row.label,
@@ -112,6 +178,13 @@ export function buildSettingItems(
 		description: "Short display names for repositories on the worktree line.",
 		currentValue: aliasSummary(settings),
 		...(submenus.repoAliases ? { submenu: submenus.repoAliases } : {}),
+	});
+	items.push({
+		id: CUSTOM_ITEMS_ID,
+		label: "Custom item list",
+		description: "Enable or disable configured items; edit commands in statusline-settings.json.",
+		currentValue: customItemsSummary(settings),
+		...(submenus.customItems ? { submenu: submenus.customItems } : {}),
 	});
 
 	return items;
@@ -183,6 +256,13 @@ export function aliasItems(settings: StatuslineSettings): SelectItem[] {
 export interface SubmenuHost {
 	/** Read the live settings; the menu edits a single shared snapshot. */
 	getSettings(): StatuslineSettings;
+	/** Live per-item run state, for the custom-items submenu. */
+	customItemStates?(): CustomItemState[];
+	/**
+	 * Hand "add an item" to the agent with the user's one-line description of
+	 * what it should show. Closes the menu; absent when no agent can be reached.
+	 */
+	requestCustomItem?(request: string): void;
 	/** Commit an edit: persists, applies live, and repaints. */
 	commit(settings: StatuslineSettings): void;
 	notify(message: string): void;
@@ -347,4 +427,100 @@ class AliasSubmenu implements Component {
 
 export function createAliasSubmenu(host: SubmenuHost): NonNullable<SettingItem["submenu"]> {
 	return (_currentValue, done) => new AliasSubmenu(host, done);
+}
+
+/**
+ * Custom item list: enable/disable each item and read why it is not showing.
+ *
+ * Commands are edited in the settings file, not here. A statusline command is a
+ * shell line with quoting and pipes in it, which a single-line TUI prompt edits
+ * badly, and keeping the field out of the menu means a toggle writes only the
+ * `enabled` flag over whatever the file currently holds.
+ */
+class CustomItemsSubmenu implements Component {
+	private list: SelectList;
+	private prompt: PromptComponent | undefined;
+
+	constructor(
+		private readonly host: SubmenuHost,
+		private readonly done: (value?: string) => void,
+	) {
+		this.list = this.buildList();
+	}
+
+	private buildList(selectedIndex = 0): SelectList {
+		const rows = customItemRows(this.host.getSettings(), this.host.customItemStates?.() ?? []);
+		const list = new SelectList(rows, 10, this.host.selectTheme);
+		list.setSelectedIndex(selectedIndex);
+		list.onCancel = () => this.done(customItemsSummary(this.host.getSettings()));
+		list.onSelect = (item) => (item.value === ADD_CUSTOM_ITEM_VALUE ? this.add() : this.toggle(item.value));
+		return list;
+	}
+
+	private add(): void {
+		if (!this.host.requestCustomItem) {
+			this.host.notify("Add items to statusline-settings.json; see the pi-statusline README");
+			return;
+		}
+		this.prompt = new PromptComponent(
+			"What should the item show? (Enter for the agent to ask)",
+			"",
+			this.host.settingsTheme.hint,
+			(value) => {
+				this.prompt = undefined;
+				// Close the whole menu before the message lands: the agent's reply
+				// renders in the transcript, which the menu is drawn over.
+				this.done(customItemsSummary(this.host.getSettings()));
+				this.host.requestCustomItem?.(value);
+			},
+			() => {
+				this.prompt = undefined;
+				this.host.requestRender();
+			},
+		);
+		this.host.requestRender();
+	}
+
+	private toggle(id: string): void {
+		if (id.startsWith("\u0000")) return;
+		const settings = this.host.getSettings();
+		const index = settings.customItems.findIndex((item) => item.id === id);
+		const target = settings.customItems[index];
+		if (!target) return;
+		if (target.error !== undefined && !target.enabled) {
+			// Enabling an unparseable entry would only fail again on the next tick.
+			this.host.notify(`${id} cannot run: ${target.error}`);
+			return;
+		}
+		const customItems = [...settings.customItems];
+		customItems[index] = { ...target, enabled: !target.enabled };
+		this.host.commit({ ...settings, customItems });
+		this.list = this.buildList(index);
+		this.host.requestRender();
+	}
+
+	invalidate(): void {
+		this.prompt?.invalidate();
+		this.list.invalidate();
+	}
+
+	render(width: number): string[] {
+		if (this.prompt) return this.prompt.render(width);
+		return [
+			truncateToWidth(this.host.settingsTheme.hint("  Custom items"), width),
+			"",
+			...this.list.render(width),
+			"",
+			truncateToWidth(this.host.settingsTheme.hint("  Enter to enable/disable or add · Esc to go back"), width),
+		];
+	}
+
+	handleInput(data: string): void {
+		if (this.prompt) this.prompt.handleInput(data);
+		else this.list.handleInput(data);
+	}
+}
+
+export function createCustomItemsSubmenu(host: SubmenuHost): NonNullable<SettingItem["submenu"]> {
+	return (_currentValue, done) => new CustomItemsSubmenu(host, done);
 }
