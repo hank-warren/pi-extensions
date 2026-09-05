@@ -151,15 +151,32 @@ export function normalizePlanModeQuestionParams(
 export async function answerPlanModeQuestions(
 	questions: PlanModeQuestion[],
 	ctx: ExtensionContext,
-	lifecycle: { isCurrent(): boolean; isEnabled(): boolean },
+	lifecycle: {
+		isCurrent(): boolean;
+		isEnabled(): boolean;
+		/**
+		 * Called with `true` while a selector is open and `false` once it closes,
+		 * however it closes. plan-mode.ts forwards this to Herdr so a supervising
+		 * agent in another pane sees "blocked on a human", not "working".
+		 */
+		onBlocked?(active: boolean): void;
+	},
 	signal?: AbortSignal,
 ) {
-	const answers = await askPlanModeQuestions(
-		questions,
-		ctx,
-		() => lifecycle.isCurrent() && lifecycle.isEnabled() && !signal?.aborted,
-		signal,
-	);
+	lifecycle.onBlocked?.(true);
+	let answers: PlanModeQuestionAnswer[] | undefined;
+	try {
+		answers = await askPlanModeQuestions(
+			questions,
+			ctx,
+			() => lifecycle.isCurrent() && lifecycle.isEnabled() && !signal?.aborted,
+			signal,
+		);
+	} finally {
+		// In `finally` so a throw or a session replacement never leaves Herdr
+		// believing this pane is still waiting on someone.
+		lifecycle.onBlocked?.(false);
+	}
 	if (!lifecycle.isCurrent()) {
 		return planModeQuestionCancelled(
 			questions,
