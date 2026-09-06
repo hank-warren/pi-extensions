@@ -21,8 +21,8 @@ name: publish
 #
 # A push to main:
 #   1. gate: npm test (which runs the typecheck itself), npm run scan-secrets,
-#      and a check for anything releasable: a pending .changeset/*.md, or a
-#      package whose package.json version is not on npm;
+#      and a check for anything releasable: a package whose package.json
+#      version is not on npm (a pending .changeset/*.md is a hard error);
 #   2. publish (only if something is releasable, or on workflow_dispatch):
 #      publishes every package whose version is not yet on npm, and creates a
 #      GitHub release for each.
@@ -108,11 +108,13 @@ jobs:
           for manifest in packages/*/package.json; do
             name=$(jq -r .name "$manifest")
             version=$(jq -r .version "$manifest")
-            # Exit 0 with output when the version exists; E404 (empty) when it
-            # does not. Any other failure is a registry problem and should stop
-            # the run rather than be read as "unpublished".
-            if published=$(npm view "$name@$version" version 2>/dev/null); then
-              [[ -n "$published" ]] && continue
+            # Exit 0 with the version on stdout when it exists; E404 when it
+            # does not. Any other failure (registry outage, throttling) is also
+            # read as "unpublished" on purpose: the cost is a publish job that
+            # re-asks npm and finds nothing to do, whereas failing here would
+            # take the only main gate down with it.
+            if published=$(npm view "$name@$version" version 2>/dev/null) && [[ -n "$published" ]]; then
+              continue
             fi
             releasable+=("$name@$version")
           done
@@ -172,8 +174,8 @@ jobs:
     # run red. cancel-in-progress: false protects the running job, but GitHub
     # holds at most one pending job per group, so a newer queued job supersedes
     # (cancels) an older pending one. That is safe here because the job is
-    # convergent: it publishes everything outstanding from the newest main, so the superseding job covers everything the cancelled one
-    # would have done. The gate job is deliberately outside this group, so a
+    # convergent: it publishes everything outstanding from the newest main, so
+    # the superseding job covers everything the cancelled one would have done. The gate job is deliberately outside this group, so a
     # superseded commit still gets tested. If a superseding job fails on
     # unrelated breakage, use workflow_dispatch to publish whatever is still
     # outstanding.
