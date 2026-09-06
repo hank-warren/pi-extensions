@@ -294,3 +294,14 @@ test("a deprecated package is out of the aggregate but still published and docum
   assert.equal(undocumented.status, 1);
   assert.match(undocumented.stderr, /README must open with a \*\*Deprecated\.\*\* block/);
 });
+
+test("an unapplied changeset fails validation", () => {
+  // The release pull request must carry its own `npm run version-packages`
+  // output; a surviving .changeset/*.md means it was not run. Fails the pull
+  // request's own CI rather than the publish gate after the merge.
+  const result = validate(({ write }) =>
+    write(".changeset/stray.md", '---\n"@hank-warren/pi-stash": patch\n---\n\nstray\n'),
+  );
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /unapplied changeset\(s\).*stray\.md/);
+});

@@ -21,20 +21,29 @@ name: publish
 #
 # A push to main:
 #   1. gate: npm test (which runs the typecheck itself), npm run scan-secrets,
-#      and a count of pending changesets;
-#   2. publish (only if that count is non-zero, or on workflow_dispatch): applies
-#      the pending .changeset/*.md files (version bumps, CHANGELOG.md files,
-#      refreshed package-lock.json), commits the result straight back to main,
+#      and a check for anything releasable: a package whose package.json
+#      version is not on npm (a pending .changeset/*.md is a hard error);
+#   2. publish (only if something is releasable, or on workflow_dispatch):
 #      publishes every package whose version is not yet on npm, and creates a
 #      GitHub release for each.
-# The version commit is pushed with the default GITHUB_TOKEN, and pushes made
-# with that token do not trigger workflow runs, so step 2 cannot recurse.
 #
-# This replaced the changesets/action two-merge cycle (feature merge opens a
-# "chore: version packages" pull request, merging that publishes). The pull
-# request bought changelog review and release batching at the cost of a second
-# merge and a second workflow run per release; batching is still available by
-# letting changesets accumulate on feature branches before merging them.
+# The version step is NOT here. `main` is protected — changes must arrive
+# through a reviewed pull request, and there is no bypass for the workflow's
+# token — so the release pull request carries the applied version bump: it
+# holds the .changeset/*.md files AND the output of `npm run version-packages`
+# (bumped manifests, CHANGELOG.md entries, refreshed lockfile), so the
+# changesets are consumed in the same pull request that introduced them and the
+# reviewer sees exactly what will ship. Merging it is the release. AGENTS.md
+# ("Publishing") is the operator side of this contract.
+#
+# History: this job used to run `changeset version` itself and push the
+# "chore: version packages" commit to main with GITHUB_TOKEN. That worked while
+# main was unprotected. After protection, the push was rejected with GH006, and
+# the step misread the rejection as a push race, exited green, and published
+# nothing (run 34046074558) — a green run that ships nothing is the failure
+# mode this file is most careful about, so the direct write is gone rather
+# than bypassed. A pending changeset on main is now a hard error in the gate:
+# it means a release pull request was merged without its version step.
 #
 # Paths are deliberately unfiltered: a changeset can accompany any change, and
 # workflow_dispatch re-runs must always be able to publish.
@@ -42,9 +51,8 @@ on:
   push:
     branches: [main]
   # Manual re-run for cases where the publish failed on infrastructure rather
-  # than package content (for example an npm registry outage). A superseded
-  # version push (see the version step below) never needs one: the newer
-  # commit's own run converges.
+  # than package content (for example an npm registry outage). It publishes
+  # whatever the tree says is ahead of npm.
   workflow_dispatch:
 
 permissions:
@@ -57,7 +65,7 @@ jobs:
     # wedged pi self-test from burning the six-hour default.
     timeout-minutes: 15
     outputs:
-      pendingChangesets: ${{ steps.detect.outputs.pending }}
+      releasable: ${{ steps.detect.outputs.releasable }}
     steps:
       - uses: actions/checkout@v4
 
@@ -66,26 +74,58 @@ jobs:
           node-version: 22
           cache: npm
 
-      # Counted from the tree rather than from the push diff, and that is the
-      # whole point. A `paths: ['.changeset/**']` trigger would look at what a
-      # push touched, so a release run that failed (or was superseded) would
-      # leave its changesets pending on main with nothing left to re-trigger it;
-      # the next unrelated merge would skip publish and the release would sit
-      # there. Counting the tree keeps the "the next run converges" recovery in
-      # the version step below true for every subsequent commit.
-      - name: Detect pending changesets
+      # Read from the tree rather than from the push diff, and that is the
+      # whole point: a release whose publish failed leaves its versions ahead of
+      # npm with nothing left to re-trigger it, and a path filter would let the
+      # next unrelated merge skip publish and leave the release sitting there.
+      # Reading the tree keeps "the next run converges" true for every commit.
+      #
+      # A pending .changeset/*.md on main is a hard failure, not a trigger: the
+      # version step lives in the release pull request (see the header), so a
+      # changeset that reached main unapplied means that pull request was merged
+      # without running `npm run version-packages`. Fail loudly here, where the
+      # merge that caused it is the commit under test, rather than publishing
+      # the wrong version or silently skipping. Recovery is a follow-up pull
+      # request that applies it.
+      #
+      # `changeset status` cannot answer "is anything ahead of npm": it compares
+      # against changesets, which the release pull request has already consumed.
+      # So this asks the registry directly, one `npm view` per public package.
+      # The read side is eventually consistent (see the publish step), but the
+      # only consequence of a stale read here is running a publish job that then
+      # finds nothing to do — never a missed release.
+      - name: Detect releasable packages
         id: detect
         run: |
           set -euo pipefail
           mapfile -t pending < <(find .changeset -maxdepth 1 -name '*.md' ! -name 'README.md')
-          if [[ ${#pending[@]} -eq 0 ]]; then
-            echo "pending=false" >>"$GITHUB_OUTPUT"
-            echo "No pending changesets; this commit will not publish."
+          if [[ ${#pending[@]} -ne 0 ]]; then
+            echo "::error::Unapplied changeset(s) on main. The release pull request must include the output of 'npm run version-packages'; open a follow-up that applies these:" >&2
+            printf '  %s\n' "${pending[@]}" >&2
+            exit 1
+          fi
+          releasable=()
+          for manifest in packages/*/package.json; do
+            name=$(jq -r .name "$manifest")
+            version=$(jq -r .version "$manifest")
+            # Exit 0 with the version on stdout when it exists; E404 when it
+            # does not. Any other failure (registry outage, throttling) is also
+            # read as "unpublished" on purpose: the cost is a publish job that
+            # re-asks npm and finds nothing to do, whereas failing here would
+            # take the only main gate down with it.
+            if published=$(npm view "$name@$version" version 2>/dev/null) && [[ -n "$published" ]]; then
+              continue
+            fi
+            releasable+=("$name@$version")
+          done
+          if [[ ${#releasable[@]} -eq 0 ]]; then
+            echo "releasable=false" >>"$GITHUB_OUTPUT"
+            echo "Every package version is on npm; this commit will not publish."
             exit 0
           fi
-          echo "pending=true" >>"$GITHUB_OUTPUT"
-          printf 'Pending changeset(s):\n'
-          printf '  %s\n' "${pending[@]}"
+          echo "releasable=true" >>"$GITHUB_OUTPUT"
+          printf 'Not yet on npm:\n'
+          printf '  %s\n' "${releasable[@]}"
 
       # ubuntu-latest ships neither gitleaks nor ripgrep, so scripts/scan-secrets.sh
       # had nothing to run: the old `if rg ...` form read rg's 127 as "no matches"
@@ -119,13 +159,14 @@ jobs:
 
   publish:
     needs: gate
-    # Skipped outright on a merge with no changeset, which is the normal case:
-    # code pull requests carry no changeset (see "Hold the changeset" in
-    # AGENTS.md), so most merges have nothing to release. workflow_dispatch
-    # always proceeds so a manual re-drive can converge whatever is outstanding.
-    if: needs.gate.outputs.pendingChangesets == 'true' || github.event_name == 'workflow_dispatch'
+    # Skipped outright on a merge that leaves every version on npm, which is the
+    # normal case: code pull requests carry no version bump (see "Hold the
+    # changeset" in AGENTS.md), so most merges have nothing to release.
+    # workflow_dispatch always proceeds so a manual re-drive can converge
+    # whatever is outstanding.
+    if: needs.gate.outputs.releasable == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    # The version commit and the release tags.
+    # The release tags only. Nothing here writes to a branch.
     permissions:
       contents: write
     # Serialize releases: overlapping runs from back-to-back merges can both see
@@ -133,16 +174,15 @@ jobs:
     # run red. cancel-in-progress: false protects the running job, but GitHub
     # holds at most one pending job per group, so a newer queued job supersedes
     # (cancels) an older pending one. That is safe here because the job is
-    # convergent: it versions and publishes everything outstanding from the
-    # newest main, so the superseding job covers everything the cancelled one
-    # would have done. The gate job is deliberately outside this group, so a
+    # convergent: it publishes everything outstanding from the newest main, so
+    # the superseding job covers everything the cancelled one would have done. The gate job is deliberately outside this group, so a
     # superseded commit still gets tested. If a superseding job fails on
     # unrelated breakage, use workflow_dispatch to publish whatever is still
     # outstanding.
     concurrency:
       group: publish
       cancel-in-progress: false
-    # Version, publish and releases only. Generous for three short steps because
+    # Publish and releases only. Generous for two short steps because
     # it talks to npm and the GitHub release API, but bounded so a hung registry
     # call cannot hold the `publish` concurrency group for the full six-hour
     # default.
@@ -163,60 +203,6 @@ jobs:
       # CLI. No ripgrep and no test run here.
       - name: Install dependencies
         run: npm ci
-
-      # version-packages runs `changeset version` and then
-      # `npm install --package-lock-only`, which permanently fixes the
-      # "Missing: @hank-warren/pi-<name> from lock file" class of publish failure
-      # that a manual npm version bump used to cause.
-      #
-      # The push has no retry on purpose. It can only be rejected when another
-      # commit landed on main after this checkout — and that commit's own queued
-      # publish run will see every changeset this run tried to consume (this
-      # run's version commit never landed), so it versions and publishes
-      # everything itself. A rebase-and-retry here would be worse than useless:
-      # it would pull the newer commit's code into this checkout after the gate
-      # job already ran, publishing un-gated code.
-      #
-      # A rejected push is therefore not an error, it is supersession: this job
-      # marks itself superseded, skips the publish and release steps, and ends
-      # green having published nothing (back-to-back merges used to leave a
-      # spurious red run here). Any push failure is treated the same way — the
-      # changesets stay pending on main, so the next run (or workflow_dispatch)
-      # converges regardless of why the push failed.
-      #
-      # The no-pending-changesets branch is unreachable on a push (the gate's
-      # detect step is what let this job start) but stays for workflow_dispatch,
-      # which runs this job unconditionally.
-      - name: Version pending changesets
-        id: version
-        run: |
-          set -euo pipefail
-          mapfile -t pending < <(find .changeset -maxdepth 1 -name '*.md' ! -name 'README.md')
-          if [[ ${#pending[@]} -eq 0 ]]; then
-            echo "No pending changesets; skipping version step."
-            exit 0
-          fi
-          printf 'Pending changeset(s):\n'
-          printf '  %s\n' "${pending[@]}"
-          npm run version-packages
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # Scoped rather than `git add -A`: `changeset version` only touches
-          # changeset files, package manifests/changelogs and the lockfile, and a
-          # broad add would sweep any stray artifact the install left behind into
-          # the "chore: version packages" commit.
-          git add .changeset packages package-lock.json
-          if git diff --cached --quiet; then
-            echo "changeset version produced no changes; nothing to commit."
-            exit 0
-          fi
-          git commit -m "chore: version packages"
-          if git push origin HEAD:main; then
-            exit 0
-          fi
-          echo "superseded=true" >>"$GITHUB_OUTPUT"
-          echo "Version commit push was rejected: a newer commit landed on main after this checkout."
-          echo "Its queued publish run will consume the same changesets; skipping publish in this run."
 
       # changeset publish skips any package whose version already exists on npm,
       # so re-runs and manual publishes never collide. It tags this (ephemeral)
@@ -256,9 +242,6 @@ jobs:
       # (a permissions 403, an auth error, a drifted log format) still fails.
       - name: Publish to npm
         id: publish
-        # Never publish from a superseded checkout: its version commit did not
-        # land on main, so anything shipped from here would not match the repo.
-        if: steps.version.outputs.superseded != 'true'
         run: |
           set -euo pipefail
           log=$(mktemp)
