@@ -73,10 +73,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the details and [AGENTS.md](AGENTS.md
 
 ## Publishing
 
-Releases run on [changesets](https://github.com/changesets/changesets) via [`.github/workflows/publish.yml`](.github/workflows/publish.yml). Code pull requests intentionally carry **no changeset**: merge the code, run its live canary against merged `main`, and only then open a changeset-only release pull request:
+Releases run on [changesets](https://github.com/changesets/changesets) via [`.github/workflows/publish.yml`](.github/workflows/publish.yml). Code pull requests intentionally carry **no changeset and no version bump**: merge the code, run its live canary against merged `main`, and only then open a release pull request that carries the changesets *and* their applied result:
 
 ```bash
-npx changeset
+npx changeset               # one per package: patch/minor/major and a summary
+npm run version-packages    # bumps package.json, writes CHANGELOG.md, refreshes the lockfile
 ```
 
-Merging that release pull request to `main` is the whole release: the publish workflow versions the packages, commits the result back to `main`, publishes every package whose version is not yet on npm, and creates a GitHub release per package. Full conventions live in [AGENTS.md](AGENTS.md).
+Merging that release pull request to `main` is the whole release: the publish workflow publishes every package whose version is not yet on npm and creates a GitHub release per package. `main` is protected, so the workflow never writes to it — the version bump is reviewed in the pull request like any other change. Full conventions live in [AGENTS.md](AGENTS.md).
