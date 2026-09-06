@@ -1,6 +1,6 @@
 {
   "name": "@hank-warren/pi-orchestrator",
-  "version": "0.1.0",
+  "version": "0.0.0",
   "description": "Skill for Pi: supervise first-class pi sessions running in Herdr panes — launch children, read their state cheaply, answer Auto Permissions prompts within policy, steer, wait, verify.",
   "type": "module",
   "keywords": [
