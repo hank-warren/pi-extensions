@@ -368,6 +368,24 @@ def main() -> int:
                     f" {expected_name} ({rel_dir}) — run npm install --package-lock-only"
                 )
 
+    # The release pull request carries its own applied version bump (AGENTS.md,
+    # "Publishing"): the workflow cannot write to the protected main branch, so a
+    # .changeset/*.md is meant to arrive together with the output of
+    # `npm run version-packages`, which deletes it. One that survives means the
+    # bump was not run. Catching it here fails the pull request's own CI, before
+    # the merge, rather than the publish gate afterwards. The changesets README
+    # is the one markdown file that belongs there.
+    stray = sorted(
+        path.name
+        for path in (ROOT / ".changeset").glob("*.md")
+        if path.name != "README.md"
+    )
+    if stray:
+        errors.append(
+            ".changeset: unapplied changeset(s) — run `npm run version-packages` and"
+            f" commit the result in the same pull request: {', '.join(stray)}"
+        )
+
     # Public packages are self-contained: a relative import that climbs out of a
     # package reaches into a sibling's *sources*, which npm never ships, so it
     # works in this workspace and fails for every consumer. Depending on a
