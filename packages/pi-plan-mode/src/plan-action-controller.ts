@@ -28,6 +28,13 @@ interface PlanActionControllerOptions {
 	): Promise<boolean>;
 	stay(ctx: ExtensionContext): void;
 	exitReady(ctx: ExtensionContext): void;
+	/**
+	 * Called with `true` while the ready-plan menu is open and `false` once it
+	 * closes, however it closes. plan-mode.ts forwards this to Herdr: the menu
+	 * opens after the turn settles, so without it a supervising agent in another
+	 * pane reads "idle" while the pane is actually waiting on a human to choose.
+	 */
+	onReadyBlocked?(active: boolean): void;
 }
 
 export function createPlanActionController(options: PlanActionControllerOptions) {
@@ -64,16 +71,21 @@ export function createPlanActionController(options: PlanActionControllerOptions)
 			if (!lifecycle.isCurrent() || lifecycle.signal.aborted) return;
 			const ui = await options.loadInteractiveUi();
 			if (!lifecycle.isCurrent() || lifecycle.signal.aborted) return;
-			await ui.showReadyPlanMenu(ctx, {
-				...lifecycle,
-				planPathLine: options.planPathLine(),
-				getExportDestination: () => options.getExportDestination(ctx),
-				implementHere: () => options.implementHere(ctx),
-				implementFresh: (signal) => freshAction(ctx, lifecycle, signal),
-				exportPlan: (path, signal) => options.exportPlan(ctx, path, signal, lifecycle.isCurrent),
-				stay: () => undefined,
-				exit: () => options.exitReady(ctx),
-			});
+			options.onReadyBlocked?.(true);
+			try {
+				await ui.showReadyPlanMenu(ctx, {
+					...lifecycle,
+					planPathLine: options.planPathLine(),
+					getExportDestination: () => options.getExportDestination(ctx),
+					implementHere: () => options.implementHere(ctx),
+					implementFresh: (signal) => freshAction(ctx, lifecycle, signal),
+					exportPlan: (path, signal) => options.exportPlan(ctx, path, signal, lifecycle.isCurrent),
+					stay: () => undefined,
+					exit: () => options.exitReady(ctx),
+				});
+			} finally {
+				options.onReadyBlocked?.(false);
+			}
 		},
 	};
 }
