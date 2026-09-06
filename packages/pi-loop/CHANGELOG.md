@@ -1,5 +1,33 @@
 # @hank-warren/pi-loop
 
+## 1.2.0
+
+### Minor Changes
+
+- 1035138: Ship the craft documents by injected path instead of as skills.
+
+  The `pi-loop` and `pi-plan-mode` skills are gone. Their bodies now ship as
+  `docs/loop-craft.md` and `docs/plan-craft.md`, and the mode prompts inject the
+  file's absolute path (resolved from the installed package) at the moments the
+  guidance matters: while a loop is being drafted or completed, and while Plan
+  Mode is active. A skill's description line sits in every system prompt of every
+  session with the package loaded; across ~220 sessions after these two shipped,
+  every read of either file was triggered by the mode's own prompt and never by
+  the description, so the line was a tax on the ~95% of sessions that never
+  entered the mode. Same document, read at the same moments, at zero cost outside
+  them. Hosts that referenced the skills by name in settings should drop those
+  entries.
+
+- 1035138: Deprecated in favour of `@hank-warren/pi-orchestrator`.
+
+  pi-loop is a pacemaker for one session that cannot be trusted to pace itself. The
+  `pi-orchestrator` skill is a supervising pi session watching real pi sessions in
+  Herdr panes — reading their state, answering their prompts within policy,
+  steering, and verifying their claims — which does by judgment what the loop
+  engine did by pacing and gates. This package stays published and continues to
+  work; it is no longer loaded by the git install of the `pi-extensions`
+  repository and receives no new features. The README opens with the notice.
+
 ## 1.1.0
 
 ### Minor Changes

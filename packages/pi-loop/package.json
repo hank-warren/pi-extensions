@@ -1,6 +1,6 @@
 {
   "name": "@hank-warren/pi-loop",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Long-running work for Pi: settle-paced loops with a durable ledger, adaptive waits, no-progress breakers, evidence-gated completion, and a task scheduler.",
   "type": "module",
   "keywords": [

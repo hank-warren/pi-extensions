@@ -1,6 +1,6 @@
 {
   "name": "@hank-warren/pi-ask-user-question",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Structured questionnaire tool for Pi with numbered options, digit hotkeys and Tab-to-comment, composed from the shared permission-selector component.",
   "type": "module",
   "keywords": [
