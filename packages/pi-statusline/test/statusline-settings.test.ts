@@ -13,6 +13,7 @@ import {
 	CACHE_CELEBRATION_ID,
 	CACHE_CELEBRATION_LABEL,
 	celebrationValue,
+	CUSTOM_ITEMS_ID,
 	parseAliasEntry,
 	REPO_ALIASES_ID,
 	THEME_ID,
@@ -20,6 +21,7 @@ import {
 } from "../settings-menu.ts";
 import { CELEBRATION_STYLE_NAMES } from "../celebration-styles.ts";
 import { DEFAULT_THEME, isThemeName, resolvePalette, STATUSLINE_THEMES, THEME_NAMES } from "../themes.ts";
+import { normalizeCustomItems } from "../custom.ts";
 import {
 	type BooleanSettingKey,
 	BOOLEAN_SETTING_KEYS,
@@ -79,6 +81,8 @@ test("defaults are the pre-settings behaviour, minus the hardcoded aliases", () 
 		showDirectory: true,
 		showContext: true,
 		showUsage: true,
+		// On, but inert: the default item list is empty, so nothing is spawned.
+		showCustomItems: true,
 		showWorktrees: true,
 		showSessionId: true,
 		showCacheCelebration: true,
@@ -86,6 +90,7 @@ test("defaults are the pre-settings behaviour, minus the hardcoded aliases", () 
 	for (const key of BOOLEAN_SETTING_KEYS) assert.equal(defaults[key], expected[key], key);
 	assert.equal(defaults.worktreeRoot, "/home/hank/repos/worktrees");
 	assert.deepEqual(defaults.repoAliases, {});
+	assert.deepEqual(defaults.customItems, []);
 	assert.equal(defaults.theme, "default");
 });
 
@@ -243,6 +248,7 @@ test("buildSettingItems mirrors the settings object", () => {
 		cacheCelebrationStyle: "wave",
 		worktreeRoot: "/home/hank/code/trees",
 		repoAliases: { frontend: "fe" },
+		customItems: normalizeCustomItems([{ id: "clock", command: "date +%H:%M" }]),
 	};
 	const items = buildSettingItems(settings, {}, HOME);
 
@@ -256,10 +262,12 @@ test("buildSettingItems mirrors the settings object", () => {
 			"showContext",
 			"showUsage",
 			CACHE_CELEBRATION_ID,
+			"showCustomItems",
 			"showWorktrees",
 			"showSessionId",
 			WORKTREE_ROOT_ID,
 			REPO_ALIASES_ID,
+			CUSTOM_ITEMS_ID,
 		],
 		"rows follow the order their elements render in",
 	);
@@ -279,15 +287,31 @@ test("buildSettingItems mirrors the settings object", () => {
 			"Context",
 			"Subscription usage",
 			CACHE_CELEBRATION_LABEL,
+			"Custom items",
 			"Worktree line",
 			"Session ID line",
 			"Worktree root",
 			"Repo aliases",
+			"Custom item list",
 		],
 	);
 	assert.deepEqual(
 		items.map((item) => item.currentValue),
-		["dracula", "on", "off", "on", "on", "off", "wave", "on", "off", "~/code/trees", "1 alias"],
+		[
+			"dracula",
+			"on",
+			"off",
+			"on",
+			"on",
+			"off",
+			"wave",
+			"on",
+			"on",
+			"off",
+			"~/code/trees",
+			"1 alias",
+			"1/1 on",
+		],
 	);
 	assert.deepEqual(items[0]?.values, [...THEME_NAMES], "Enter cycles through every theme");
 	assert.deepEqual(
@@ -394,6 +418,7 @@ test("SETTING_KEYS stays exhaustive as settings are added", () => {
 		showDirectory: { ...defaults, showDirectory: false },
 		showContext: { ...defaults, showContext: false },
 		showUsage: { ...defaults, showUsage: false },
+		showCustomItems: { ...defaults, showCustomItems: false },
 		showWorktrees: { ...defaults, showWorktrees: false },
 		showSessionId: { ...defaults, showSessionId: false },
 		showCacheCelebration: { ...defaults, showCacheCelebration: false },
@@ -401,6 +426,10 @@ test("SETTING_KEYS stays exhaustive as settings are added", () => {
 		cacheCelebrationStyle: { ...defaults, cacheCelebrationStyle: "wave" },
 		worktreeRoot: { ...defaults, worktreeRoot: "/tmp/trees" },
 		repoAliases: { ...defaults, repoAliases: { a: "1" } },
+		customItems: {
+			...defaults,
+			customItems: normalizeCustomItems([{ id: "clock", command: "date +%H:%M" }]),
+		},
 	};
 	for (const key of SETTING_KEYS) {
 		assert.deepEqual(changedSettingKeys(defaults, changes[key]), [key], `${key} is not diffed`);
@@ -496,4 +525,14 @@ test("a merging save still works when the file is missing or corrupt", async (t)
 		{ showModel: false },
 		"unreadable content is discarded rather than propagated",
 	);
+});
+
+test("the custom-items toggle row appears only once there is something to toggle", () => {
+	// With no items the toggle is a row that does nothing; the list row is where
+	// an item gets created, and the toggle earns its place after that.
+	const ids = (settings: StatuslineSettings) => buildSettingItems(settings, {}, HOME).map((item) => item.id);
+	assert.ok(!ids(defaultSettings(HOME)).includes("showCustomItems"));
+	assert.ok(ids(defaultSettings(HOME)).includes(CUSTOM_ITEMS_ID), "the list row is always offered");
+	const configured = { ...defaultSettings(HOME), customItems: normalizeCustomItems([{ command: "date" }]) };
+	assert.ok(ids(configured).includes("showCustomItems"));
 });

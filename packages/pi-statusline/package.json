@@ -35,6 +35,8 @@
     "cache-celebration.ts",
     "celebration-preview.ts",
     "celebration-styles.ts",
+    "custom.ts",
+    "custom-setup.ts",
     "redraw.ts",
     "settings.ts",
     "settings-menu.ts",

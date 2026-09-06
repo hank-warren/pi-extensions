@@ -8,6 +8,12 @@ import {
 	DEFAULT_CELEBRATION_STYLE,
 	isCelebrationStyleName,
 } from "./celebration-styles.ts";
+import {
+	type CustomItem,
+	normalizeCustomItems,
+	sameCustomItems,
+	serializeCustomItems,
+} from "./custom.ts";
 import { DEFAULT_THEME, isThemeName, type StatuslineThemeName } from "./themes.ts";
 
 /** Toggle keys, in the order the `/statusline` menu lists them. */
@@ -17,6 +23,7 @@ export const BOOLEAN_SETTING_KEYS = [
 	"showDirectory",
 	"showContext",
 	"showUsage",
+	"showCustomItems",
 	"showWorktrees",
 	"showSessionId",
 	"showCacheCelebration",
@@ -33,6 +40,8 @@ export interface StatuslineSettings extends Record<BooleanSettingKey, boolean> {
 	worktreeRoot: string;
 	/** `repository name -> display alias` overrides for the worktree line. */
 	repoAliases: Record<string, string>;
+	/** User-defined command segments rendered after the usage meters. */
+	customItems: CustomItem[];
 }
 
 function defaultWorktreeRoot(home: string = homedir()): string {
@@ -47,6 +56,9 @@ export function defaultSettings(home: string = homedir()): StatuslineSettings {
 		showDirectory: true,
 		showContext: true,
 		showUsage: true,
+		// On by default and free until the user configures an item: with an empty
+		// list nothing renders, nothing is spawned, and no timer runs.
+		showCustomItems: true,
 		showWorktrees: true,
 		showSessionId: true,
 		showCacheCelebration: true,
@@ -54,6 +66,7 @@ export function defaultSettings(home: string = homedir()): StatuslineSettings {
 		cacheCelebrationStyle: DEFAULT_CELEBRATION_STYLE,
 		worktreeRoot: defaultWorktreeRoot(home),
 		repoAliases: {},
+		customItems: [],
 	};
 }
 
@@ -140,6 +153,7 @@ export function normalizeSettings(value: unknown, home: string = homedir()): Nor
 		"cacheCelebrationStyle",
 		"worktreeRoot",
 		"repoAliases",
+		"customItems",
 	]);
 	for (const [key, raw] of Object.entries(value)) {
 		if (!known.has(key)) {
@@ -156,6 +170,12 @@ export function normalizeSettings(value: unknown, home: string = homedir()): Nor
 		if (key === "repoAliases") {
 			const aliases = normalizeAliases(raw);
 			if (aliases) settings.repoAliases = aliases;
+			continue;
+		}
+		if (key === "customItems") {
+			// Unusable entries come back as items carrying their parse error rather
+			// than being dropped, so a write cannot delete what it failed to read.
+			settings.customItems = normalizeCustomItems(raw);
 			continue;
 		}
 		if (key === "theme") {
@@ -185,6 +205,7 @@ export const SETTING_KEYS = [
 	"cacheCelebrationStyle",
 	"worktreeRoot",
 	"repoAliases",
+	"customItems",
 ] as const satisfies readonly (keyof StatuslineSettings)[];
 
 export type SettingKey = (typeof SETTING_KEYS)[number];
@@ -205,11 +226,11 @@ export function changedSettingKeys(
 	previous: StatuslineSettings,
 	next: StatuslineSettings,
 ): SettingKey[] {
-	return SETTING_KEYS.filter((key) =>
-		key === "repoAliases"
-			? !sameAliases(previous.repoAliases, next.repoAliases)
-			: previous[key] !== next[key],
-	);
+	return SETTING_KEYS.filter((key) => {
+		if (key === "repoAliases") return !sameAliases(previous.repoAliases, next.repoAliases);
+		if (key === "customItems") return !sameCustomItems(previous.customItems, next.customItems);
+		return previous[key] !== next[key];
+	});
 }
 
 /**
@@ -232,6 +253,9 @@ export function serializeSettings(
 	}
 	if (settings.worktreeRoot !== defaults.worktreeRoot) out.worktreeRoot = settings.worktreeRoot;
 	if (!sameAliases(settings.repoAliases, defaults.repoAliases)) out.repoAliases = { ...settings.repoAliases };
+	// An empty list is the default and stays out of the file; a configured one is
+	// written back from each entry's original source object.
+	if (settings.customItems.length > 0) out.customItems = serializeCustomItems(settings.customItems);
 	return out;
 }
 
