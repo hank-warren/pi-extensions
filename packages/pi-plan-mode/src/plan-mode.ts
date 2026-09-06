@@ -52,6 +52,20 @@ import { type PlanModeState, restorePlanModeState } from "./state.js";
 
 const STATE_ENTRY_TYPE = "plan-mode-state";
 const ASK_USER_AVAILABILITY_EVENT = "hank:ask-user:availability";
+/** Label Herdr shows while `plan_mode_question` waits; distinguishes it from an approval. */
+export const HERDR_BLOCKED_LABEL = "plan question";
+
+/**
+ * Tell Herdr this pane is waiting on a human, so a supervising agent in another
+ * pane sees the block instead of reading a stalled turn as progress. Same
+ * contract as pi-auto-permissions' `setHerdrBlocked`, duplicated rather than
+ * imported so Plan Mode has no dependency on the permissions engine. No-op
+ * outside Herdr.
+ */
+function setHerdrBlocked(pi: ExtensionAPI, active: boolean): void {
+	if (process.env.HERDR_ENV !== "1") return;
+	pi.events.emit("herdr:blocked", active ? { active: true, label: HERDR_BLOCKED_LABEL } : { active: false });
+}
 /**
  * Plan mode's entire enforcement surface. Everything else — bash, subagents,
  * MCP, and other extension tools — is left to the session's normal permission
@@ -221,7 +235,11 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 			return answerPlanModeQuestions(
 				parsed.questions,
 				ctx,
-				{ isCurrent: menu.isCurrent, isEnabled: () => state.enabled },
+				{
+					isCurrent: menu.isCurrent,
+					isEnabled: () => state.enabled,
+					onBlocked: (active) => setHerdrBlocked(pi, active),
+				},
 				questionSignal,
 			);
 		},

@@ -162,3 +162,54 @@ test("a session replacement cancels an open question even without a tool signal"
 	assert.equal(result.details?.reason, "cancelled");
 	release?.();
 });
+
+/**
+ * Herdr. A child in Plan Mode stuck on a question used to read as `working`
+ * to a supervising agent in another pane, because only Auto Permissions told
+ * Herdr it was blocked. The question tool now emits the same `herdr:blocked`
+ * signal, labelled so the supervisor can tell it from an approval, and clears
+ * it however the wait ends — the abort path is the one that matters, since a
+ * throw that skipped the clear would leave the pane "blocked" forever.
+ */
+test("inside herdr, an open question reports blocked and an abort clears it", async () => {
+	process.env.HERDR_ENV = "1";
+	try {
+		const mock = createMockPi();
+		const herdr: unknown[] = [];
+		mock.rawPi.events.on("herdr:blocked", (payload: unknown) => herdr.push(payload));
+		planMode(mock.pi);
+		const controller = new AbortController();
+		let release: (() => void) | undefined;
+		const context = createMockContext({
+			hasUI: true,
+			mode: "tui",
+			select: () =>
+				new Promise<string | undefined>((resolve) => {
+					release = () => resolve(undefined);
+				}),
+		});
+		await mock.commands.get("plan")?.handler("start", context.ctx);
+
+		const pending = questionTool(mock)("call-1", QUESTIONS, controller.signal, undefined, context.ctx);
+		await Promise.resolve();
+		assert.deepEqual(herdr, [{ active: true, label: "plan question" }], "blocked while the selector is open");
+		controller.abort();
+		await pending;
+		assert.deepEqual(herdr, [{ active: true, label: "plan question" }, { active: false }], "cleared on abort");
+		release?.();
+	} finally {
+		delete process.env.HERDR_ENV;
+	}
+});
+
+test("outside herdr, no herdr signal is emitted", async () => {
+	delete process.env.HERDR_ENV;
+	const mock = createMockPi();
+	const herdr: unknown[] = [];
+	mock.rawPi.events.on("herdr:blocked", (payload: unknown) => herdr.push(payload));
+	planMode(mock.pi);
+	const context = createMockContext({ hasUI: true, mode: "tui", select: () => Promise.resolve("1. Small — Only the bug.") });
+	await mock.commands.get("plan")?.handler("start", context.ctx);
+	await questionTool(mock)("call-1", QUESTIONS, undefined, undefined, context.ctx);
+	assert.deepEqual(herdr, []);
+});

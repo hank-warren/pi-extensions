@@ -65,9 +65,23 @@ function emitPrompt(pi: ExtensionAPI, params: AskUserParams): void {
 	pi.events.emit(ASK_USER_PROMPT_EVENT, payload);
 }
 
+/**
+ * Label Herdr shows for a pane waiting on this dialog. A supervising agent
+ * reads it to tell a question from an Auto Permissions prompt (whose label
+ * is the gate name, e.g. `shell command`).
+ */
+export const HERDR_BLOCKED_LABEL = "question";
+
 function emitBlocked(pi: ExtensionAPI, active: boolean): void {
 	const payload: AskUserBlockedEventPayload = { active };
 	pi.events.emit(ASK_USER_BLOCKED_EVENT, payload);
+	// Herdr's pi integration turns `herdr:blocked` into `agent_status: "blocked"`,
+	// which is how an orchestrator in another pane learns this session is
+	// waiting on a human rather than working. Same contract pi-auto-permissions
+	// uses (`setHerdrBlocked`); duplicated rather than imported, because a
+	// questionnaire must not pull in the permissions engine. No-op outside Herdr.
+	if (process.env.HERDR_ENV !== "1") return;
+	pi.events.emit("herdr:blocked", active ? { active: true, label: HERDR_BLOCKED_LABEL } : { active: false });
 }
 
 export function registerTool(pi: ExtensionAPI): void {

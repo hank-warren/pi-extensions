@@ -192,3 +192,30 @@ test("an answered dialog is unaffected by a later abort", async () => {
 	// The listener must already be gone; aborting now must not throw.
 	controller.abort();
 });
+
+/**
+ * Herdr. A child pi session stuck on a question used to read as `working` to
+ * a supervising agent in another pane, because only Auto Permissions told
+ * Herdr it was blocked. The questionnaire now emits the same `herdr:blocked`
+ * signal, labelled so the supervisor can tell a question from an approval.
+ */
+test("inside herdr, the questionnaire reports itself as blocked on a human and clears it", async () => {
+	process.env.HERDR_ENV = "1";
+	try {
+		const h = harness();
+		await h.execute("call", params, undefined, undefined, h.ctx);
+		const herdr = h.emitted.filter((e) => e.channel === "herdr:blocked").map((e) => e.payload);
+		assert.deepEqual(herdr, [{ active: true, label: "question" }, { active: false }]);
+	} finally {
+		delete process.env.HERDR_ENV;
+	}
+});
+
+test("outside herdr, no herdr signal is emitted", async () => {
+	delete process.env.HERDR_ENV;
+	const h = harness();
+	await h.execute("call", params, undefined, undefined, h.ctx);
+	assert.equal(h.emitted.filter((e) => e.channel === "herdr:blocked").length, 0);
+	// The package's own event still fires either way.
+	assert.equal(h.emitted.filter((e) => e.channel === "hank:ask-user:blocked").length, 2);
+});
