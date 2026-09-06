@@ -448,3 +448,39 @@ test("ready RPC menu keeps both implementation choices understandable without de
 		assertImplementationChoiceCopy(observedMenu.title, observedMenu.options);
 	});
 });
+
+/**
+ * Herdr. Automatic readiness opens the menu after the turn settles, which is
+ * exactly when Herdr would otherwise mark the pane idle. The menu carries its
+ * own label so a supervisor can tell "plan awaiting a decision" from a
+ * mid-draft `plan question`, and clears once a choice is made.
+ */
+test("inside herdr, the automatic ready menu reports blocked until a choice is made", async () => {
+	process.env.HERDR_ENV = "1";
+	try {
+		await withAgentDir(async () => {
+			const mock = createMockPi({ activeTools: ["read", "edit"] });
+			const herdr: unknown[] = [];
+			mock.rawPi.events.on("herdr:blocked", (payload: unknown) => herdr.push(payload));
+			planMode(mock.pi, MISSING_SETTINGS);
+			let release: ((choice: string) => void) | undefined;
+			const context = createMockContext({
+				mode: "rpc",
+				hasUI: true,
+				select: () => new Promise<string | undefined>((resolve) => (release = resolve)),
+			});
+			await mock.events.get("session_start")?.[0]?.({}, context.ctx);
+			await mock.commands.get("plan")?.handler("start", context.ctx);
+			await completePlan(mock, context.ctx);
+			const settled = mock.events.get("agent_settled")?.[0]?.({}, context.ctx);
+			while (release === undefined) await new Promise((resolve) => setImmediate(resolve));
+
+			assert.deepEqual(herdr, [{ active: true, label: "plan ready" }], "blocked while the ready menu is open");
+			release("Stay in Plan mode");
+			await settled;
+			assert.deepEqual(herdr, [{ active: true, label: "plan ready" }, { active: false }], "cleared on choice");
+		});
+	} finally {
+		delete process.env.HERDR_ENV;
+	}
+});

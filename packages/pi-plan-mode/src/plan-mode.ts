@@ -54,6 +54,14 @@ const STATE_ENTRY_TYPE = "plan-mode-state";
 const ASK_USER_AVAILABILITY_EVENT = "hank:ask-user:availability";
 /** Label Herdr shows while `plan_mode_question` waits; distinguishes it from an approval. */
 export const HERDR_BLOCKED_LABEL = "plan question";
+/**
+ * Label Herdr shows while the "Proposed plan ready. What next?" menu waits.
+ * That menu opens after the drafting turn settles, so without a signal Herdr
+ * reported the pane idle while it was waiting on a human to pick implement /
+ * export / discard. A distinct label lets a supervisor tell "plan awaiting a
+ * decision" from a mid-draft question.
+ */
+export const HERDR_READY_BLOCKED_LABEL = "plan ready";
 
 /**
  * Tell Herdr this pane is waiting on a human, so a supervising agent in another
@@ -62,9 +70,9 @@ export const HERDR_BLOCKED_LABEL = "plan question";
  * imported so Plan Mode has no dependency on the permissions engine. No-op
  * outside Herdr.
  */
-function setHerdrBlocked(pi: ExtensionAPI, active: boolean): void {
+function setHerdrBlocked(pi: ExtensionAPI, active: boolean, label: string): void {
 	if (process.env.HERDR_ENV !== "1") return;
-	pi.events.emit("herdr:blocked", active ? { active: true, label: HERDR_BLOCKED_LABEL } : { active: false });
+	pi.events.emit("herdr:blocked", active ? { active: true, label } : { active: false });
 }
 /**
  * Plan mode's entire enforcement surface. Everything else — bash, subagents,
@@ -188,6 +196,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 					: "Plan mode disabled.";
 			void exitAndNotify(ctx, text);
 		},
+		onReadyBlocked: (active) => setHerdrBlocked(pi, active, HERDR_READY_BLOCKED_LABEL),
 	});
 
 	pi.registerFlag("plan", {
@@ -238,7 +247,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 				{
 					isCurrent: menu.isCurrent,
 					isEnabled: () => state.enabled,
-					onBlocked: (active) => setHerdrBlocked(pi, active),
+					onBlocked: (active) => setHerdrBlocked(pi, active, HERDR_BLOCKED_LABEL),
 				},
 				questionSignal,
 			);
