@@ -1,5 +1,13 @@
 # @hank-warren/pi-plan-mode
 
+## 1.7.1
+
+### Patch Changes
+
+- Report the "Proposed plan ready. What next?" menu to Herdr as blocked.
+
+  The ready menu opens after the drafting turn settles, so Herdr's pi integration had already marked the pane `idle` while it was actually waiting on a human to pick implement / export / stay / discard — a supervising agent in another pane read that as nothing happening. Plan Mode now emits the same `herdr:blocked` signal the question tool uses, labelled `plan ready` so a supervisor can tell it from a mid-draft `plan question`, and clears it however the menu closes. No-op outside `HERDR_ENV=1`.
+
 ## 1.7.0
 
 ### Minor Changes
