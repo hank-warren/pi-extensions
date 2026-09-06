@@ -1,5 +1,7 @@
 # pi-loop — long-running work for the Pi coding agent
 
+> **Deprecated.** pi-loop is no longer loaded by the git install of this repository and receives no new features. Its role — keeping autonomous work moving and gating completion on evidence — has moved to the [`pi-orchestrator`](../pi-orchestrator) skill package: a supervising pi session watching real pi sessions in Herdr panes, reading their state, answering their prompts within policy, steering them, and verifying their claims. A loop is a pacemaker for one session that cannot be trusted to pace itself; a supervisor with fresh context does that by judgment, and can see, attach to, and redirect each child. The package stays on npm and continues to install with `pi install npm:@hank-warren/pi-loop` for anyone who prefers it.
+
 Inspired by Claude Code's `/loop`, adapted to Pi: keep work moving across many turns, and keep long loops coherent across context compaction.
 
 A loop is a **pacemaker** that owns its own work: it carries an objective, completion criteria and ground rules, and ends when the model calls `loop_complete` with cited evidence, its expiry arrives, a cap you set is reached, or you stop it. Every loop is planned with you and started from an approval card. **No other extension is required.**

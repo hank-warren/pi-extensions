@@ -1,0 +1,37 @@
+{
+  "name": "@hank-warren/pi-orchestrator",
+  "version": "0.1.0",
+  "description": "Skill for Pi: supervise first-class pi sessions running in Herdr panes — launch children, read their state cheaply, answer Auto Permissions prompts within policy, steer, wait, verify.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-skill",
+    "skill",
+    "orchestrator",
+    "herdr",
+    "supervisor",
+    "coding-agent"
+  ],
+  "author": "Hank Warren",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hank-warren/pi-extensions.git",
+    "directory": "packages/pi-orchestrator"
+  },
+  "bugs": {
+    "url": "https://github.com/hank-warren/pi-extensions/issues"
+  },
+  "homepage": "https://github.com/hank-warren/pi-extensions/tree/main/packages/pi-orchestrator#readme",
+  "pi": {
+    "skills": [
+      "./pi-orchestrator"
+    ]
+  },
+  "files": [
+    "pi-orchestrator/",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ]
+}

@@ -33,12 +33,12 @@
       "./packages/pi-plan-mode/index.ts",
       "./packages/pi-ask-user-question/index.ts",
       "./packages/pi-multi-login/index.ts",
-      "./packages/pi-loop/index.ts",
       "./packages/pi-stash/index.ts"
     ],
     "skills": [
       "./packages/pi-auto-permissions/auto-permissions-setup",
-      "./packages/pi-simplify/simplify"
+      "./packages/pi-simplify/simplify",
+      "./packages/pi-orchestrator/pi-orchestrator"
     ]
   },
   "devDependencies": {
