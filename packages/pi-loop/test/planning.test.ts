@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildProposal, renderProposalCard } from "../src/planning.js";
+import { existsSync } from "node:fs";
+import { isAbsolute } from "node:path";
+import { LOOP_CRAFT_DOC } from "../src/docs.js";
+import { buildProposal, LOOP_PLANNING_HINT, renderProposalCard } from "../src/planning.js";
 
 const DEFAULTS = { intervalMs: 600_000, maxTurns: 25, expiresInMs: 604_800_000 };
 
@@ -56,4 +59,15 @@ test("the card shows the objective, every criterion, the cadence and the caps", 
 	assert.match(card, /the loop advances whenever the session settles/);
 	assert.match(card, /Turn cap\*\* unlimited/);
 	assert.match(card, /Expires\*\* 7d/);
+});
+
+test("the planning hint points at the loop-craft doc, once, by absolute path", () => {
+	// The doc replaced a skill: a skill's description line was paid by every
+	// session and observed to trigger nothing, where a pointer injected only
+	// while planning is open costs nothing outside it. The pointer has to be a
+	// real absolute path, because "read the X skill if it is available" gave
+	// the model a way to skip it.
+	assert.ok(isAbsolute(LOOP_CRAFT_DOC));
+	assert.ok(existsSync(LOOP_CRAFT_DOC), `${LOOP_CRAFT_DOC} is not shipped`);
+	assert.ok(LOOP_PLANNING_HINT.includes(`read ${LOOP_CRAFT_DOC}`));
 });

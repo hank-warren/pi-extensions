@@ -74,11 +74,13 @@ test("ground rules ride in the system append, and only when approved", () => {
 	assert.ok(escaped?.includes("- never touch &lt;prod&gt;"));
 });
 
-test("no repeated loop message carries skill guidance", () => {
-	// The companion skill is pointed at from the tools' promptGuidelines and
-	// loaded on demand. If a pointer — or worse, its content — ever leaks into
-	// a stored message or the system append, every wake of every loop pays for
-	// it. Structural, so it fails no matter how the guidance is worded.
+test("no repeated loop message carries craft guidance", () => {
+	// The loop-craft doc is pointed at from the planning hint and the tools'
+	// promptGuidelines and loaded on demand. If a pointer — or worse, its
+	// content — ever leaks into a stored message or the system append, every
+	// wake of every loop pays for it. Structural, so it fails no matter how the
+	// guidance is worded: neither the path nor the word "skill" (its old name,
+	// which a stale sentence could still reach for) may appear.
 	for (const [label, message] of [
 		["anchor", buildKickoffAnchor(LOOP, LEDGER)],
 		["kickoff", buildContinuation(LOOP, "kickoff")],
@@ -89,6 +91,7 @@ test("no repeated loop message carries skill guidance", () => {
 		["append", buildLoopObjectivePrompt(LOOP, LEDGER) ?? ""],
 	] as const) {
 		assert.doesNotMatch(message, /skill/iu, `${label} mentions a skill`);
+		assert.doesNotMatch(message, /loop-craft\.md/u, `${label} points at the craft doc`);
 	}
 });
 

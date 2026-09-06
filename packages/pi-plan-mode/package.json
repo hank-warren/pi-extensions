@@ -27,15 +27,12 @@
   "pi": {
     "extensions": [
       "./index.ts"
-    ],
-    "skills": [
-      "./skills/pi-plan-mode"
     ]
   },
   "files": [
     "index.ts",
     "src",
-    "skills",
+    "docs/plan-craft.md",
     "README.md",
     "NOTICE.md",
     "LICENSE",

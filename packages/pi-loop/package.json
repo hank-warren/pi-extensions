@@ -29,15 +29,12 @@
   "pi": {
     "extensions": [
       "./index.ts"
-    ],
-    "skills": [
-      "./skills/pi-loop"
     ]
   },
   "files": [
     "index.ts",
     "src",
-    "skills",
+    "docs/loop-craft.md",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"

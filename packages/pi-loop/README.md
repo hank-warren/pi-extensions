@@ -205,13 +205,13 @@ These were considered and cut, and the reasoning is recorded so they are not sil
 - **No judge model.** Grading completion with a second model is a larger, more expensive change than the criteria/evidence gate; the gate is the rung that ships.
 - **No `loop_blocked` tool.** `loop_wait` covers a real external dependency, and the no-progress breaker covers an impasse the model does not recognise as one. A third "I give up" tool mostly gives a model a way to stop early. `compaction.instructions` overrides the built-in template.
 
-## The companion skill
+## The loop-craft doc
 
-The package is a hybrid: it ships the extension **and** a `pi-loop` skill (`skills/pi-loop/SKILL.md`), which carries the judgment the engine cannot encode — how an objective becomes falsifiable criteria, what the evidence gate accepts as a citation, when to declare a `loop_wait` instead of polling, what `PROGRESS.md` is worth, and when the work belongs in no loop at all.
+The engine cannot encode the judgment that decides whether a loop is worth running — how an objective becomes falsifiable criteria, what the evidence gate accepts as a citation, when to declare a `loop_wait` instead of polling, what `PROGRESS.md` is worth, and when the work belongs in no loop at all. That lives in [`docs/loop-craft.md`](docs/loop-craft.md), which ships with the package.
 
-It is **loaded on demand**: the planning hint and `loop_complete`'s prompt guidelines point at it by name, exactly as `pi-processes` does, and the model reads the body when it judges it needs it. Nothing about the guidance enters a stored loop message or the system append — those bytes are the cache prefix, and `test/bytes.test.ts` fails if any of them so much as mentions a skill.
+It is **loaded on demand**: the planning hint and `loop_complete`'s prompt guidelines name it by absolute path (resolved from the installed package, so it works under any install layout) and the model reads it when it reaches those moments. Nothing about the guidance enters a stored loop message or the system append — those bytes are the cache prefix, and `test/bytes.test.ts` fails if any of them so much as mentions it.
 
-Skill and extension version as one artifact on purpose: a skill describing an engine the installed extension does not have is the coupling failure this repository already learned once.
+It used to be a skill. A skill's description line is in every system prompt, which buys exactly one thing an injected pointer cannot: the model proposing a loop unprompted. Across ~220 sessions after it shipped, every read of the file was triggered by the planning hint or the completion tool, never by the description, and the model never suggested `/loop` on its own — so the line was a tax on every session that never ran a loop (about 95% of them) that bought nothing. A hard path injected only while a loop is being drafted or completed is the same document at zero cost outside those moments.
 
 ## Install
 

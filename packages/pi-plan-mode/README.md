@@ -17,7 +17,7 @@ The plan is written to a **durable file** that survives compaction, survives res
 - Two ways to implement: continue in this conversation, or open a fresh session that reads the same file.
 - `/plan export [path]` copies the plan anywhere, never overwriting an existing target.
 - Hand-edit the plan file at any time; every command and both implementation paths read from disk.
-- A companion `pi-plan-mode` **skill**, loaded on demand, carrying the plan-crafting craft the prompt only points at.
+- A shipped **plan-craft doc** the prompt points at by path, carrying the plan-crafting craft the prompt itself only names.
 
 ## 📦 Install
 
@@ -118,11 +118,11 @@ Detection is by tool name at runtime, re-evaluated every turn — there is no de
 
 A standalone `pi-plan-mode` install loses nothing: `plan_mode_question` stays fully functional and the prompt reads exactly as it always has. It is a **legacy fallback** and is slated for removal in a future major.
 
-## 📚 The companion skill
+## 📚 The plan-craft doc
 
-The package ships a `pi-plan-mode` skill (`skills/pi-plan-mode/SKILL.md`) alongside the extension. The system prompt is the enforcement surface and stays deliberately short; the skill is the depth layer it points at — what decision-complete actually means, why exploration comes before questions, what separates a question worth asking from one the repository already answered, and what belongs in a finished plan. One line in the planning prompt names it, and the model loads the body when it judges it needs it.
+The system prompt is the enforcement surface and stays deliberately short. The depth layer it points at — what decision-complete actually means, why exploration comes before questions, what separates a question worth asking from one the repository already answered, and what belongs in a finished plan — is [`docs/plan-craft.md`](docs/plan-craft.md), shipped with the package. One line in the planning prompt names it by absolute path (resolved from the installed package, so it works under any install layout), and the model reads it when Plan Mode opens.
 
-Skill and extension version as one artifact: a skill describing a mode the installed extension does not have is a coupling failure waiting to happen.
+It used to be a skill. A skill's description line is in every system prompt, which buys exactly one thing an injected pointer cannot: the model proposing planning unprompted. Across ~220 sessions after it shipped, every read of the file happened after the Plan Mode prompt was already active, never off the description, and the model never suggested `/plan` on its own — so the line was a tax on every session that never planned (about 95% of them) that bought nothing. A hard path injected only while the mode is active is the same document at zero cost outside it.
 
 ## 📊 Statusline and widget
 
@@ -145,7 +145,7 @@ packages/pi-plan-mode/
 │   ├── plan-file.ts      # Durable plan file read/write/delete
 │   ├── interactive-ui.ts # Lazily loaded interactive menus
 │   └── *.ts              # Prompt, question, export, settings modules
-├── skills/pi-plan-mode/  # Companion plan-crafting skill
+├── docs/plan-craft.md    # Plan-crafting depth, injected by path while the mode is active
 ├── test/
 ├── README.md
 ├── NOTICE.md

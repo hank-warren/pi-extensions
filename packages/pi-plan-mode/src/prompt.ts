@@ -1,3 +1,25 @@
+import { join } from "node:path";
+
+/**
+ * The plan-craft document: what decision-complete means, why exploration comes
+ * before questions, what separates a question worth asking from one the
+ * repository already answers, and what a finished plan contains.
+ *
+ * It used to ship as a skill. A skill buys one thing an injected pointer
+ * cannot: a description line in every system prompt, so the model could
+ * propose planning unprompted. Across ~220 sessions after it shipped, every
+ * read of the file happened after the Plan Mode prompt was already active —
+ * never off the description — and the model never suggested `/plan` on its
+ * own. So the line was a tax on every session that never planned (~95% of
+ * them) and bought nothing. An absolute path, injected only while Plan Mode
+ * is active, is the same document at zero cost outside it, and a hard path
+ * beats "if it is available".
+ *
+ * Resolved from this module's own location so it survives every install
+ * layout (git, npm, workspace symlink, `npm link`).
+ */
+export const PLAN_CRAFT_DOC = join(import.meta.dirname, "..", "docs", "plan-craft.md");
+
 const PLAN_CONTEXT_MARKER = "[PLAN MODE ACTIVE]";
 
 /** The built-in question tool. Used whenever nothing better is installed. */
@@ -71,7 +93,7 @@ You are in Plan Mode, a collaboration mode for producing a decision-complete imp
 
 ## Mode rules
 
-- Read the pi-plan-mode skill before planning if it is available: it carries the plan-crafting craft — decision-completeness, exploring before asking, question quality, and what a finished plan contains.
+- Before planning, read ${PLAN_CRAFT_DOC}: it carries the plan-crafting craft — decision-completeness, exploring before asking, question quality, and what a finished plan contains.
 - Stay in Plan Mode until a developer or extension explicitly exits it.
 - Treat requests to implement as requests to plan the implementation; do not edit files or carry out the plan.
 - Do not use todo/checklist tooling to track execution progress in Plan Mode; Plan Mode is conversational planning, and the plan itself belongs in plan_mode_complete.

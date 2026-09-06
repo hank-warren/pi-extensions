@@ -24,6 +24,7 @@
 
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { LOOP_CRAFT_DOC } from "./docs.js";
 import type { LoopController } from "./loop.js";
 import type { LoopCriterion } from "./ledger.js";
 
@@ -92,7 +93,7 @@ export function registerLoopCompleteTool(pi: ExtensionAPI, controller: LoopContr
 				"Pass the exact loop_id from the active /loop objective in the system prompt. A mismatched id means the loop changed and the call is refused.",
 				"loop_complete stops scheduled wakeups only. It does not mean an unrelated goal or task is complete.",
 				"If the criteria are not met, do not call it: keep working and expect another continuation.",
-				"Before your first loop_complete this session, read the pi-loop skill: it describes what the evidence gate accepts as a citation and what it refuses.",
+				`Before your first loop_complete this session, read ${LOOP_CRAFT_DOC}: it describes what the evidence gate accepts as a citation and what it refuses.`,
 			],
 			parameters: Type.Object({
 				loop_id: Type.String({
