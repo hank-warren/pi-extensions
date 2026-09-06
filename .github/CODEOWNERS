@@ -1,5 +1,5 @@
-# Every change requires review from the repository owner.
-# Paired with a ruleset requiring code-owner review, this keeps `main`
-# maintainer-only while still letting anyone open a pull request from a fork.
-
+# Every path in this repository requires a review from Hank before it can merge.
+# Branch protection on main requires review from code owners, so a contributor's
+# own approval never satisfies the gate, and a merge is the only way a changeset
+# becomes a release.
 * @hank-warren
