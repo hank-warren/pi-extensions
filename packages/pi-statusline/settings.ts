@@ -19,6 +19,7 @@ import { DEFAULT_THEME, isThemeName, type StatuslineThemeName } from "./themes.t
 /** Toggle keys, in the order the `/statusline` menu lists them. */
 export const BOOLEAN_SETTING_KEYS = [
 	"showModel",
+	"showThinking",
 	"showProvider",
 	"showDirectory",
 	"showContext",
@@ -51,6 +52,9 @@ function defaultWorktreeRoot(home: string = homedir()): string {
 export function defaultSettings(home: string = homedir()): StatuslineSettings {
 	return {
 		showModel: true,
+		// Opt-in: an extra segment on every existing footer would be a surprise,
+		// and most sessions keep one thinking level for their whole life.
+		showThinking: false,
 		// Opt-in: the provider is redundant for anyone with a single login per family.
 		showProvider: false,
 		showDirectory: true,

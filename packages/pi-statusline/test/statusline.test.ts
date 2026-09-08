@@ -243,6 +243,7 @@ test("renderStatusline marks unknown context usage and respects narrow widths", 
 
 const GATED_DATA: StatuslineData = {
 	model: "gpt-5.6-sol",
+	thinkingLevel: "high",
 	provider: "anthropic-team",
 	cwd: "pi-extensions",
 	cwdGit: { branch: "main", dirty: false, behind: 0 },
@@ -266,7 +267,8 @@ test("each disabled element removes exactly its segment, never a stray separator
 
 	const expected: Record<BooleanSettingKey, string[]> = {
 		showModel: ["pi-extensions:main | 40k/1.0m | \uec81 80", "⑂ infrastructure:fix/alerts #9", "session-id"],
-		// Off by default, so disabling it is a no-op — the enabling tests below cover it.
+		// Off by default, so disabling them is a no-op — the enabling tests below cover them.
+		showThinking: full,
 		showProvider: full,
 		showDirectory: ["gpt-5.6-sol | 40k/1.0m | \uec81 80", "⑂ infrastructure:fix/alerts #9", "session-id"],
 		showContext: ["gpt-5.6-sol | pi-extensions:main | \uec81 80", "⑂ infrastructure:fix/alerts #9", "session-id"],
@@ -326,6 +328,46 @@ test("a missing provider drops the segment instead of leaving a separator", () =
 	}
 });
 
+test("the thinking segment is opt-in and sits between the model and the provider", () => {
+	const settings = defaultSettings("/home/hank");
+
+	assert.equal(
+		stripAnsi(renderStatusline(GATED_DATA, 160, settings)[0]),
+		"gpt-5.6-sol | pi-extensions:main | 40k/1.0m | \uec81 80",
+		"a level in the data changes nothing until the setting is on",
+	);
+
+	const on = renderStatusline(GATED_DATA, 160, { ...settings, showThinking: true, showProvider: true });
+	assert.equal(
+		stripAnsi(on[0]),
+		"gpt-5.6-sol | high | anthropic-team | pi-extensions:main | 40k/1.0m | \uec81 80",
+	);
+	assert.ok(
+		on[0].includes(`\x1b[2m | \x1b[0m\x1b[38;2;95;176;255mhigh\x1b[0m\x1b[2m | \x1b[0m`),
+		"the level gets its own palette role, not the model's",
+	);
+});
+
+test("thinking off is spelled out; a non-reasoning model drops the segment", () => {
+	const settings = { ...defaultSettings("/home/hank"), showThinking: true };
+
+	assert.equal(
+		stripAnsi(renderStatusline({ ...GATED_DATA, thinkingLevel: "off" }, 160, settings)[0]),
+		"gpt-5.6-sol | thinking off | pi-extensions:main | 40k/1.0m | \uec81 80",
+		"a bare 'off' between two ids would mean nothing",
+	);
+
+	const off = renderStatusline(GATED_DATA, 160, { ...settings, showThinking: false });
+	for (const thinkingLevel of [undefined, ""]) {
+		const rendered = renderStatusline({ ...GATED_DATA, thinkingLevel }, 160, settings);
+		assert.deepEqual(rendered, off, `level ${JSON.stringify(thinkingLevel)} renders as if disabled`);
+		for (const line of rendered.map(stripAnsi)) {
+			assert.doesNotMatch(line, /^\s*\|/, "leading separator");
+			assert.doesNotMatch(line, /\|\s*$/, "trailing separator");
+		}
+	}
+});
+
 test("the model and provider toggles are independent", () => {
 	const settings = defaultSettings("/home/hank");
 	const line = stripAnsi(
@@ -341,6 +383,7 @@ test("disabling every element still renders one stable footer row", () => {
 	const off = { ...settings } as ReturnType<typeof defaultSettings>;
 	for (const key of [
 		"showModel",
+		"showThinking",
 		"showProvider",
 		"showDirectory",
 		"showContext",
@@ -391,8 +434,9 @@ test("the cache celebration is gated and never orphaned on a badge-only line", (
 });
 
 test("themes recolour every element without changing the rendered text", () => {
-	// showProvider is opt-in, so the theme sweep has to enable it to cover its role.
-	const settings = { ...defaultSettings("/home/hank"), showProvider: true };
+	// showThinking and showProvider are opt-in, so the theme sweep has to enable
+	// them to cover their roles.
+	const settings = { ...defaultSettings("/home/hank"), showThinking: true, showProvider: true };
 	const data = { ...GATED_DATA, cacheCelebration: { percent: 96, frame: 0 } };
 	const plain = renderStatusline(data, 160, settings).map(stripAnsi);
 	const seen = new Set<string>();
@@ -405,6 +449,7 @@ test("themes recolour every element without changing the rendered text", () => {
 
 		const palette = STATUSLINE_THEMES[theme];
 		assert.ok(lines[0].startsWith(palette.model), `${theme} colours the model`);
+		assert.ok(lines[0].includes(palette.thinking), `${theme} colours the thinking level`);
 		assert.ok(lines[0].includes(palette.provider), `${theme} colours the provider`);
 		assert.ok(lines[0].includes(palette.branch), `${theme} colours the branch`);
 		assert.ok(lines[2].startsWith(palette.dim), `${theme} dims the session id`);

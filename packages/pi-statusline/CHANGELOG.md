@@ -1,5 +1,22 @@
 # @hank-warren/pi-statusline
 
+## 0.9.0
+
+### Minor Changes
+
+- Add an optional **Thinking level** segment between the model and the provider.
+
+  `/statusline` gains a **Thinking level** toggle, off by default. When on, the
+  active model's thinking level renders after the model id
+  (`gpt-5.6-luna | medium | openai-codex | …`) in a new `thinking` palette role
+  present in every theme.
+  `off` on a reasoning model is spelled `thinking off`, as Pi's own footer does; a
+  model that cannot reason drops the segment entirely, leaving no stray separator.
+
+  The footer repaints the moment the level changes — the cycle keybinding
+  (Shift+Tab by default), `/model`, or an extension calling `pi.setThinkingLevel()`
+  — without waiting for a turn.
+
 ## 0.8.0
 
 ### Minor Changes

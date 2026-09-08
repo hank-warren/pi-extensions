@@ -44,6 +44,8 @@ import {
 
 export interface StatuslineData {
 	model: string;
+	/** Thinking level of the active model; absent when the model cannot reason. */
+	thinkingLevel?: string;
 	/** Provider id of the active model; absent when there is no model. */
 	provider?: string;
 	cwd: string;
@@ -189,6 +191,12 @@ export function renderStatusline(
 	const customSegments = settings.showCustomItems ? (data.customValues ?? []).filter((value) => value.length > 0) : [];
 	const segments = [
 		settings.showModel ? styled(palette.model, data.model) : undefined,
+		// A non-reasoning model has no level to show, so the segment goes with it.
+		// "off" on a reasoning model is a real state and reads as pi's own footer
+		// spells it, because a bare "off" between two ids means nothing.
+		settings.showThinking && data.thinkingLevel
+			? styled(palette.thinking, data.thinkingLevel === "off" ? "thinking off" : data.thinkingLevel)
+			: undefined,
 		// No provider is a missing segment, not a placeholder: the model id already
 		// says "no-model" in that state, and a second one would only add noise.
 		settings.showProvider && data.provider ? styled(palette.provider, data.provider) : undefined,
@@ -517,6 +525,9 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 					const usage = ctx.getContextUsage();
 					const cwd = basename(ctx.cwd) || ctx.cwd;
 					const model = ctx.model?.id.split("/").pop() || "no-model";
+					// ctx.thinkingLevel is a live getter on the session; the pi accessor is
+					// the same value for hosts whose context does not expose it.
+					const thinkingLevel = ctx.model?.reasoning ? (ctx.thinkingLevel ?? pi.getThinkingLevel()) : undefined;
 					// Commands size themselves with COLUMNS, so the tracker needs the
 					// width the footer is actually being drawn at.
 					customItems.setContext({ columns: width });
@@ -525,6 +536,7 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 						renderStatusline(
 							{
 								model,
+								thinkingLevel,
 								provider: ctx.model?.provider,
 								cwd,
 								cwdGit,
@@ -575,6 +587,9 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 		}
 		requestRender?.();
 	});
+	// The cycle keybinding (Shift+Tab by default) changes the level without a
+	// turn or a model change, so nothing else would repaint the segment.
+	pi.on("thinking_level_select", () => requestRender?.());
 	pi.on("session_tree", (_event, ctx) => resetTracker(ctx));
 	pi.on("session_shutdown", () => {
 		cacheCelebration.dispose();

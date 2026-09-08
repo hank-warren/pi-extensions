@@ -35,6 +35,7 @@ interface BooleanRow {
 /** Toggle rows, in statusline render order. */
 export const BOOLEAN_ROWS: readonly BooleanRow[] = [
 	{ id: "showModel", label: "Model", description: "Show the active model id." },
+	{ id: "showThinking", label: "Thinking level", description: "Show the thinking level of the active model." },
 	{ id: "showProvider", label: "Provider", description: "Show the provider of the active model." },
 	{ id: "showDirectory", label: "Directory & git", description: "Show the working directory and its git branch." },
 	{ id: "showContext", label: "Context", description: "Show context tokens used against the window." },
