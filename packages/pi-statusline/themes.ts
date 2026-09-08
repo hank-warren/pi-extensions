@@ -5,6 +5,8 @@
 export interface StatuslinePalette {
 	/** Active model id. */
 	model: string;
+	/** Thinking level of the active model. */
+	thinking: string;
 	/** Provider id of the active model. */
 	provider: string;
 	/** Repository and directory names. */
@@ -37,6 +39,7 @@ const rgb = (hex: string): string => {
 /** The palette this package shipped before themes existed. */
 const DEFAULT: StatuslinePalette = {
 	model: rgb("#0099ff"),
+	thinking: rgb("#5fb0ff"),
 	provider: rgb("#7aa2c8"),
 	path: rgb("#dcdcdc"),
 	branch: rgb("#56b6c2"),
@@ -53,6 +56,7 @@ const DEFAULT: StatuslinePalette = {
 /** Dracula, with the pink branch colour from Hank's Herdr sidebar config. */
 const DRACULA: StatuslinePalette = {
 	model: rgb("#bd93f9"),
+	thinking: rgb("#a98ae0"),
 	provider: rgb("#9580c9"),
 	path: rgb("#f8f8f2"),
 	branch: rgb("#ff79c6"),
@@ -68,6 +72,7 @@ const DRACULA: StatuslinePalette = {
 
 const GITHUB_DARK: StatuslinePalette = {
 	model: rgb("#58a6ff"),
+	thinking: rgb("#6399db"),
 	provider: rgb("#6e8bb5"),
 	path: rgb("#c9d1d9"),
 	branch: rgb("#39c5cf"),
@@ -83,6 +88,7 @@ const GITHUB_DARK: StatuslinePalette = {
 
 const CATPPUCCIN_MOCHA: StatuslinePalette = {
 	model: rgb("#cba6f7"),
+	thinking: rgb("#b89adf"),
 	provider: rgb("#a58fc4"),
 	path: rgb("#cdd6f4"),
 	branch: rgb("#89dceb"),
@@ -99,6 +105,7 @@ const CATPPUCCIN_MOCHA: StatuslinePalette = {
 /** No colour at all: white text, dimmed punctuation, a grey badge flash. */
 const WHITE: StatuslinePalette = {
 	model: rgb("#ffffff"),
+	thinking: rgb("#ffffff"),
 	provider: rgb("#ffffff"),
 	path: rgb("#ffffff"),
 	branch: rgb("#ffffff"),

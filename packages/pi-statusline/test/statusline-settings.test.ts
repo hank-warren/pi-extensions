@@ -77,6 +77,7 @@ test("defaults are the pre-settings behaviour, minus the hardcoded aliases", () 
 	// here instead of inheriting an assumption that every element ships enabled.
 	const expected: Record<BooleanSettingKey, boolean> = {
 		showModel: true,
+		showThinking: false,
 		showProvider: false,
 		showDirectory: true,
 		showContext: true,
@@ -257,6 +258,7 @@ test("buildSettingItems mirrors the settings object", () => {
 		[
 			THEME_ID,
 			"showModel",
+			"showThinking",
 			"showProvider",
 			"showDirectory",
 			"showContext",
@@ -282,6 +284,7 @@ test("buildSettingItems mirrors the settings object", () => {
 		[
 			"Theme",
 			"Model",
+			"Thinking level",
 			"Provider",
 			"Directory & git",
 			"Context",
@@ -300,6 +303,7 @@ test("buildSettingItems mirrors the settings object", () => {
 		[
 			"dracula",
 			"on",
+			"off",
 			"off",
 			"on",
 			"on",
@@ -413,7 +417,8 @@ test("SETTING_KEYS stays exhaustive as settings are added", () => {
 	const defaults = defaultSettings(HOME);
 	const changes: Record<SettingKey, StatuslineSettings> = {
 		showModel: { ...defaults, showModel: false },
-		// Off by default, so "differs from its default" means turning it on.
+		// Off by default, so "differs from its default" means turning them on.
+		showThinking: { ...defaults, showThinking: true },
 		showProvider: { ...defaults, showProvider: true },
 		showDirectory: { ...defaults, showDirectory: false },
 		showContext: { ...defaults, showContext: false },

@@ -41,6 +41,7 @@ const EXPECTED_SURFACES = {
 			"session_shutdown",
 			"session_start",
 			"session_tree",
+			"thinking_level_select",
 			"tool_call",
 			"turn_end",
 		],
