@@ -50,6 +50,108 @@ export const MARKER_ENTRY_TYPES = Object.freeze(["compaction", "branch_summary"]
 /** Prefix for provisional (pre-persistence) stream ids. */
 const PROVISIONAL_PREFIX = "provisional:";
 
+/**
+ * Slack left between the serialized snapshot and the hard per-line bound.
+ *
+ * A snapshot is written as one NDJSON line, so the whole envelope — not just
+ * its entries — must fit inside `LIMITS.frameBytes`. The headroom absorbs the
+ * envelope scaffolding and any JSON escaping growth, so a line that measured
+ * just under the bound here cannot cross it in transit.
+ */
+export const SNAPSHOT_HEADROOM_BYTES = 64 * 1024;
+
+/**
+ * Appended to an entry whose text had to be cut to make the line fit.
+ *
+ * Explicit rather than silent: a consumer must be able to tell clipped text
+ * from text that really ended there.
+ */
+export const CLIP_MARKER = "\u2026 [muxr: clipped to fit the frame bound]";
+
+/** Serialized size of an envelope, in the bytes the socket will actually write. */
+function envelopeBytes(envelope: unknown): number {
+	return Buffer.byteLength(JSON.stringify(envelope), "utf8");
+}
+
+/**
+ * Clip an entry's text so the envelope containing it fits `budget`.
+ *
+ * The cut point is found by halving rather than by byte arithmetic, because
+ * the text is UTF-8 and JSON escaping can multiply a single character into six
+ * bytes; subtracting the overshoot from a character count would under-cut.
+ */
+function clipEntryText(
+	envelope: Record<string, unknown>,
+	entries: ConversationEntry[],
+	budget: number,
+): boolean {
+	const last = entries.at(-1);
+	if (!last) return false;
+	const original = last.text;
+	let low = 0;
+	let high = original.length;
+	let best: string | null = null;
+	while (low <= high) {
+		const mid = Math.floor((low + high) / 2);
+		last.text = original.slice(0, mid) + CLIP_MARKER;
+		if (envelopeBytes(envelope) <= budget) {
+			best = last.text;
+			low = mid + 1;
+		} else {
+			high = mid - 1;
+		}
+	}
+	// Even an empty body may not fit if the rest of the envelope is oversize;
+	// leave the marker alone in that case and let the caller drop the entry.
+	last.text = best ?? CLIP_MARKER;
+	return best !== null;
+}
+
+/**
+ * Shrink a snapshot until its serialized line fits the frame bound.
+ *
+ * Entries are bounded by `LIMITS.totalBytes` (4 MiB) but a snapshot travels as
+ * a single line bounded by `LIMITS.frameBytes` (1 MiB), so bounding entries
+ * alone is not enough: one large tool result made every snapshot unsendable,
+ * the bridge closed the connection with `frame_too_large`, and the reconnect
+ * loop spent a capability per attempt republishing the same oversize line.
+ *
+ * Oldest entries are dropped first, matching `boundEntries`. If a single
+ * remaining entry still does not fit, its text is clipped with an explicit
+ * marker. Either way `truncated` becomes true, so a consumer never mistakes a
+ * shrunken view for a complete one.
+ */
+export function fitSnapshotToFrame(
+	envelope: Record<string, unknown>,
+	budget: number = LIMITS.frameBytes - SNAPSHOT_HEADROOM_BYTES,
+): { fitted: boolean; truncated: boolean } {
+	if (envelopeBytes(envelope) <= budget) return { fitted: true, truncated: false };
+
+	const entries = envelope.entries as ConversationEntry[];
+	if (!Array.isArray(entries)) return { fitted: false, truncated: false };
+
+	while (entries.length > 1 && envelopeBytes(envelope) > budget) {
+		entries.shift();
+	}
+	if (envelopeBytes(envelope) <= budget) {
+		envelope.truncated = true;
+		return { fitted: true, truncated: true };
+	}
+
+	if (entries.length === 1 && clipEntryText(envelope, entries, budget)) {
+		envelope.truncated = true;
+		return { fitted: true, truncated: true };
+	}
+
+	// Nothing left to give: an entry-free envelope that still exceeds the bound
+	// means the scaffolding itself is oversize, which is a bug, not a payload
+	// problem. Drop the entries and report it rather than emitting a line the
+	// bridge will refuse.
+	entries.length = 0;
+	envelope.truncated = true;
+	return { fitted: envelopeBytes(envelope) <= budget, truncated: true };
+}
+
 interface ProvisionalMessage {
 	provisionalId: string;
 	role: string;
@@ -351,7 +453,7 @@ export function createPiProjection({
 			// `bindingRevision` still changes only when the binding is replaced.
 			const liveLeafId =
 				typeof sessionManager.getLeafId === "function" ? sessionManager.getLeafId() : undefined;
-			const envelope = {
+			const envelope: Record<string, unknown> = {
 				kind: "snapshot",
 				protocol,
 				bridgeEpoch,
@@ -366,6 +468,9 @@ export function createPiProjection({
 				entries,
 				truncated,
 			};
+			// A snapshot is one NDJSON line, so it must fit the per-line frame
+			// bound and not merely the 4 MiB entry budget.
+			fitSnapshotToFrame(envelope);
 			assertEnvelope(envelope);
 			return envelope;
 		},

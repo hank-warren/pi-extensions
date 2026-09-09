@@ -13,6 +13,7 @@ import test from "node:test";
 
 import { LIMITS } from "../src/contracts.ts";
 import {
+	CLIP_MARKER,
 	boundEntries,
 	createPiProjection,
 	extractText,
@@ -285,4 +286,71 @@ test("the default bounds come from the shared LIMITS table", () => {
 	const { entries, truncated } = projectConversation(sessionManager(many));
 	assert.equal(entries.length, LIMITS.events);
 	assert.equal(truncated, true);
+});
+
+test("a snapshot line always fits the frame bound, so the bridge never refuses it", () => {
+	// The regression: entries are bounded by totalBytes (4 MiB) but a snapshot
+	// travels as one line bounded by frameBytes (1 MiB). One large tool result
+	// made every snapshot unsendable, the bridge closed with frame_too_large,
+	// and the reconnect loop spent a capability per attempt republishing it.
+	const big = "x".repeat(2 * 1024 * 1024);
+	const snapshot = projection().snapshot({
+		sessionManager: sessionManager([
+			message("m1", "user", "first"),
+			message("m2", "toolResult", big, { toolCallId: "call-1" }),
+		]),
+		lifecycle: "live",
+	});
+	const line = `${JSON.stringify(snapshot)}\n`;
+	assert.ok(
+		Buffer.byteLength(line, "utf8") <= LIMITS.frameBytes,
+		`snapshot line is ${Buffer.byteLength(line, "utf8")} bytes, over the ${LIMITS.frameBytes} bound`,
+	);
+	assert.equal(snapshot.truncated, true);
+});
+
+test("a single oversize entry is clipped with a visible marker rather than dropped silently", () => {
+	const snapshot = projection().snapshot({
+		sessionManager: sessionManager([message("only", "assistant", "y".repeat(3 * 1024 * 1024))]),
+		lifecycle: "live",
+	});
+	const entries = snapshot.entries as Array<{ entryId: string; text: string }>;
+	assert.equal(entries.length, 1);
+	assert.equal(entries[0].entryId, "only");
+	assert.ok(entries[0].text.endsWith(CLIP_MARKER), "clipped text must say so");
+	assert.equal(snapshot.truncated, true);
+	assert.ok(Buffer.byteLength(JSON.stringify(snapshot), "utf8") <= LIMITS.frameBytes);
+});
+
+test("fitting keeps the newest entries, matching boundEntries", () => {
+	const snapshot = projection().snapshot({
+		sessionManager: sessionManager([
+			message("old", "user", "z".repeat(600 * 1024)),
+			message("new", "user", "kept"),
+		]),
+		lifecycle: "live",
+	});
+	const entries = snapshot.entries as Array<{ entryId: string }>;
+	assert.equal(entries.at(-1)?.entryId, "new");
+	assert.ok(Buffer.byteLength(JSON.stringify(snapshot), "utf8") <= LIMITS.frameBytes);
+});
+
+test("a snapshot that already fits is left completely alone", () => {
+	const snapshot = projection().snapshot({
+		sessionManager: sessionManager([message("m1", "user", "small")]),
+		lifecycle: "live",
+	});
+	assert.equal(snapshot.truncated, false);
+	assert.deepEqual((snapshot.entries as Array<{ text: string }>)[0].text, "small");
+});
+
+test("multi-byte text is clipped by measured bytes, not by character count", () => {
+	// Each emoji is four UTF-8 bytes and JSON-escapes to twelve, so a
+	// character-count subtraction would under-cut and still overflow.
+	const snapshot = projection().snapshot({
+		sessionManager: sessionManager([message("only", "assistant", "\u{1f600}".repeat(400_000))]),
+		lifecycle: "live",
+	});
+	assert.ok(Buffer.byteLength(JSON.stringify(snapshot), "utf8") <= LIMITS.frameBytes);
+	assert.equal(snapshot.truncated, true);
 });
