@@ -18,6 +18,7 @@ EXPECTED_EXTENSION_ENTRYPOINTS = [
     "./packages/pi-ask-user-question/index.ts",
     "./packages/pi-multi-login/index.ts",
     "./packages/pi-stash/index.ts",
+    "./packages/pi-muxr/index.ts",
 ]
 # Deprecated packages stay in PUBLIC_PACKAGES (published, tested, packable)
 # but are left out of the aggregate above, so a git install of this repository
@@ -69,6 +70,7 @@ PUBLIC_PACKAGES = {
     "packages/pi-multi-login": "@hank-warren/pi-multi-login",
     "packages/pi-loop": "@hank-warren/pi-loop",
     "packages/pi-stash": "@hank-warren/pi-stash",
+    "packages/pi-muxr": "@hank-warren/pi-muxr",
 }
 # Sources deliberately duplicated byte-for-byte instead of shared through a
 # package dependency, because sharing them would cost far more than copying
