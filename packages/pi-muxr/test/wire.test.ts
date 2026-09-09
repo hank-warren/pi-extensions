@@ -67,12 +67,59 @@ test("the MAC transcript is the documented pipe-joined string", () => {
 	assert.equal(computeMac(CAPABILITY, TRANSCRIPT), independent);
 });
 
-test("the bridge and extension MACs differ only by role, and both are pinned", () => {
+/**
+ * Golden MAC vectors, computed by the **muxr bridge's** own `handshakeMac`.
+ *
+ * Not self-generated: an earlier version pinned whatever this package produced,
+ * which proves only that it is self-consistent. These came from the other side
+ * of the handshake, so a one-sided change to the transcript, the delimiter, or
+ * the key derivation fails here.
+ *
+ * Source: `proof/fixture/bridge.mjs` in hank-warren/muxr (`handshakeTranscript`
+ * / `handshakeMac`). Regenerate with:
+ *
+ *   node --input-type=module -e '
+ *     import { handshakeMac } from "<muxr>/proof/fixture/bridge.mjs";
+ *     const parts = { protocol: 1, bridgeEpoch: 7, registrationId: "reg-1",
+ *       helloNonce: "b".repeat(64), challengeNonce: "c".repeat(64) };
+ *     console.log(handshakeMac("a".repeat(64), { ...parts, role: "bridge" }));
+ *     console.log(handshakeMac("a".repeat(64), { ...parts, role: "extension" }));'
+ */
+const GOLDEN = Object.freeze({
+	bridge: "b4c1489f8e082dce1c90513ba9d6e11edf0d8b2bc3a5765d3a1deacc2ac788de",
+	extension: "a9b6b2ff9b9df838d5b3b0571b71553bbeb44ebf79d9364db3af6c614aa83ede",
+});
+
+test("the bridge and extension MACs match muxr's own vectors, and differ by role", () => {
 	const bridgeMac = computeMac(CAPABILITY, TRANSCRIPT);
 	const extensionMac = computeMac(CAPABILITY, { ...TRANSCRIPT, role: "extension" });
 	assert.notEqual(bridgeMac, extensionMac);
-	assert.equal(bridgeMac, "b4c1489f8e082dce1c90513ba9d6e11edf0d8b2bc3a5765d3a1deacc2ac788de");
-	assert.equal(extensionMac, "a9b6b2ff9b9df838d5b3b0571b71553bbeb44ebf79d9364db3af6c614aa83ede");
+	assert.equal(bridgeMac, GOLDEN.bridge);
+	assert.equal(extensionMac, GOLDEN.extension);
+});
+
+test("the golden vectors still agree with the live muxr bridge, when one is present", async (t) => {
+	// Opportunistic: the pinned vectors above keep this suite hermetic, and this
+	// re-derives them from the real bridge whenever a muxr checkout is on the
+	// machine, so the pin cannot quietly drift from its source.
+	const bridgePath = "/home/hank/repos/muxr/proof/fixture/bridge.mjs";
+	const { existsSync } = await import("node:fs");
+	if (!existsSync(bridgePath)) {
+		t.skip(`no muxr checkout at ${bridgePath}`);
+		return;
+	}
+	const bridge = (await import(bridgePath)) as {
+		handshakeMac(capability: string, parts: Record<string, unknown>): string;
+	};
+	const parts = {
+		protocol: TRANSCRIPT.protocol,
+		bridgeEpoch: TRANSCRIPT.bridgeEpoch,
+		registrationId: TRANSCRIPT.registrationId,
+		helloNonce: TRANSCRIPT.helloNonce,
+		challengeNonce: TRANSCRIPT.challengeNonce,
+	};
+	assert.equal(bridge.handshakeMac(CAPABILITY, { ...parts, role: "bridge" }), GOLDEN.bridge);
+	assert.equal(bridge.handshakeMac(CAPABILITY, { ...parts, role: "extension" }), GOLDEN.extension);
 });
 
 test("every transcript field changes the MAC", () => {
@@ -231,4 +278,18 @@ test("the frame bound is 1 MiB and the buffer bound is 4 MiB", () => {
 	assert.equal(LIMITS.frameBytes, 1024 * 1024);
 	assert.equal(LIMITS.totalBytes, 4 * 1024 * 1024);
 	assert.equal(LIMITS.events, 2048);
+});
+
+test("a delimiter inside a transcript field is refused, as the bridge refuses it", () => {
+	// Without this, two different field tuples could join to one transcript and
+	// a MAC could be replayed across them. Unreachable without the capability,
+	// but the bridge enforces it and a faithful port does too.
+	assert.throws(
+		() => computeMac(CAPABILITY, { ...TRANSCRIPT, registrationId: "reg|1" }),
+		/transcript field contains \|/,
+	);
+	assert.throws(
+		() => computeMac(CAPABILITY, { ...TRANSCRIPT, role: "bridge|extension" }),
+		/transcript field contains \|/,
+	);
 });

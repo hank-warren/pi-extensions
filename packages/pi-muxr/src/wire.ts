@@ -39,6 +39,9 @@ import { LIMITS, PROTOCOL, assertEnvelope } from "./contracts.ts";
 /** Transcript prefix binding the MAC to this protocol version. */
 export const TRANSCRIPT_PREFIX = "muxr-bridge-v1";
 
+/** Field separator of the handshake transcript. See rule 3 in the header. */
+export const TRANSCRIPT_DELIMITER = "|";
+
 /** A 256-bit capability, lowercase hex. Anything else is refused before use. */
 export const CAPABILITY_PATTERN = /^[0-9a-f]{64}$/;
 
@@ -65,7 +68,7 @@ export function computeMac(capabilityHex: string, transcript: Transcript): strin
 	if (!CAPABILITY_PATTERN.test(capabilityHex)) {
 		throw new Error("muxr: capability must be exactly 64 lowercase hex characters");
 	}
-	const message = [
+	const fields = [
 		TRANSCRIPT_PREFIX,
 		transcript.role,
 		String(transcript.protocol),
@@ -73,9 +76,20 @@ export function computeMac(capabilityHex: string, transcript: Transcript): strin
 		transcript.registrationId,
 		transcript.helloNonce,
 		transcript.challengeNonce,
-	].join("|");
+	];
+	// A delimiter-joined string is only unambiguous while no field contains the
+	// delimiter: with `|` allowed inside a field, two different field tuples
+	// could produce one transcript and a MAC could be replayed across them. The
+	// bridge enforces this, so the extension does too rather than trusting the
+	// peer to have done it. Real inputs cannot collide (nonces and MACs are hex,
+	// the rest are integers or a generated id), so it only fires on a bug.
+	for (const field of fields) {
+		if (field.includes(TRANSCRIPT_DELIMITER)) {
+			throw new Error(`muxr: transcript field contains ${TRANSCRIPT_DELIMITER}`);
+		}
+	}
 	return createHmac("sha256", Buffer.from(capabilityHex, "hex"))
-		.update(message, "utf8")
+		.update(fields.join(TRANSCRIPT_DELIMITER), "utf8")
 		.digest("hex");
 }
 
