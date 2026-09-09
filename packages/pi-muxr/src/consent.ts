@@ -44,14 +44,21 @@ import { join } from "node:path";
 
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 
+import { REQUESTABLE_CAPABILITIES } from "./contracts.ts";
+
 /** The settings key the user sets to opt in. */
 export const CHAT_WRITE_SETTING = "muxr.experimentalChatWrite";
 
 /** The CLI flag that must also be present. */
 export const CHAT_WRITE_FLAG = "muxr-experimental-chat-write";
 
-/** The capability name the bridge must request. */
-export const CHAT_WRITE_CAPABILITY = "chatWrite";
+/**
+ * The capability name the bridge must request.
+ *
+ * Sourced from the wire contract rather than written twice, so the token in
+ * `REGISTERED_SHAPE` and the one compared here cannot drift apart.
+ */
+export const CHAT_WRITE_CAPABILITY = REQUESTABLE_CAPABILITIES[0];
 
 /**
  * Read a settings file, treating every failure as "no settings".

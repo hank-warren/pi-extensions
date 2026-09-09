@@ -4,9 +4,16 @@
  * Ported from `proof/lib/contracts.mjs` in hank-warren/muxr at commit
  * e5281de05f8cebdca1ee3926ef2fd3f47c47ae57 (the file itself last changed in
  * 4e0198f24b9b497cafe2a675e57356a79d5748e4). This package cannot import from
- * that repository, so the shapes are duplicated here and must stay identical
- * in meaning: the muxr bridge validates against its copy, and a divergence is
- * a protocol break that no test in either repository would catch on its own.
+ * that repository, so the shapes are duplicated here and must stay identical:
+ * the muxr bridge validates against its copy, and a divergence is a protocol
+ * break.
+ *
+ * **That is no longer trusted to review.** `test/contract-parity.test.ts`
+ * reduces this module to a canonical form and compares it against a vendored,
+ * sha256-pinned copy of muxr's own artifact (`vendor/`), so a one-sided change
+ * fails a test instead of shipping. Refresh with
+ * `node scripts/refresh-muxr-contracts.mjs <muxr-clone> <ref>` and commit the
+ * artifact, ref and digest together — that commit is the approval record.
  *
  * Any change here needs the same change there, in the same release.
  *
@@ -39,8 +46,27 @@ export const LIMITS = Object.freeze({
 	events: 2048,
 	totalBytes: 4 * 1024 * 1024,
 	frameBytes: 1024 * 1024,
+	ledgerRecords: 100000,
+	ledgerBytes: 64 * 1024 * 1024,
 	capabilityTtlMs: 60000,
+	leaseHeartbeatMs: 5000,
+	leaseExpiryMs: 15000,
 });
+
+/**
+ * Independent cursors. These never collapse into one counter: output must not
+ * stale a future Stop, a new run must.
+ *
+ * Carried for parity with the proof and the app; this package advances only
+ * `eventSequence` and reads `terminalControlGeneration` off a snapshot.
+ */
+export const CURSORS = Object.freeze([
+	"eventSequence",
+	"bindingRevision",
+	"expectedLeaf",
+	"activeRunId",
+	"terminalControlGeneration",
+] as const);
 
 /** Advertised baseline capability set. Read-only surface only. */
 export const CAPABILITIES = Object.freeze(["history", "streaming"] as const);
@@ -77,6 +103,15 @@ export const DISABLED_SHAPE: Shape = Object.freeze({
 
 /** Roles in the bridge <-> extension handshake. The bridge is the sole listener. */
 export const ROLES = Object.freeze(["bridge", "extension"] as const);
+
+/**
+ * Capabilities a bridge may *ask* for beyond the baseline.
+ *
+ * One exported token rather than an inline literal, so `REGISTERED_SHAPE` and
+ * `consent.ts` cannot drift apart. Asking is never sufficient on its own: the
+ * extension additionally requires the user's setting and a CLI flag.
+ */
+export const REQUESTABLE_CAPABILITIES = Object.freeze(["chatWrite"] as const);
 
 /** Envelope discriminators. */
 export const MESSAGE_KINDS = Object.freeze([
@@ -160,6 +195,12 @@ export const EVENT_TYPES = Object.freeze([
 ]);
 
 /**
+ * Terminal lease ownership. `none` means nobody holds control; `observer` means
+ * read-only attachment only; `controller` means a lease-bound writer exists.
+ */
+export const TERMINAL_LEASE_OWNERS = Object.freeze(["none", "observer", "controller"] as const);
+
+/**
  * Lifecycle of a bound target. `settled` is Pi idle after `agent_settled`;
  * `ended` is session shutdown; `invalidated` means the binding was replaced or
  * refused and the client must re-register rather than reuse anything.
@@ -193,20 +234,20 @@ export type FieldType =
 	| "array";
 
 export interface FieldSpec {
-	type: FieldType;
+	readonly type: FieldType;
 	/** Absent key is accepted when true. */
-	optional?: boolean;
+	readonly optional?: boolean;
 	/** Allowed values; membership is checked. */
-	values?: readonly unknown[];
+	readonly values?: readonly unknown[];
 	/** Inclusive lower bound for `number`/`integer`. */
-	min?: number;
+	readonly min?: number;
 	/** Nested shape for `object`; validated recursively. */
-	shape?: Shape;
+	readonly shape?: Shape;
 	/** Element spec for `array`; every element is checked. */
-	items?: FieldSpec;
+	readonly items?: FieldSpec;
 }
 
-export type Shape = Record<string, FieldSpec>;
+export type Shape = Readonly<Record<string, FieldSpec>>;
 
 /** Thrown by {@link assertShape}. Carries the offending key path. */
 export class ShapeError extends TypeError {
@@ -373,6 +414,20 @@ export const MESSAGE_RECONCILED_PAYLOAD_SHAPE: Shape = Object.freeze({
 });
 
 /**
+ * Payload of a `terminal_lease` event and the authority for terminal writes.
+ *
+ * `generation` is the `terminalControlGeneration` cursor: input is accepted
+ * only for the current generation. Carried for parity and so a consumer of
+ * `terminal_lease` has a declared shape to validate against; this package
+ * emits Pi events only and never originates one.
+ */
+export const TERMINAL_LEASE_PAYLOAD_SHAPE: Shape = Object.freeze({
+	generation: { type: "integer", min: 0 },
+	owner: { type: "string", values: TERMINAL_LEASE_OWNERS },
+	expiresAt: { type: "integer", min: 0 },
+});
+
+/**
  * Payload of a `chat_write_result` event.
  *
  * `entryId` is present only for `accepted`. `reason` is present for everything
@@ -460,7 +515,7 @@ export const REGISTERED_SHAPE: Shape = Object.freeze({
 	requestedCapabilities: {
 		type: "array",
 		optional: true,
-		items: { type: "string", values: ["chatWrite"] },
+		items: { type: "string", values: REQUESTABLE_CAPABILITIES },
 	},
 });
 
