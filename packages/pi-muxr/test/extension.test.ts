@@ -146,3 +146,14 @@ test("a user message is never projected as a provisional assistant stream", asyn
 	);
 	assert.deepEqual(harness.sentUserMessages, []);
 });
+
+test("the only send path refuses prompt-template expansion explicitly", async () => {
+	// Remote text is the least trusted input in the system. Pi's own default is
+	// already false, so this pins that a future upstream flip cannot start
+	// dispatching a "/"-prefixed remote message as an extension command.
+	const { readFileSync } = await import("node:fs");
+	const source = readFileSync(new URL("../src/extension.ts", import.meta.url), "utf8");
+	assert.match(source, /expandPromptTemplates:\s*false/);
+	// And there is exactly one sendUserMessage call site to reason about.
+	assert.equal(source.match(/sendUserMessage\(/g)?.length, 1);
+});

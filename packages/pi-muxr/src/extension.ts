@@ -23,7 +23,11 @@ import { readFileSync } from "node:fs";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-import { createChatWriteController, parseChatWriteEnvelope } from "./chat-write.ts";
+import {
+	ChatWriteBindingError,
+	createChatWriteController,
+	parseChatWriteEnvelope,
+} from "./chat-write.ts";
 import type { ChatWriteController } from "./chat-write.ts";
 import {
 	CHAT_WRITE_CAPABILITY,
@@ -36,6 +40,11 @@ import { createPiProjection, extractText } from "./projection.ts";
 import type { PiProjection } from "./projection.ts";
 import { handshake, openConnection } from "./wire.ts";
 import type { Connection, Envelope } from "./wire.ts";
+
+/** Options for every `sendUserMessage` this extension issues. See its use below. */
+const SEND_OPTIONS = Object.freeze({ expandPromptTemplates: false });
+
+type SendUserMessageOptions = Parameters<ExtensionAPI["sendUserMessage"]>[1];
 
 /** Flags the bridge must pass. No default path is consulted for any of them. */
 export const FLAGS = Object.freeze({
@@ -106,6 +115,8 @@ export default function muxrExtension(pi: ExtensionAPI): void {
 	let chatWrite: ChatWriteController | null = null;
 	let runtimeGeneration = 0;
 	let bridgeRequestedChatWrite = false;
+	/** Registration a `chat_write` must name to be honoured. */
+	let liveRegistration: { registrationId: string; bridgeEpoch: number } | null = null;
 	let stopped = false;
 	let reconnecting = false;
 	/** Latest context, so a reconnect can publish a snapshot outside a handler. */
@@ -148,13 +159,25 @@ export default function muxrExtension(pi: ExtensionAPI): void {
 	const handleInbound = (envelope: Envelope): void => {
 		try {
 			if (envelope.kind !== "chat_write") return;
-			const request = parseChatWriteEnvelope(envelope);
-			if (!chatWrite || !sessionContext) return;
+			if (!chatWrite || !sessionContext || !liveRegistration) return;
+			const request = parseChatWriteEnvelope(envelope, liveRegistration);
 			chatWrite.request(request, sessionContext);
-		} catch {
-			// A malformed request is refused by dropping it: the bridge already
-			// validated its own envelope, and throwing here would surface as an
-			// uncaught exception in a socket callback.
+		} catch (error) {
+			// A request that does not belong to this registration is refused by
+			// name, so the bridge learns which binding check failed.
+			if (error instanceof ChatWriteBindingError && projection) {
+				emit(
+					projection.chatWriteResult({
+						requestId: error.requestId,
+						state: "rejected",
+						reason: error.reason,
+					}),
+				);
+				return;
+			}
+			// A malformed envelope is dropped: the reader already validated its
+			// shape, and throwing here would surface as an uncaught exception in a
+			// socket callback and take down the observed session.
 		}
 	};
 
@@ -200,6 +223,10 @@ export default function muxrExtension(pi: ExtensionAPI): void {
 		};
 
 		connection = next;
+		liveRegistration = {
+			registrationId,
+			bridgeEpoch: registered.bridgeEpoch as number,
+		};
 		const activeProjection = createPiProjection({
 			binding,
 			bridgeEpoch: registered.bridgeEpoch as number,
@@ -209,7 +236,18 @@ export default function muxrExtension(pi: ExtensionAPI): void {
 		});
 		projection = activeProjection;
 		chatWrite = createChatWriteController({
-			send: (text) => pi.sendUserMessage(text),
+			// Remote text is the least trusted input in the system, so command
+			// dispatch and template expansion are refused explicitly rather than
+			// left to an upstream default. Pi already defaults this to false
+			// (dist/core/agent-session.js: `options?.expandPromptTemplates ?? false`);
+			// saying so here means a future default flip cannot silently start
+			// dispatching `/`-prefixed remote text as an extension command.
+			//
+			// The cast is a typings-only version skew: the option ships in Pi
+			// 0.85.1 (the runtime baseline, and what PROTOCOL.piVersion pins) but
+			// not in the 0.84 typings this workspace resolves for its devDependency.
+			// An older runtime ignores the unknown key, so the cast cannot break one.
+			send: (text) => pi.sendUserMessage(text, SEND_OPTIONS as SendUserMessageOptions),
 			emit: (result) => emit(activeProjection.chatWriteResult(result)),
 			getRuntimeGeneration: () => runtimeGeneration,
 			checkConsent,
@@ -222,6 +260,7 @@ export default function muxrExtension(pi: ExtensionAPI): void {
 			// `unknown` and reconciles against the next snapshot.
 			chatWrite?.abandon("connection_closed");
 			chatWrite = null;
+			liveRegistration = null;
 			// Provisional ids belong to the connection that observed them: the
 			// snapshot published after re-registration is authoritative instead.
 			activeProjection.resetProvisional();
@@ -281,8 +320,9 @@ export default function muxrExtension(pi: ExtensionAPI): void {
 		// carries, and inventing a provisional id for it would create identity
 		// the reconciler would then have to remove.
 		if (role === "user") {
-			chatWrite?.observeMessageStart(event.message as { role?: unknown; content?: unknown });
-			if (sessionContext) chatWrite?.resolve(sessionContext);
+			if (sessionContext) {
+				chatWrite?.observeMessageStart(event.message as { role?: unknown }, sessionContext);
+			}
 			return;
 		}
 		if (role !== "assistant") return;
@@ -358,6 +398,7 @@ export default function muxrExtension(pi: ExtensionAPI): void {
 		stopped = true;
 		chatWrite?.abandon("session_shutdown");
 		chatWrite = null;
+		liveRegistration = null;
 		if (projection && connection) {
 			emit(
 				projection.snapshot({

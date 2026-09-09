@@ -83,22 +83,29 @@ client that retries an unconfirmed send turns one prompt into two.
    extension's own generation. Refuse on mismatch, refuse when the session is
    not idle, and refuse a second concurrent request.
 2. **Send.** Call `pi.sendUserMessage(text)`. The `void` return says nothing.
-3. **Observe.** Watch `message_start` for a user message whose text matches,
-   then resolve identity from persisted entries by matching `parentId` against
-   the expected leaf. Report `accepted` with the entry id.
-4. **Give up honestly.** If the leaf moved with no matching entry, or nothing
-   appears within a bounded window, report `unknown` and stop. Never retry.
+3. **Claim by leaf transition.** Watch for the first user-role `message_start`
+   after the send and check that the leaf has not moved at that instant; then
+   confirm that exactly one user entry hangs off that leaf, walking every
+   session entry so a sibling on a forked branch is visible. Report `accepted`
+   with that entry id. **No step compares message text.**
+4. **Give up honestly.** A moved leaf, two user entries at one parent, or
+   nothing within a bounded window is `unknown`. Never retry; a re-sent
+   `requestId` replays the stored outcome.
 
 Every step after the preflight is inference from side effects. The residual
 defects are real and are not hidden:
 
-- **The preflight is advisory.** It narrows the window; it does not remove it.
+- **The preflight is advisory.** There is still a window between reading the
+  leaf and Pi accepting the message, and nothing an extension can call closes
+  it. This is the residual the proposed API removes.
 - **`unknown` is unavoidable and common enough to matter.** It is a first-class
-  state the client must show the user, not an error to swallow.
-- **Correlation uses text.** Matching `parentId` *and* text is the strongest
-  signal available, but text is not identity: two identical prompts at one
-  parent are separated only by claiming entry ids in order, which is a
-  heuristic, not a guarantee.
+  state the client must show the user, not an error to swallow. Any concurrent
+  activity at the target leaf turns a perfectly good send into `unknown`,
+  because the evidence needed to distinguish it does not exist.
+- **Identity is inferred from timing and tree shape, not returned by Pi.**
+  `message_start` carries no entry id and no parent, so the claim rests on the
+  leaf being unchanged at the moment our message starts. That is sound but
+  indirect; a returned `entryId` would make it trivial.
 - **Concurrency is refused rather than solved**, because no evidence available
   to an extension can tell two in-flight sends apart.
 
@@ -185,11 +192,12 @@ the same `requestId` makes that answerable from the session itself.
 
 ## What we would delete on adoption
 
-`src/chat-write.ts` would shrink to a single `acceptUserMessage` call plus
-error mapping: the observation window, `findUserEntry`, the claimed-id set, the
-concurrency refusal, and the `unknown` state would all be removed. The three
-consent gates (setting, CLI flag, bridge-requested capability) would stay —
-they express user intent, not a protocol deficiency.
+`src/chat-write.ts` would shrink to a single `acceptUserMessage` call plus error
+mapping. The observation window, `leafOf`, `userChildrenOf`, the
+leaf-transition claim, the `ambiguous_parent` and `leaf_moved` classifications,
+the concurrency refusal, and the `unknown` state would all be removed. The
+three consent gates (setting, CLI flag, bridge-requested capability) would stay
+— they express user intent, not a protocol deficiency.
 
 ## Status
 

@@ -103,13 +103,29 @@ A `chat_write` request carries `expectedLeafId` and
 a busy session, or a second concurrent request is refused **before** anything
 is sent — a `rejected` result always means nothing was delivered.
 
-After sending, the outcome is inferred from side effects:
+After sending, the outcome is inferred from side effects. **Correlation never
+compares message text** — that mechanism is rejected by muxr's design register,
+and it had a concrete failure: the desktop user typing the same text at the same
+parent inside the window was claimed as ours, so one prompt silently became two.
+
+Instead a send is claimed by leaf transition. It is `accepted` only when all of
+these hold: the leaf never moved between the preflight and the first user-role
+`message_start` after the send, and exactly one user entry hangs off that leaf
+(walked across *all* session entries, so a sibling on a forked branch counts).
 
 | State | Meaning |
 |---|---|
-| `accepted` | A persisted user entry was found at the expected parent; `entryId` identifies it |
-| `rejected` | Refused during preflight; nothing was sent |
-| `unknown` | The send may or may not have landed |
+| `accepted` | Exactly one user entry hangs off the expected leaf and our own `message_start` was seen while the leaf was unchanged; `entryId` identifies it |
+| `rejected` | Refused during preflight; **nothing was sent** |
+| `unknown` | The send may or may not have landed (`leaf_moved`, `ambiguous_parent`, `no_persisted_entry_within_window`, `connection_closed`, `session_shutdown`) |
+
+A request is also refused before sending when its `registrationId`,
+`bridgeEpoch` or `protocol` does not match the live registration, when the
+expected leaf already has a user child, when the session is busy, or when
+another request is in flight.
+
+A re-sent `requestId` **replays the stored outcome and never sends again**; the
+extension is the only party that can see the duplicate arrive.
 
 **`unknown` is a real state, not an error.** The compare and the send are not
 atomic, so it is unavoidable. A client must surface it to the user and let them
