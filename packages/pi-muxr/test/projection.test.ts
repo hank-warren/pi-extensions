@@ -181,13 +181,41 @@ test("a snapshot samples the live leaf rather than the one frozen at registratio
 	assert.equal((snapshot.binding as Record<string, unknown>).piLeafId, "leaf-moved");
 	assert.equal(snapshot.truncated, false);
 	assert.deepEqual(snapshot.capabilities, ["history", "streaming"]);
-	// The baseline advertises chat write as disabled; enabling it is the
-	// extension's decision, made in one place (see consent.test.ts).
+	// Default is the baseline: chat write absent.
 	assert.deepEqual(snapshot.disabled, {
 		chatWrite: true,
 		promptIdle: true,
 		abortExactTarget: true,
 	});
+});
+
+test("disabled.chatWrite flips with the consent decision, and nothing else does", () => {
+	// The regression: this was hardcoded to the frozen baseline, so a fully
+	// consented session still advertised chatWrite as absent. A bridge that
+	// fail-closes on the authoritative snapshot would then never send a
+	// chat_write, making the approved feature unreachable end to end.
+	const consented = projection().snapshot({
+		sessionManager: sessionManager([]),
+		lifecycle: "live",
+		chatWriteEnabled: true,
+	});
+	assert.deepEqual(consented.disabled, {
+		chatWrite: false,
+		promptIdle: true,
+		abortExactTarget: true,
+	});
+
+	const refused = projection().snapshot({
+		sessionManager: sessionManager([]),
+		lifecycle: "live",
+		chatWriteEnabled: false,
+	});
+	assert.equal((refused.disabled as Record<string, boolean>).chatWrite, true);
+
+	// capabilities[] stays the read-only baseline either way: chat write is
+	// advertised through `disabled`, not by growing the capability list.
+	assert.deepEqual(consented.capabilities, ["history", "streaming"]);
+	assert.deepEqual(refused.capabilities, ["history", "streaming"]);
 });
 
 test("reconciliation matches by role and position, never by text", () => {

@@ -440,10 +440,17 @@ export function createPiProjection({
 			sessionManager,
 			lifecycle,
 			terminalControlGeneration = 0,
+			chatWriteEnabled = false,
 		}: {
 			sessionManager: SessionManagerLike;
 			lifecycle: string;
 			terminalControlGeneration?: number;
+			/**
+			 * Whether all three chat-write consent gates hold right now. Sampled
+			 * per snapshot rather than at registration, so revoking the setting
+			 * shows up in the next snapshot without a restart.
+			 */
+			chatWriteEnabled?: boolean;
 		}): Record<string, unknown> {
 			const { entries, truncated } = projectConversation(sessionManager, limits);
 			// The leaf is sampled per snapshot, not frozen at registration. A
@@ -463,7 +470,11 @@ export function createPiProjection({
 				terminalControlGeneration,
 				binding: { ...binding, piLeafId: liveLeafId ?? binding.piLeafId },
 				capabilities: [...CAPABILITIES],
-				disabled: { ...DISABLED },
+				// Polarity: `disabled.X === true` means the capability is absent.
+				// chatWrite is the only one that can flip; promptIdle and
+				// abortExactTarget have no implementation at all on this baseline,
+				// so they stay pinned true.
+				disabled: { ...DISABLED, chatWrite: !chatWriteEnabled },
 				lifecycle,
 				entries,
 				truncated,

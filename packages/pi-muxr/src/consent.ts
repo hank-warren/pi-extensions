@@ -11,8 +11,11 @@
  * 3. the bridge asked for the `chatWrite` capability in its `registered`
  *    envelope — the operator side of the same decision.
  *
- * Any one missing means `disabled.chatWrite: true` is advertised and every
- * `chat_write` request is refused.
+ * Any one missing means `disabled.chatWrite: true` is advertised on every
+ * snapshot and every `chat_write` request is refused. When all three hold, the
+ * snapshot advertises `disabled.chatWrite: false`. The decision is re-sampled
+ * per snapshot and per request, so revoking the setting is visible on the wire
+ * without restarting Pi.
  *
  * ## Why the setting is read from the file rather than from an API
  *

@@ -230,7 +230,13 @@ export default function muxrExtension(pi: ExtensionAPI): void {
 			scheduleReconnect();
 		});
 
-		emit(activeProjection.snapshot({ sessionManager, lifecycle: "live" }));
+		emit(
+			activeProjection.snapshot({
+				sessionManager,
+				lifecycle: "live",
+				chatWriteEnabled: checkConsent().enabled,
+			}),
+		);
 	};
 
 	/**
@@ -331,7 +337,13 @@ export default function muxrExtension(pi: ExtensionAPI): void {
 		// `tool_execution_end` makes a consumer render phantom tool cards.
 		const reconciled = projection.reconcile(ctx.sessionManager);
 		emit(projection.reconciledEvent(reconciled));
-		emit(projection.snapshot({ sessionManager: ctx.sessionManager, lifecycle }));
+		emit(
+			projection.snapshot({
+				sessionManager: ctx.sessionManager,
+				lifecycle,
+				chatWriteEnabled: checkConsent().enabled,
+			}),
+		);
 	};
 
 	pi.on("turn_end", async (_event, ctx) => {
@@ -347,7 +359,13 @@ export default function muxrExtension(pi: ExtensionAPI): void {
 		chatWrite?.abandon("session_shutdown");
 		chatWrite = null;
 		if (projection && connection) {
-			emit(projection.snapshot({ sessionManager: ctx.sessionManager, lifecycle: "ended" }));
+			emit(
+				projection.snapshot({
+					sessionManager: ctx.sessionManager,
+					lifecycle: "ended",
+					chatWriteEnabled: checkConsent().enabled,
+				}),
+			);
 		}
 		connection?.close();
 		connection = null;

@@ -65,8 +65,11 @@ extension-level implementation cannot guarantee that a message landed where the
 caller intended. See [UPSTREAM-PROPOSAL.md](UPSTREAM-PROPOSAL.md) for the API
 that would fix this properly.
 
-**All three of these must be true, or chat write stays off and the extension
-advertises `disabled.chatWrite: true`:**
+**All three of these must be true, or chat write stays off and every snapshot
+advertises `disabled.chatWrite: true`.** When all three hold, snapshots
+advertise `disabled.chatWrite: false` and `chat_write` requests are accepted.
+The decision is re-sampled per snapshot and per request, so revoking consent is
+visible on the wire without restarting Pi:
 
 1. `"muxr.experimentalChatWrite": true` in Pi's settings — the user's opt-in;
 2. the `--muxr-experimental-chat-write` CLI flag — consent visible in the
