@@ -1,6 +1,6 @@
 {
   "name": "@hank-warren/pi-cliproxyapi-provider",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Fork of 0xRichardH/pi-cliproxyapi-provider: Pi provider for CLIProxyAPI with model discovery, models.dev enrichment seeded from pi's built-in catalog, Anthropic Messages routing for Claude, Responses routing for Codex, and derived xhigh/max thinking levels.",
   "type": "module",
   "keywords": [

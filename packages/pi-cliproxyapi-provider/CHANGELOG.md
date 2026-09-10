@@ -1,5 +1,11 @@
 # @hank-warren/pi-cliproxyapi-provider
 
+## 0.1.1
+
+### Patch Changes
+
+- Ship the startup fix the 0.1.0 changelog announced. 0.1.0 was published from the package's initial merge (#20), before the perf work in #21 landed; #21 then re-applied a changeset onto the same version, so its publish was skipped as already on npm. The registry's 0.1.0 tarball is the pre-fix code (~3.3 s of startup on a warm cache). This release carries the indexed metadata catalog, offline `refreshModels` reuse of the current snapshot, and the pruned models.dev cache; measured startup for the extension drops from ~3.9 s to ~0.7 s.
+
 ## 0.1.0
 
 ### Minor Changes
