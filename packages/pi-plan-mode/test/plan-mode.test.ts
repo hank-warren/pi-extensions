@@ -196,11 +196,11 @@ test("the preference applies outside Plan mode too, so the prompt is never stale
 		const result = await runBeforeAgentStart(mock, context.ctx);
 
 		assert.ok(!mock.rawPi.getActiveTools().includes("plan_mode_question"));
-		assert.equal(result?.systemPrompt, undefined, "no Plan-mode prompt outside Plan mode");
+		assert.equal(result?.systemPrompt, undefined, "no Plan mode prompt outside Plan mode");
 	});
 });
 
-test("the Plan-mode prompt names ask_user_question when it is preferred", async () => {
+test("the Plan mode prompt names ask_user_question when it is preferred", async () => {
 	await withAgentDir(async () => {
 		const mock = preferenceMock({ askUserQuestion: true });
 		const context = createMockContext({ hasUI: true, mode: "tui" });
@@ -759,7 +759,7 @@ test("plan-mode-state entry shape (pi-loop consumer contract)", async () => {
  * than left applied with nothing sent — the model would otherwise be in a mode
  * it was never told about.
  */
-test("a Plan-mode message the session refuses rolls the state back", async () => {
+test("a Plan mode message the session refuses rolls the state back", async () => {
 	await withAgentDir(async () => {
 		const mock = createMockPi({ activeTools: ["read"] });
 		planMode(mock.pi);

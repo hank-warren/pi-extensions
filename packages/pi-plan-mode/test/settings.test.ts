@@ -89,7 +89,7 @@ test("a settings file that still carries thinkingLevel loads", async () => {
 	}
 });
 
-test("Plan-mode settings validate export defaults", () => {
+test("Plan mode settings validate export defaults", () => {
 	assert.deepEqual(normalizePlanModeSettings({ defaultPlanExportPath: "docs/PLAN.md" }), {
 		defaultPlanExportPath: "docs/PLAN.md",
 	});
@@ -113,12 +113,12 @@ test("Plan-mode settings validate export defaults", () => {
 	}
 });
 
-test("Plan-mode settings ignore unknown top-level fields", () => {
+test("Plan mode settings ignore unknown top-level fields", () => {
 	assert.deepEqual(normalizePlanModeSettings({ futureOption: { enabled: true } }), {});
 });
 
 
-test("Plan-mode settings updates create only on explicit save and preserve unknown fields", async () => {
+test("Plan mode settings updates create only on explicit save and preserve unknown fields", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "pi-plan-mode-settings-update-"));
 	const settingsPath = join(directory, "nested", "pi-plan-mode.json");
 	try {
@@ -147,7 +147,7 @@ test("Plan-mode settings updates create only on explicit save and preserve unkno
 	}
 });
 
-test("Plan-mode settings patch the export destination from the latest document", async () => {
+test("Plan mode settings patch the export destination from the latest document", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "pi-plan-mode-settings-new-fields-"));
 	const settingsPath = join(directory, "pi-plan-mode.json");
 	try {
@@ -172,7 +172,7 @@ test("Plan-mode settings patch the export destination from the latest document",
 	}
 });
 
-test("Plan-mode settings refuse invalid documents and preserve atomic publication failures", async () => {
+test("Plan mode settings refuse invalid documents and preserve atomic publication failures", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "pi-plan-mode-settings-invalid-"));
 	const settingsPath = join(directory, "pi-plan-mode.json");
 	try {
@@ -233,7 +233,7 @@ test("Plan-mode settings refuse invalid documents and preserve atomic publicatio
 	}
 });
 
-test("Plan-mode settings serialize updates, coordinate reads, and recover after failure", async () => {
+test("Plan mode settings serialize updates, coordinate reads, and recover after failure", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "pi-plan-mode-settings-order-"));
 	const settingsPath = join(directory, "pi-plan-mode.json");
 	let releaseFirst!: () => void;
@@ -293,7 +293,7 @@ test("Plan-mode settings serialize updates, coordinate reads, and recover after 
 	}
 });
 
-test("Plan-mode settings abort before publication without creating the canonical file", async () => {
+test("Plan mode settings abort before publication without creating the canonical file", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "pi-plan-mode-settings-abort-"));
 	const settingsPath = join(directory, "pi-plan-mode.json");
 	const controller = new AbortController();
@@ -320,7 +320,7 @@ test("Plan-mode settings abort before publication without creating the canonical
  * agent dir. `plan-mode.json` was the pre-1.3 name; it is no longer read, no
  * longer promoted on save, and never written to.
  */
-test("Plan-mode settings read only pi-plan-mode.json from the agent dir", async () => {
+test("Plan mode settings read only pi-plan-mode.json from the agent dir", async () => {
 	const directory = await mkdtemp(join(tmpdir(), "pi-plan-mode-agent-dir-"));
 	const formerName = join(directory, "plan-mode.json");
 	const formerContents = '{"defaultPlanExportPath":"former.md"}';

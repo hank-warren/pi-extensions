@@ -1,5 +1,5 @@
 /**
- * The Plan-mode prompt must name exactly one question tool.
+ * The Plan mode prompt must name exactly one question tool.
  *
  * Naming both is the failure that matters: the model reads the prompt, sees a
  * tool it cannot call (because `plan_mode_question` is stripped from the active
@@ -8,11 +8,12 @@
  */
 
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import test from "node:test";
 import {
 	ASK_USER_QUESTION_TOOL,
+	buildActivePlanPointer,
 	buildPlanModePrompt,
 	PLAN_CRAFT_DOC,
 	PLAN_MODE_QUESTION_TOOL,
@@ -79,7 +80,7 @@ test("everything outside the question-tool references is identical between modes
 test("the prompt points at the plan-craft doc, once, by absolute path", () => {
 	// The doc replaced a skill: a skill's description line was paid by every
 	// session and observed to trigger nothing, where a pointer injected only
-	// while Plan Mode is active costs nothing outside it. The pointer has to be
+	// while Plan mode is active costs nothing outside it. The pointer has to be
 	// a real absolute path, because "read the X skill if it is available" gave
 	// the model a way to skip it.
 	assert.ok(isAbsolute(PLAN_CRAFT_DOC));
@@ -88,4 +89,33 @@ test("the prompt points at the plan-craft doc, once, by absolute path", () => {
 		const prompt = buildPlanModePrompt(tool);
 		assert.ok(prompt.includes(`read ${PLAN_CRAFT_DOC}`));
 	}
+});
+
+test("the prompt defers the craft to the doc instead of restating it", () => {
+	// The prompt is the enforcement surface and the turn contract. The phased
+	// walkthrough, question quality and plan structure live in the craft doc;
+	// carrying them in both places is paid every turn and lets the two drift.
+	const prompt = buildPlanModePrompt();
+	assert.ok(!/## Phase \d/.test(prompt), "the phases belong to the craft doc");
+	assert.match(prompt, /## Mode rules/);
+	assert.match(prompt, /## Asking questions/);
+});
+
+test("the completion rule names the same plan sections as the craft doc", () => {
+	const prompt = buildPlanModePrompt();
+	const doc = readFileSync(PLAN_CRAFT_DOC, "utf8");
+	for (const section of ["approach", "alternatives", "failure modes", "Verification", "Assumptions"]) {
+		assert.ok(prompt.includes(section), `prompt is missing "${section}"`);
+		assert.ok(doc.includes(section), `craft doc is missing "${section}"`);
+	}
+});
+
+test("the active-plan pointer never reads as a Plan mode marker", () => {
+	// The pointer is injected while Plan mode is OFF and the model is
+	// implementing. A marker that resembles the planning one gives a weaker
+	// model two look-alike lines, one meaning "do not edit" and one meaning "go".
+	const pointer = buildActivePlanPointer("/tmp/plan.md");
+	assert.ok(!pointer.includes("[PLAN MODE"), pointer);
+	assert.match(pointer, /^\[APPROVED PLAN\] Plan mode is off\./);
+	assert.ok(pointer.includes("/tmp/plan.md"));
 });

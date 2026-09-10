@@ -12,7 +12,7 @@ test("a menu scope goes stale when either generation moves", () => {
 
 	const beforeSession = lifecycle.capture();
 	assert.equal(beforeSession.isCurrent(), true);
-	lifecycle.nextSession("Plan-mode session replaced");
+	lifecycle.nextSession("Plan mode session replaced");
 	assert.equal(beforeSession.isCurrent(), false, "a replaced session supersedes a menu");
 });
 
@@ -22,13 +22,13 @@ test("a menu scope goes stale when either generation moves", () => {
  */
 test("a session scope survives workflow changes and ends with the session", () => {
 	const lifecycle = createLifecycle();
-	const session = lifecycle.nextSession("Plan-mode session replaced");
+	const session = lifecycle.nextSession("Plan mode session replaced");
 
 	lifecycle.nextWorkflow();
 	lifecycle.nextWorkflow();
 	assert.equal(session.isCurrent(), true);
 
-	lifecycle.endSession("Plan-mode session shut down");
+	lifecycle.endSession("Plan mode session shut down");
 	assert.equal(session.isCurrent(), false);
 });
 
@@ -37,12 +37,12 @@ test("ending a session aborts the work waiting on it and stays aborted", () => {
 	const menu = lifecycle.capture();
 	assert.equal(menu.signal, lifecycle.signal, "a capture races against the live session signal");
 
-	lifecycle.endSession("Plan-mode session shut down");
+	lifecycle.endSession("Plan mode session shut down");
 
 	assert.equal(menu.signal.aborted, true);
 	const reason = menu.signal.reason as DOMException;
 	assert.equal(reason.name, "AbortError");
-	assert.equal(reason.message, "Plan-mode session shut down");
+	assert.equal(reason.message, "Plan mode session shut down");
 	// The shutdown window: a menu opened between shutdown and the next session
 	// start must refuse to run, so the aborted signal stays in place.
 	assert.equal(lifecycle.signal.aborted, true, "no fresh signal until the next session starts");
@@ -54,9 +54,9 @@ test("ending a session aborts the work waiting on it and stays aborted", () => {
 test("the next session hands out a fresh unaborted signal", () => {
 	const lifecycle = createLifecycle();
 	const beforeShutdown = lifecycle.capture();
-	lifecycle.endSession("Plan-mode session shut down");
+	lifecycle.endSession("Plan mode session shut down");
 
-	lifecycle.nextSession("Plan-mode session replaced");
+	lifecycle.nextSession("Plan mode session replaced");
 
 	assert.equal(lifecycle.signal.aborted, false);
 	assert.notEqual(lifecycle.signal, beforeShutdown.signal);

@@ -114,15 +114,15 @@ pi install npm:@hank-warren/pi-ask-user-question
 Detection is by tool name at runtime, re-evaluated every turn — there is no dependency between the two packages, and installing or removing one never requires touching the other. When `ask_user_question` is present:
 
 - `plan_mode_question` is removed from the **active** tool set, so the model never sees two overlapping question tools and cannot call the weaker one. It stays *registered*, so a historical transcript still resolves it.
-- The Plan-mode system prompt names `ask_user_question` and quotes its bounds and its decline signal.
+- The Plan mode system prompt names `ask_user_question` and quotes its bounds and its decline signal.
 
 A standalone `pi-plan-mode` install loses nothing: `plan_mode_question` stays fully functional and the prompt reads exactly as it always has. It is a **legacy fallback** and is slated for removal in a future major.
 
 ## 📚 The plan-craft doc
 
-The system prompt is the enforcement surface and stays deliberately short. The depth layer it points at — what decision-complete actually means, why exploration comes before questions, what separates a question worth asking from one the repository already answered, and what belongs in a finished plan — is [`docs/plan-craft.md`](docs/plan-craft.md), shipped with the package. One line in the planning prompt names it by absolute path (resolved from the installed package, so it works under any install layout), and the model reads it when Plan Mode opens.
+The system prompt is the enforcement surface and stays deliberately short. The depth layer it points at — what decision-complete actually means, why exploration comes before questions, what separates a question worth asking from one the repository already answered, and what belongs in a finished plan — is [`docs/plan-craft.md`](docs/plan-craft.md), shipped with the package. One line in the planning prompt names it by absolute path (resolved from the installed package, so it works under any install layout), and the model reads it when Plan mode opens.
 
-It used to be a skill. A skill's description line is in every system prompt, which buys exactly one thing an injected pointer cannot: the model proposing planning unprompted. Across ~220 sessions after it shipped, every read of the file happened after the Plan Mode prompt was already active, never off the description, and the model never suggested `/plan` on its own — so the line was a tax on every session that never planned (about 95% of them) that bought nothing. A hard path injected only while the mode is active is the same document at zero cost outside it.
+It used to be a skill. A skill's description line is in every system prompt, which buys exactly one thing an injected pointer cannot: the model proposing planning unprompted. Across ~220 sessions after it shipped, every read of the file happened after the Plan mode prompt was already active, never off the description, and the model never suggested `/plan` on its own — so the line was a tax on every session that never planned (about 95% of them) that bought nothing. A hard path injected only while the mode is active is the same document at zero cost outside it.
 
 ## 📊 Statusline and widget
 

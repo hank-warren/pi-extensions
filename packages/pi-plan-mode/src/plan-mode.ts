@@ -67,7 +67,7 @@ export const HERDR_READY_BLOCKED_LABEL = "plan ready";
  * Tell Herdr this pane is waiting on a human, so a supervising agent in another
  * pane sees the block instead of reading a stalled turn as progress. Same
  * contract as pi-auto-permissions' `setHerdrBlocked`, duplicated rather than
- * imported so Plan Mode has no dependency on the permissions engine. No-op
+ * imported so Plan mode has no dependency on the permissions engine. No-op
  * outside Herdr.
  */
 function setHerdrBlocked(pi: ExtensionAPI, active: boolean, label: string): void {
@@ -209,7 +209,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		name: PLAN_MODE_QUESTION_TOOL_NAME,
 		label: "Plan question",
 		description:
-			"Ask the user one to three Plan-mode clarification questions with meaningful options, then wait for the answer. Only available while Plan mode is active.",
+			"Ask the user one to three Plan mode clarification questions with meaningful options, then wait for the answer. Only available while Plan mode is active.",
 		// Kept, now that the tool is staged: this guidance reaches the model only
 		// in a session that has actually entered Plan mode.
 		promptSnippet: "Ask user decision questions while Plan mode is active",
@@ -235,7 +235,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 				return planModeQuestionCancelled(
 					parsed.questions,
 					"ui_unavailable",
-					"Unable to ask Plan-mode questions because interactive UI is not available.",
+					"Unable to ask Plan mode questions because interactive UI is not available.",
 				);
 			}
 
@@ -259,7 +259,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		label: "Complete plan",
 		description:
 			"Submit the complete decision-ready implementation plan for user review. Only available while Plan mode is active, and must be the final standalone action.",
-		promptSnippet: "Submit the final Plan-mode implementation plan",
+		promptSnippet: "Submit the final Plan mode implementation plan",
 		promptGuidelines: [
 			"Call plan_mode_complete alone as the final action only after the implementation plan is decision-complete.",
 		],
@@ -395,7 +395,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 	};
 
 	pi.on("session_start", async (event, ctx) => {
-		const session = lifecycle.nextSession("Plan-mode session replaced");
+		const session = lifecycle.nextSession("Plan mode session replaced");
 		planToolsActivated = false;
 		currentHasUI = ctx.hasUI;
 		reconcilePlanToolSurface(ctx.hasUI);
@@ -419,7 +419,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		// No re-arm: nothing may become current again until a session_start.
-		lifecycle.endSession("Plan-mode session shut down");
+		lifecycle.endSession("Plan mode session shut down");
 		stopPlanModeSettingsWatch();
 		pendingReadyNonce = undefined;
 		latestCommandContext = undefined;
@@ -546,7 +546,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 			return true;
 		} catch (error: unknown) {
 			const detail = error instanceof Error ? error.message : String(error);
-			ctx.ui.notify(`Unable to send Plan-mode message: ${detail}`, "error");
+			ctx.ui.notify(`Unable to send Plan mode message: ${detail}`, "error");
 			return false;
 		}
 	}

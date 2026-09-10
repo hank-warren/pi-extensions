@@ -164,7 +164,7 @@ test("a session replacement cancels an open question even without a tool signal"
 });
 
 /**
- * Herdr. A child in Plan Mode stuck on a question used to read as `working`
+ * Herdr. A child in Plan mode stuck on a question used to read as `working`
  * to a supervising agent in another pane, because only Auto Permissions told
  * Herdr it was blocked. The question tool now emits the same `herdr:blocked`
  * signal, labelled so the supervisor can tell it from an approval, and clears

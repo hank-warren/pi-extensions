@@ -181,21 +181,21 @@ export async function answerPlanModeQuestions(
 		return planModeQuestionCancelled(
 			questions,
 			"cancelled",
-			"Plan-mode question cancelled because the session changed.",
+			"Plan mode question cancelled because the session changed.",
 		);
 	}
 	if (!lifecycle.isEnabled()) {
 		return planModeQuestionCancelled(
 			questions,
 			"plan_mode_inactive",
-			"Plan-mode question cancelled because Plan mode is no longer active.",
+			"Plan mode question cancelled because Plan mode is no longer active.",
 		);
 	}
 	if (!answers) {
 		return planModeQuestionCancelled(
 			questions,
 			"cancelled",
-			"User cancelled the Plan-mode question prompt.",
+			"User cancelled the Plan mode question prompt.",
 		);
 	}
 	return planModeQuestionAnswered(questions, answers);
