@@ -19,6 +19,7 @@ packages/                      # public, npm-published pi packages
   pi-multi-login/              # additional OAuth logins for built-in providers (/multi-login)
   pi-loop/                     # deprecated: /loop long-running work (published, tested, not in the aggregate)
   pi-stash/                    # park an unsent prompt with Ctrl+S and restore it
+  pi-cliproxyapi-provider/     # CLIProxyAPI as a pi model provider, seeded from pi's builtin catalog (fork of pi-cliproxyapi-provider)
 docs/                          # template-package/ (copy-to-create package skeleton)
 scripts/                       # validate.py, test.sh, scan-secrets.sh, smoke-load.mjs, create-releases.sh
 test/                          # cross-package composition tests and the shared test support in test/support/
@@ -164,7 +165,7 @@ That is `npm run test:unit`. To run one package (or one file) with the same guar
 npm run test:pkg -- packages/pi-loop/test/*.test.ts
 ```
 
-**`test/support/hermetic.ts` is a preload, and every test process gets it** (Node propagates `--import` to the forked test processes). It gives each process a fresh `HOME` and a fresh `PI_CODING_AGENT_DIR` under a scratch root, clears the config env vars extensions read (`PI_AUTO_PERMISSIONS_CONFIG`, `PI_MULTI_LOGIN_CONFIG`, `PI_STASH_CONFIG`, `HERDR_ENV`, `PI_SUBAGENT_CHILD`, `PI_LOOP_ACTIVE`, `PI_LOOP_ID`), removes the scratch root on exit, and arms a tripwire on the *real* `~/.pi/agent`: on CI any `~/.pi` at all fails the run, and locally a changed entry (ignoring live-session churn) warns, or fails with `PI_EXT_TEST_STRICT=1`. A test that saves and restores `process.env.HOME` by hand is working around a guarantee it already has; delete that scaffolding rather than adding more.
+**`test/support/hermetic.ts` is a preload, and every test process gets it** (Node propagates `--import` to the forked test processes). It gives each process a fresh `HOME` and a fresh `PI_CODING_AGENT_DIR` under a scratch root, clears the config env vars extensions read (`PI_AUTO_PERMISSIONS_CONFIG`, `PI_MULTI_LOGIN_CONFIG`, `PI_STASH_CONFIG`, `HERDR_ENV`, `PI_SUBAGENT_CHILD`, `PI_LOOP_ACTIVE`, `PI_LOOP_ID`, and every `CLIPROXYAPI_*` connection, credential and metadata var), removes the scratch root on exit, and arms a tripwire on the *real* `~/.pi/agent`: on CI any `~/.pi` at all fails the run, and locally a changed entry (ignoring live-session churn) warns, or fails with `PI_EXT_TEST_STRICT=1`. A test that saves and restores `process.env.HOME` by hand is working around a guarantee it already has; delete that scaffolding rather than adding more.
 
 Shared fakes live in `test/support/mock-pi.ts` — `createMockPi`, `createMockContext`, the custom-selector harness, the tool builders and the model-registry fake. A package's own `test/support/` composes that one rather than re-implementing it, and `scripts/validate.py` allows exactly this climb-out (`ROOT/test/support/`) and no other.
 

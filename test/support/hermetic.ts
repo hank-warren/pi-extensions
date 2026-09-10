@@ -53,6 +53,16 @@ const CLEARED_ENV = [
 	"PI_SUBAGENT_CHILD",
 	"PI_LOOP_ACTIVE",
 	"PI_LOOP_ID",
+	// pi-cliproxyapi-provider's connection, credential and metadata settings.
+	// A host pointed at a live CLIProxyAPI would otherwise steer the provider's
+	// config tests and let its discovery tests reach a real proxy.
+	"CLIPROXYAPI_BASE_URL",
+	"CLIPROXYAPI_API_KEY",
+	"CLIPROXYAPI_PROVIDER_NAME",
+	"CLIPROXYAPI_AUTH_REQUIRED",
+	"CLIPROXYAPI_AUTH_HEADER",
+	"CLIPROXYAPI_MODELS_DEV_ENABLED",
+	"CLIPROXYAPI_METADATA_FALLBACK_PROVIDER",
 ];
 
 const realHome = process.env.HOME ?? homedir();
