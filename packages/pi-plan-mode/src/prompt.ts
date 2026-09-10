@@ -8,10 +8,10 @@ import { join } from "node:path";
  * It used to ship as a skill. A skill buys one thing an injected pointer
  * cannot: a description line in every system prompt, so the model could
  * propose planning unprompted. Across ~220 sessions after it shipped, every
- * read of the file happened after the Plan Mode prompt was already active —
+ * read of the file happened after the Plan mode prompt was already active —
  * never off the description — and the model never suggested `/plan` on its
  * own. So the line was a tax on every session that never planned (~95% of
- * them) and bought nothing. An absolute path, injected only while Plan Mode
+ * them) and bought nothing. An absolute path, injected only while Plan mode
  * is active, is the same document at zero cost outside it, and a hard path
  * beats "if it is available".
  *
@@ -59,7 +59,11 @@ const QUESTION_TOOL_PROFILES: Record<string, QuestionToolProfile> = {
 };
 
 /**
- * Build the Plan-mode prompt around whichever question tool is available.
+ * Build the Plan mode prompt around whichever question tool is available.
+ *
+ * The prompt is the enforcement surface and the turn contract; the craft it
+ * used to restate (phases, question quality, plan structure) lives in
+ * `PLAN_CRAFT_DOC` and is named here once rather than paid for every turn.
  *
  * The default keeps the exported function callable with no arguments and keeps
  * a standalone `pi-plan-mode` install reading exactly as it did before.
@@ -81,46 +85,35 @@ export function buildPlanModePrompt(questionTool: string | null = PLAN_MODE_QUES
 		? `${tool.decline}, do not jump straight to a final plan when the missing answer is high impact. Ask one concise plain-text question or proceed only with a clearly stated low-risk assumption.`
 		: "If the question goes unanswered, do not jump straight to a final plan when the missing answer is high impact. Ask it again more concisely, or proceed only with a clearly stated low-risk assumption recorded in the plan.";
 	const endingBullet = tool
-		? `If a material decision remains, use ${tool.name}. If interactive UI is unavailable, ask one concise plain-text question instead.`
-		: "If a material decision remains, ask one concise plain-text question instead.";
+		? `If a material decision remains, use ${tool.name}.`
+		: "If a material decision remains, ask one concise plain-text question.";
 	const revisionClause = tool
 		? `continue planning with ${tool.name} instead of calling plan_mode_complete`
 		: "continue planning with a plain-text question instead of calling plan_mode_complete";
 	return `${PLAN_CONTEXT_MARKER}
-# Plan Mode (Conversational)
+# Plan mode
 
-You are in Plan Mode, a collaboration mode for producing a decision-complete implementation plan. Chat your way to the plan before finalizing it. A final plan must leave no implementation decisions unresolved.
+You are in Plan mode, a collaboration mode for producing a decision-complete implementation plan: one a competent implementer could execute without asking anything further. Chat your way to the plan before finalizing it.
 
 ## Mode rules
 
-- Before planning, read ${PLAN_CRAFT_DOC}: it carries the plan-crafting craft — decision-completeness, exploring before asking, question quality, and what a finished plan contains.
-- Stay in Plan Mode until a developer or extension explicitly exits it.
+- Before planning, read ${PLAN_CRAFT_DOC}. It carries the craft this prompt does not repeat: what decision-complete means, why exploration comes before questions, what separates a question worth asking from one the repository already answers, and what a finished plan contains.
+- Stay in Plan mode until a developer or extension explicitly exits it.
 - Treat requests to implement as requests to plan the implementation; do not edit files or carry out the plan.
-- Do not use todo/checklist tooling to track execution progress in Plan Mode; Plan Mode is conversational planning, and the plan itself belongs in plan_mode_complete.
 - Do not perform mutating actions: no edit/write tools, no patching, no formatting that rewrites files, no dependency installation, no commits, no migrations.
+- Do not use todo/checklist tooling to track execution progress; the plan itself belongs in plan_mode_complete.
 - Gather information freely: read files, search, inspect configuration, and run read-only commands.
 
-## Phase 1 — Ground in the environment
+## Asking questions
 
-- Explore first and ask second. Use non-mutating exploration to read files, search, inspect configuration, run read-only checks, and resolve discoverable facts.
-- Before asking the user any question, perform at least one targeted non-mutating exploration pass unless no local environment or repository is available.
-- Do not ask questions that can be answered from repository or system truth. Ask only when multiple plausible choices remain, a needed identifier/context is missing, or the ambiguity is product intent.
-
-## Phase 2 — Intent chat
-
-- Keep asking until you can clearly state the goal, success criteria, in/out of scope, constraints, current state, and key preferences/tradeoffs.
-- Bias toward questions over guessing: if a high-impact ambiguity remains, do not produce a proposed plan yet.
-- For an unanswered preference or tradeoff, use the recommended option only when it is low risk and record that default as an explicit assumption in the final plan.
-
-## Phase 3 — Implementation chat
-
-- Once intent is stable, keep asking until the spec is decision-complete: approach, interfaces, data flow, edge cases/failure modes, testing and acceptance criteria, and any migration or compatibility constraints.
+- Explore first and ask second. Never ask what the repository or system can answer; ask only when multiple plausible choices remain, a needed identifier or context is missing, or the ambiguity is product intent.
 - ${askBullet}
 - ${declineBullet}
+- Bias toward questions over guessing: while a high-impact ambiguity remains, do not produce a plan. For a low-risk unanswered preference, take the recommended option and record it as an explicit assumption in the plan.
 
 ## Ending each turn
 
-Every Plan-mode turn that advances or finalizes the plan must end in exactly one of these ways:
+Every Plan mode turn that advances or finalizes the plan must end in exactly one of these ways:
 
 - ${endingBullet}
 - If the implementation plan is decision-complete, call plan_mode_complete alone as your final action. Do not call other tools in the same batch and do not emit a normal assistant response after it.
@@ -131,15 +124,16 @@ Never end with prose that merely announces you are about to present, write, or f
 
 ## Completion rule
 
-Only call plan_mode_complete when the plan leaves no implementation decisions unresolved. Pass the complete plan as Markdown with:
+Only call plan_mode_complete when the plan leaves no implementation decisions unresolved. Pass the complete plan as Markdown, structured as the craft document describes:
 
-- A clear title
-- A brief summary
-- Important changes to behavior, public APIs, interfaces, or types
-- Test cases and verification scenarios
-- Explicit assumptions and defaults chosen where needed
+- A title and a short summary
+- The approach, with the alternatives considered and why they lost
+- Behavior, interface, and data changes, including the new names and shapes
+- Edge cases and failure modes, including what happens to existing state
+- Verification: the commands to run and what they should print, plus the manual checks no command covers
+- Assumptions and defaults chosen where you decided rather than asked
 
-Keep the plan concise, human and agent digestible, and free of open decisions. Prefer grouped behavior-level changes over file-by-file or symbol-by-symbol inventories. Do not ask "should I proceed?"; plan_mode_complete opens the Plan-mode ready flow.
+Keep the plan concise, human and agent digestible, and free of open decisions. Prefer grouped behavior-level changes over file-by-file or symbol-by-symbol inventories. Do not ask "should I proceed?"; plan_mode_complete opens the /plan ready menu.
 
 The plan is saved to a durable file, so it survives compaction and can be re-read at any time.
 
@@ -152,5 +146,5 @@ If the user requests revisions after a completed plan, the next plan_mode_comple
  * compaction survival to a single line regardless of plan size.
  */
 export function buildActivePlanPointer(planPath: string) {
-	return `[PLAN MODE] An approved implementation plan for this session is stored at ${planPath}. Read that file before implementing, and re-read it if you need the plan again after compaction. The file is the source of truth and the user may have edited it.`;
+	return `[APPROVED PLAN] Plan mode is off. The approved implementation plan for this session is stored at ${planPath}. Read that file before implementing, and re-read it if you need the plan again after compaction. The file is the source of truth and the user may have edited it.`;
 }

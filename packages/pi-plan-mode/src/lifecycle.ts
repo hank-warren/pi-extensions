@@ -9,7 +9,7 @@ export interface LifecycleScope {
 }
 
 /**
- * Two nested generations decide whether deferred Plan-mode work may still act.
+ * Two nested generations decide whether deferred Plan mode work may still act.
  *
  * The session generation moves when Pi replaces or shuts down the session: a
  * menu, a settings reload, or a question left waiting from the previous session

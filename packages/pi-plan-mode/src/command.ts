@@ -9,6 +9,7 @@ const PLAN_COMMAND_COMPLETIONS: readonly CommandArgumentCompletion[] = [
 	{ value: "show", label: "show", description: "Show the stored plan" },
 	{ value: "finalize", label: "finalize", description: "Request a completed plan" },
 	{ value: "implement", label: "implement", description: "Implement the completed plan" },
+	{ value: "done", label: "done", description: "Mark the active plan as implemented and archive it" },
 	{ value: "export", label: "export", description: "Export the stored plan to a Markdown file" },
 	{ value: "exit", label: "exit", description: "Leave Plan mode and clear the plan" },
 	{ value: "off", label: "off", description: "Leave Plan mode and clear the plan" },

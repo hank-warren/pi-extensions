@@ -70,8 +70,8 @@ test("plan-mode registers flag, tools, command, and safety hooks", () => {
 	assert.ok(mock.flags.has("plan"));
 	assert.deepEqual(
 		mock.tools.map((tool) => tool.name).sort(),
-		["plan_mode_complete", "plan_mode_question"],
-		"both tools are always registered, so a historical transcript resolves either",
+		["plan_implemented", "plan_mode_complete", "plan_mode_question"],
+		"all three tools are always registered, so a historical transcript resolves any of them",
 	);
 	assert.ok(mock.commands.has("plan"));
 	for (const event of ["session_start", "session_shutdown", "tool_call", "before_agent_start"]) {
@@ -110,14 +110,20 @@ test("Plan tools are staged and activation is monotonic for the source session",
 		await mock.commands.get("plan")?.handler("exit", context.ctx);
 		await mock.events.get("session_shutdown")?.[0]?.({}, context.ctx);
 
-		const activated = [
+		// Three writes for a whole plan lifecycle, each at a transition that
+		// already rewrites the system prompt: staging at session start, the
+		// planning tools on entry, plan_implemented on "implement". Nothing is
+		// ever removed, so the tool-list prefix stays cacheable between them.
+		const planning = [
 			"read", "bash", "edit", "write", "subagent", "plan_mode_complete", "plan_mode_question",
 		];
+		const implementing = [...planning, "plan_implemented"];
 		assert.deepEqual(mock.setActiveToolsCalls, [
 			["read", "bash", "edit", "write", "subagent"],
-			activated,
+			planning,
+			implementing,
 		]);
-		assert.deepEqual(mock.rawPi.getActiveTools(), activated);
+		assert.deepEqual(mock.rawPi.getActiveTools(), implementing);
 	});
 });
 
@@ -196,11 +202,11 @@ test("the preference applies outside Plan mode too, so the prompt is never stale
 		const result = await runBeforeAgentStart(mock, context.ctx);
 
 		assert.ok(!mock.rawPi.getActiveTools().includes("plan_mode_question"));
-		assert.equal(result?.systemPrompt, undefined, "no Plan-mode prompt outside Plan mode");
+		assert.equal(result?.systemPrompt, undefined, "no Plan mode prompt outside Plan mode");
 	});
 });
 
-test("the Plan-mode prompt names ask_user_question when it is preferred", async () => {
+test("the Plan mode prompt names ask_user_question when it is preferred", async () => {
 	await withAgentDir(async () => {
 		const mock = preferenceMock({ askUserQuestion: true });
 		const context = createMockContext({ hasUI: true, mode: "tui" });
@@ -759,7 +765,7 @@ test("plan-mode-state entry shape (pi-loop consumer contract)", async () => {
  * than left applied with nothing sent — the model would otherwise be in a mode
  * it was never told about.
  */
-test("a Plan-mode message the session refuses rolls the state back", async () => {
+test("a Plan mode message the session refuses rolls the state back", async () => {
 	await withAgentDir(async () => {
 		const mock = createMockPi({ activeTools: ["read"] });
 		planMode(mock.pi);
@@ -977,5 +983,198 @@ test("the interactive /plan menu refuses to open without a UI", async () => {
 			() => handler("", context.ctx) as Promise<unknown>,
 			/unavailable in print and JSON modes/,
 		);
+	});
+});
+
+/**
+ * Ending implementation. Before plan_implemented nothing could say a plan was
+ * done, so the pointer and the `▶ plan · implementing` widget stayed up until
+ * the user cleared them by hand, and the next plan in the same session
+ * overwrote the file the previous one had been implemented from.
+ */
+function implementedTool(mock: ReturnType<typeof createMockPi>) {
+	const execute = mock.tools.find((candidate) => candidate.name === "plan_implemented")
+		?.execute as ToolExecute | undefined;
+	assert.ok(execute, "plan_implemented must be registered");
+	return execute;
+}
+
+async function planAndImplement(
+	mock: ReturnType<typeof createMockPi>,
+	context: ReturnType<typeof createMockContext>,
+	plan = "# Plan",
+) {
+	await startPlanning(mock, context);
+	await completeTool(mock)("call", { plan }, undefined, undefined, context.ctx);
+	await mock.commands.get("plan")?.handler("implement", context.ctx);
+	assert.equal(context.statuses.get("plan-mode"), "▶ plan · implementing");
+	return planFilePathForSession("test-session");
+}
+
+test("plan_implemented archives the plan beside the live slot and clears the pointer", async () => {
+	await withAgentDir(async () => {
+		const mock = createMockPi({ activeTools: ["read", "edit"] });
+		planMode(mock.pi);
+		const context = createMockContext({ hasUI: true, mode: "tui" });
+		const planPath = await planAndImplement(mock, context, "# First");
+
+		const result = (await implementedTool(mock)("call", {}, undefined, undefined, context.ctx)) as {
+			content: Array<{ text: string }>;
+			details: { archivePath?: string };
+		};
+
+		const archive = join(plansDirectory(), "test-session.1.md");
+		assert.equal(result.details.archivePath, archive);
+		assert.match(result.content[0].text, /Plan implemented\. Archived to/);
+		assert.equal(await readFile(archive, "utf8"), "# First\n");
+		await assert.rejects(stat(planPath), "the live slot is free again");
+		assert.equal(context.statuses.get("plan-mode"), undefined);
+
+		const next = (await mock.events.get("before_agent_start")?.[0]?.(
+			{ systemPrompt: "base" },
+			context.ctx,
+		)) as { systemPrompt?: string } | undefined;
+		assert.equal(next?.systemPrompt, undefined, "no pointer once the plan is done");
+		// Sticky: the tool stays in the active set so "done" never rewrites the
+		// tool list — the only prompt change is the pointer line leaving.
+		assert.ok(mock.rawPi.getActiveTools().includes("plan_implemented"));
+	});
+});
+
+test("plan_implemented refuses to run outside implementation", async () => {
+	await withAgentDir(async () => {
+		const mock = createMockPi({ activeTools: ["read"] });
+		planMode(mock.pi);
+		const context = createMockContext({ hasUI: true, mode: "tui" });
+		await mock.events.get("session_start")?.[0]?.({ reason: "resume" }, context.ctx);
+		await assert.rejects(
+			() => implementedTool(mock)("call", {}, undefined, undefined, context.ctx) as Promise<unknown>,
+			/only available while an approved plan is being implemented/,
+		);
+
+		await mock.commands.get("plan")?.handler("start", context.ctx);
+		await completeTool(mock)("call", { plan: "# Plan" }, undefined, undefined, context.ctx);
+		await assert.rejects(
+			() => implementedTool(mock)("call", {}, undefined, undefined, context.ctx) as Promise<unknown>,
+			/only available while an approved plan is being implemented/,
+			"a proposed plan is not an implemented one",
+		);
+	});
+});
+
+test("archives number upward, so a session that plans repeatedly keeps every plan", async () => {
+	await withAgentDir(async () => {
+		const mock = createMockPi({ activeTools: ["read", "edit"] });
+		planMode(mock.pi);
+		const context = createMockContext({ hasUI: true, mode: "tui" });
+
+		await planAndImplement(mock, context, "# First");
+		await mock.commands.get("plan")?.handler("done", context.ctx);
+		assert.match(context.notifications.at(-1)?.message ?? "", /Archived to .*test-session\.1\.md/);
+
+		await planAndImplement(mock, context, "# Second");
+		await mock.commands.get("plan")?.handler("done", context.ctx);
+
+		assert.equal(await readFile(join(plansDirectory(), "test-session.1.md"), "utf8"), "# First\n");
+		assert.equal(await readFile(join(plansDirectory(), "test-session.2.md"), "utf8"), "# Second\n");
+	});
+});
+
+test("/plan done with nothing to finish is a warning, not a state change", async () => {
+	await withAgentDir(async () => {
+		const mock = createMockPi({ activeTools: ["read"] });
+		planMode(mock.pi);
+		const context = createMockContext({ hasUI: true, mode: "tui" });
+		await mock.events.get("session_start")?.[0]?.({ reason: "resume" }, context.ctx);
+
+		await mock.commands.get("plan")?.handler("done", context.ctx);
+
+		assert.deepEqual(context.notifications.at(-1), {
+			message: "No plan is being implemented.",
+			level: "warning",
+		});
+	});
+});
+
+test("'Start a new plan' from the active menu archives instead of overwriting", async () => {
+	await withAgentDir(async () => {
+		const mock = createMockPi({ activeTools: ["read", "edit"] });
+		planMode(mock.pi);
+		const context = createMockContext({
+			hasUI: true,
+			mode: "tui",
+			select: async (_frame: string, options: string[]) =>
+				options.find((option) => option.startsWith("Start a new plan")),
+		});
+		const planPath = await planAndImplement(mock, context, "# First");
+
+		await mock.commands.get("plan")?.handler("", context.ctx);
+		// The menu's start-new archives first and enters Plan mode in a `.then`,
+		// so poll the status rather than a notification that already exists.
+		for (let attempt = 0; attempt < 200; attempt += 1) {
+			if (context.statuses.get("plan-mode") === "◆ plan · drafting") break;
+			await new Promise((resolve) => setTimeout(resolve, 5));
+		}
+
+		assert.equal(context.statuses.get("plan-mode"), "◆ plan · drafting");
+		assert.equal(await readFile(join(plansDirectory(), "test-session.1.md"), "utf8"), "# First\n");
+		await completeTool(mock)("call", { plan: "# Second" }, undefined, undefined, context.ctx);
+		assert.equal(await readFile(planPath, "utf8"), "# Second\n");
+	});
+});
+
+test("'Mark as implemented' from the active menu archives and clears", async () => {
+	await withAgentDir(async () => {
+		const mock = createMockPi({ activeTools: ["read", "edit"] });
+		planMode(mock.pi);
+		const context = createMockContext({
+			hasUI: true,
+			mode: "tui",
+			select: async (_frame: string, options: string[]) =>
+				options.find((option) => option.startsWith("Mark as implemented")),
+		});
+		await planAndImplement(mock, context);
+
+		await mock.commands.get("plan")?.handler("", context.ctx);
+		await waitForNotification(
+			context,
+			`Plan implemented. Archived to ${join(plansDirectory(), "test-session.1.md")}.`,
+		);
+		assert.equal(context.statuses.get("plan-mode"), undefined);
+	});
+});
+
+test("a resumed implementation session stages plan_implemented once, at session start", async () => {
+	await withAgentDir(async () => {
+		const entries: Array<{ type: "custom"; customType: string; data: unknown }> = [];
+		const mock = createMockPi({ activeTools: ["read", "edit"] });
+		planMode(mock.pi);
+		const planPath = planFilePathForSession("test-session");
+		await writeFile(planPath, "# Plan\n").catch(async () => {
+			const { mkdir } = await import("node:fs/promises");
+			await mkdir(plansDirectory(), { recursive: true });
+			await writeFile(planPath, "# Plan\n");
+		});
+		entries.push({
+			type: "custom",
+			customType: "plan-mode-state",
+			data: { enabled: false, awaitingAction: false, planPath },
+		});
+		const context = createMockContext({
+			hasUI: true,
+			mode: "tui",
+			sessionManager: {
+				getSessionId: () => "test-session",
+				getSessionFile: () => "/sessions/implementation.jsonl",
+				getBranch: () => entries,
+				getEntries: () => entries,
+			},
+		});
+
+		await mock.events.get("session_start")?.[0]?.({ reason: "resume" }, context.ctx);
+		await mock.events.get("before_agent_start")?.[0]?.({ systemPrompt: "base" }, context.ctx);
+		await mock.events.get("before_agent_start")?.[0]?.({ systemPrompt: "base" }, context.ctx);
+
+		assert.deepEqual(mock.setActiveToolsCalls, [["read", "edit", "plan_implemented"]]);
 	});
 });

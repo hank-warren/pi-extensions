@@ -9,6 +9,12 @@ export interface PlanModeState {
 	planPath?: string;
 	/** A completed plan is waiting for the user to choose how to proceed. */
 	awaitingAction: boolean;
+	/**
+	 * Where the last finished plan went. A fresh implementation session shares
+	 * its parent's live slot, so when it finishes, the parent's `planPath` names
+	 * a file that has moved; this is where `/plan show` can still find it.
+	 */
+	archivePath?: string;
 }
 
 type SessionEntry = {
@@ -23,10 +29,12 @@ export function restorePlanModeState(entries: unknown[], stateEntryType: string)
 
 	const enabled = entry.data.enabled === true;
 	const planPath = absolutePath(entry.data.planPath);
+	const archivePath = absolutePath(entry.data.archivePath);
 	return {
 		enabled,
 		planPath,
 		awaitingAction: enabled && entry.data.awaitingAction === true && planPath !== undefined,
+		...(archivePath ? { archivePath } : {}),
 	};
 }
 

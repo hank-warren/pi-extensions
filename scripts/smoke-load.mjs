@@ -55,16 +55,19 @@ const EXPECTED_SURFACES = {
 		handlers: ["session_shutdown", "session_start", "tool_call", "tool_execution_end"],
 	},
 	"./packages/pi-plan-mode/index.ts": {
-		tools: ["plan_mode_complete", "plan_mode_question"],
+		tools: ["plan_implemented", "plan_mode_complete", "plan_mode_question"],
 		commands: ["plan"],
 		flags: ["plan"],
 		// No agent_end hook: the legacy <proposed_plan> completion path is gone.
 		// No context hook: the plan lives in a file, so nothing is reinjected.
 		// No thinking_level_select hook: Plan mode never changes the thinking
 		// level, so it has no manual override to detect.
+		// input: stages plan tools before Pi snapshots the base system prompt,
+		// so a staged tool ships with its guideline on the same turn.
 		handlers: [
 			"agent_settled",
 			"before_agent_start",
+			"input",
 			"session_shutdown",
 			"session_start",
 			"tool_call",

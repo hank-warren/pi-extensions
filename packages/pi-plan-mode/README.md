@@ -15,6 +15,7 @@ The plan is written to a **durable file** that survives compaction, survives res
 - `plan_mode_complete({ plan })` writes the plan to `<agent dir>/plans/<session-id>.md`.
 - **Pointer, not payload.** An active plan adds one line to the system prompt naming the file. The plan body is never injected into context, so a 50-page plan costs the same as a one-liner and survives compaction for free.
 - Two ways to implement: continue in this conversation, or open a fresh session that reads the same file.
+- `plan_implemented` lets the model end implementation itself once the plan's verification has passed; `/plan done` does the same by hand. The plan file is **archived**, never deleted, so a session that plans several times keeps every plan.
 - `/plan export [path]` copies the plan anywhere, never overwriting an existing target.
 - Hand-edit the plan file at any time; every command and both implementation paths read from disk.
 - A shipped **plan-craft doc** the prompt points at by path, carrying the plan-crafting craft the prompt itself only names.
@@ -40,6 +41,7 @@ pi -e npm:@hank-warren/pi-plan-mode
 /plan show            display the stored plan
 /plan finalize        ask the agent to complete the plan now
 /plan implement       implement the completed plan here
+/plan done            mark the active plan implemented and archive it
 /plan export [path]   copy the plan to a Markdown file
 /plan exit            leave Plan mode and delete the plan file
 ```
@@ -57,6 +59,20 @@ From a completed plan you can:
 - **Export plan…** — write the plan to a path of your choice.
 - **Stay in Plan mode** — keep refining. The next planning turn supersedes the previous plan.
 
+### Ending implementation
+
+While a plan is being implemented the footer shows `▶ plan · implementing` and the system prompt carries a one-line pointer to the plan file. Implementation ends in one of three ways:
+
+- **The model calls `plan_implemented`** once the plan's verification steps have passed. It is staged into the tool set the moment implementation starts and is told to call it once, as the last action, not to keep checking whether the plan is done.
+- **`/plan done`**, or **Mark as implemented** from the `/plan` menu.
+- **Start a new plan** from the same menu, which ends the current one on its way into Plan mode.
+
+All three archive the plan file to `plans/<session-id>.<n>.md` beside the live slot and clear the pointer. **Clear active implementation plan**, `/plan exit` and `/plan off` delete instead of archiving.
+
+An archive that fails (a filesystem without hard links, a permissions error, a plan file replaced while it was being archived) is reported and changes nothing: the plan stays active, and you can export and clear by hand. If the session moved on while the archive was in flight — a `/plan start`, a session replacement — the newer state wins and the finish is dropped.
+
+A **fresh implementation session shares its parent's plan file**, so when it finishes, the parent's pointer names a file that has moved. The parent notices on its next start, clears the pointer, and remembers the archive: `/plan show` there displays the archived plan as history.
+
 Print and JSON modes cannot show the interactive menu; use `/plan start`, `/plan <prompt>`, `/plan show`, `/plan export`, and `/plan exit` there.
 
 ## 📄 The plan file
@@ -67,7 +83,8 @@ The plan lives at `<agent dir>/plans/<session-id>.md` — normally `~/.pi/agent/
 - **Hand-edit it freely.** Everything reads from disk, so your edits are what the agent implements.
 - **It survives compaction** because the model only ever sees a one-line pointer to it, and re-reads the file when needed.
 - **A fresh implementation session points at the same file.** The plan is never copied, so both sessions see the same content.
-- `/plan exit` deletes it. Export first if you want to keep a copy.
+- **Finishing archives it** to `<session-id>.<n>.md` in the same directory, numbered upward, so the next plan in the session gets a clean slot without overwriting the last one.
+- `/plan exit` on a *proposed* plan deletes it. Export first if you want to keep a copy.
 
 Writes are atomic (temp file plus rename), so a reader never sees a partial plan.
 
@@ -95,7 +112,11 @@ A settings file that does not parse is reported at session start and the default
 
 ## 🔐 What Plan mode does and does not enforce
 
-Plan mode blocks exactly two tools while planning: `edit` and `write`. That is the whole enforcement surface. Checklist tools (a `todo` extension, for example) are deliberately not blocked — a task list is ephemeral planning scratch, and the planning prompt steers the model away from execution-progress tracking.
+Plan mode blocks exactly two tools while planning: `edit` and `write`. That is the whole enforcement surface.
+
+Its own tools are **staged, and never withdrawn mid-session**: `plan_mode_complete` joins the active set when Plan mode is entered, `plan_implemented` joins when implementation starts, and each stays until the session ends, refusing to run outside its phase. Staging happens on the `input` event, before Pi snapshots the base system prompt for the turn, so a staged tool ships with its guideline on the same turn rather than the next. Both joins land on a transition that already rewrites the system prompt, so a plan's whole lifecycle changes the **tool list** twice, at moments the mode switch was paying for anyway. The system prompt itself changes at those two moments and once more when implementation ends (the pointer line leaves); nothing else Plan mode does changes either between turns.
+
+The one exception is the `plan_mode_question` fallback, which follows `ask_user_question`'s availability and so can leave and rejoin when that changes mid-session (a headless turn, or the package being installed or removed) — rare, and older than this design. Checklist tools (a `todo` extension, for example) are deliberately not blocked — a task list is ephemeral planning scratch, and the planning prompt steers the model away from execution-progress tracking.
 
 It deliberately does **not** police Bash, subagents, MCP tools, or any other extension tool. Those decisions belong to your permission layer, which can see the whole session and judge each call. Pair Plan mode with a permission extension such as `@hank-warren/pi-auto-permissions` if you want command review during planning.
 
@@ -114,15 +135,15 @@ pi install npm:@hank-warren/pi-ask-user-question
 Detection is by tool name at runtime, re-evaluated every turn — there is no dependency between the two packages, and installing or removing one never requires touching the other. When `ask_user_question` is present:
 
 - `plan_mode_question` is removed from the **active** tool set, so the model never sees two overlapping question tools and cannot call the weaker one. It stays *registered*, so a historical transcript still resolves it.
-- The Plan-mode system prompt names `ask_user_question` and quotes its bounds and its decline signal.
+- The Plan mode system prompt names `ask_user_question` and quotes its bounds and its decline signal.
 
 A standalone `pi-plan-mode` install loses nothing: `plan_mode_question` stays fully functional and the prompt reads exactly as it always has. It is a **legacy fallback** and is slated for removal in a future major.
 
 ## 📚 The plan-craft doc
 
-The system prompt is the enforcement surface and stays deliberately short. The depth layer it points at — what decision-complete actually means, why exploration comes before questions, what separates a question worth asking from one the repository already answered, and what belongs in a finished plan — is [`docs/plan-craft.md`](docs/plan-craft.md), shipped with the package. One line in the planning prompt names it by absolute path (resolved from the installed package, so it works under any install layout), and the model reads it when Plan Mode opens.
+The system prompt is the enforcement surface and stays deliberately short. The depth layer it points at — what decision-complete actually means, why exploration comes before questions, what separates a question worth asking from one the repository already answered, and what belongs in a finished plan — is [`docs/plan-craft.md`](docs/plan-craft.md), shipped with the package. One line in the planning prompt names it by absolute path (resolved from the installed package, so it works under any install layout), and the model reads it when Plan mode opens.
 
-It used to be a skill. A skill's description line is in every system prompt, which buys exactly one thing an injected pointer cannot: the model proposing planning unprompted. Across ~220 sessions after it shipped, every read of the file happened after the Plan Mode prompt was already active, never off the description, and the model never suggested `/plan` on its own — so the line was a tax on every session that never planned (about 95% of them) that bought nothing. A hard path injected only while the mode is active is the same document at zero cost outside it.
+It used to be a skill. A skill's description line is in every system prompt, which buys exactly one thing an injected pointer cannot: the model proposing planning unprompted. Across ~220 sessions after it shipped, every read of the file happened after the Plan mode prompt was already active, never off the description, and the model never suggested `/plan` on its own — so the line was a tax on every session that never planned (about 95% of them) that bought nothing. A hard path injected only while the mode is active is the same document at zero cost outside it.
 
 ## 📊 Statusline and widget
 

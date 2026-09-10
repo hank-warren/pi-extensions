@@ -11,7 +11,8 @@ interface ActiveImplementationMenuOptions {
 	show(): void | Promise<void>;
 	exportPlan(path: string, signal: AbortSignal): Promise<boolean>;
 	settings(signal: AbortSignal): Promise<boolean>;
-	startNew(): void;
+	done(): void | Promise<unknown>;
+	startNew(): void | Promise<unknown>;
 	clear(): void;
 }
 
@@ -20,7 +21,7 @@ export async function showActiveImplementationMenu(
 	options: ActiveImplementationMenuOptions,
 ) {
 	type Screen = "active" | "export";
-	type Action = "show" | "export" | "settings" | "start-new" | "clear";
+	type Action = "show" | "export" | "settings" | "done" | "start-new" | "clear";
 	const menu = defineMenu<undefined, Screen, Action, ExtensionContext>({
 		start: "active",
 		screens: {
@@ -30,10 +31,26 @@ export async function showActiveImplementationMenu(
 				lines: [options.statusText, ...(options.planPathLine ? [options.planPathLine] : [])],
 				items: [
 					{ id: "show", label: "Show active implementation plan", action: "show" },
+					{
+						id: "done",
+						label: "Mark as implemented",
+						description: "Archive the plan file and clear the active plan.",
+						action: "done",
+					},
 					{ id: "export", label: "Export plan…", to: "export" },
 					{ id: "settings", label: "Settings", action: "settings" },
-					{ id: "start-new", label: "Start a new plan", action: "start-new" },
-					{ id: "clear", label: "Clear active implementation plan", action: "clear" },
+					{
+						id: "start-new",
+						label: "Start a new plan",
+						description: "Archive the active plan and enter Plan mode.",
+						action: "start-new",
+					},
+					{
+						id: "clear",
+						label: "Clear active implementation plan",
+						description: "Delete the plan file and clear the active plan.",
+						action: "clear",
+					},
 				],
 				hint: "close",
 			}),
@@ -51,8 +68,15 @@ export async function showActiveImplementationMenu(
 				if (signal.aborted || !options.isCurrent()) return { kind: "rejected" };
 				return close ? { kind: "close" } : { kind: "stay" };
 			},
+			// Both await their work: an archive can fail, and a failure has to
+			// reach the user as a notification rather than an unhandled rejection
+			// behind a menu that already closed.
+			done: async () => {
+				await options.done();
+				return { kind: "close" };
+			},
 			"start-new": async () => {
-				options.startNew();
+				await options.startNew();
 				return { kind: "close" };
 			},
 			clear: async () => {

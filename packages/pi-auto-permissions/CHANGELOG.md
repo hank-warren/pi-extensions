@@ -1,5 +1,11 @@
 # @hank-warren/pi-auto-permissions
 
+## 0.16.2
+
+### Patch Changes
+
+- Comment-only: the docblock describing `OVERRIDE_FEEDBACK_SYSTEM_PROMPT` sat orphaned above `INJECTED_USER_MESSAGE_SYSTEM_PROMPT`; it is on the constant it describes now. No behaviour change.
+
 ## 0.16.1
 
 ### Patch Changes
