@@ -64,6 +64,7 @@ test("runtime registers cached models immediately and refreshes without reload",
 test("runtime refreshModels re-discovers CPA models and piggybacks stale metadata when allowNetwork is true", async () => {
   const catalog = {
     load: async () => snapshot("cached"),
+    current: () => undefined,
     refresh: async (target: string, mode: string, _getApiKey: any, signal?: AbortSignal) => {
       // Routine discovery: always CPA models, models.dev only once stale.
       assert.equal(target, "models-if-stale");

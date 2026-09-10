@@ -78,3 +78,36 @@ test("aborts models.dev catalog fetch when response body parsing stalls", async 
     globalThis.fetch = originalFetch;
   }
 });
+
+test("keeps only the metadata fields the provider reads", () => {
+  const catalog = parseModelsDevCatalog({
+    openai: {
+      id: "openai",
+      models: {
+        "gpt-5.5": {
+          id: "gpt-5.5",
+          name: "GPT-5.5",
+          description: "a paragraph nothing here ever displays",
+          release_date: "2026-01-01",
+          tool_call: true,
+          reasoning: true,
+          reasoning_options: [{ type: "effort", values: ["low", "high"] }],
+          modalities: { input: ["text"], output: ["text"] },
+          limit: { context: 272000, output: 128000 },
+          cost: { input: 5, output: 30 },
+        },
+      },
+    },
+  });
+
+  assert.deepEqual(Object.keys(catalog["openai/gpt-5.5"]).sort(), [
+    "cost",
+    "id",
+    "limit",
+    "modalities",
+    "name",
+    "reasoning",
+    "reasoning_options",
+    "sourceProvider",
+  ]);
+});
