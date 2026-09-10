@@ -294,8 +294,10 @@ test("a fresh destination adopts its plan pointer on the first turn", async () =
 
 		assert.equal(context.statuses.get("plan-mode"), "▶ plan · implementing");
 		assert.ok(result?.systemPrompt?.includes(planPath));
-		assert.deepEqual(mock.setActiveToolsCalls, []);
-		assert.deepEqual(mock.rawPi.getActiveTools(), ["read", "edit"]);
+		// The destination stages plan_implemented on its first turn, alongside
+		// the pointer line: one write, at the one moment the prompt changes anyway.
+		assert.deepEqual(mock.setActiveToolsCalls, [["read", "edit", "plan_implemented"]]);
+		assert.ok(!mock.rawPi.getActiveTools().includes("plan_mode_complete"));
 	});
 });
 

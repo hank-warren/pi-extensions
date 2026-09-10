@@ -17,7 +17,20 @@ import {
 	startFreshImplementationFromState,
 } from "./fresh-implementation.js";
 import { createLifecycle, type LifecycleScope } from "./lifecycle.js";
-import { deletePlanFile, planFilePathForSession, readPlanFile, writePlanFile } from "./plan-file.js";
+import {
+	PLAN_IMPLEMENTED_DESCRIPTION,
+	PLAN_IMPLEMENTED_GUIDELINE,
+	PLAN_IMPLEMENTED_PARAMS,
+	PLAN_IMPLEMENTED_TOOL_NAME,
+	planImplementedResult,
+} from "./implemented-tool.js";
+import {
+	archivePlanFile,
+	deletePlanFile,
+	planFilePathForSession,
+	readPlanFile,
+	writePlanFile,
+} from "./plan-file.js";
 import { createPlanActionController } from "./plan-action-controller.js";
 import { createPlanExportController } from "./plan-export-controller.js";
 import {
@@ -133,10 +146,24 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 	const lifecycle = createLifecycle();
 	let settingsWatcher: ReturnType<typeof createSettingsWatcher> | undefined;
 	let planToolsActivated = false;
+	/**
+	 * Staged like the planning tools: added when implementation starts and never
+	 * removed for the rest of the session, so "done" costs a pointer-line change
+	 * and nothing more. The tool refuses to run when no plan is active.
+	 */
+	let implementedToolActivated = false;
 	let currentHasUI = false;
 	let globalQuestionAvailable = false;
 	const persistState = () => pi.appendEntry<PlanModeState>(STATE_ENTRY_TYPE, state);
 
+	/**
+	 * The active set grows at exactly two moments in a plan's life: entering
+	 * Plan mode (the planning tools are staged) and starting implementation
+	 * (plan_implemented is staged). Both already rewrite the system prompt, so
+	 * neither costs a prompt-cache miss the lifecycle was not paying anyway, and
+	 * nothing is ever removed mid-session. Between those moments every call here
+	 * is a no-op.
+	 */
 	const reconcilePlanToolSurface = (hasUI: boolean, availability?: boolean) => {
 		currentHasUI = hasUI;
 		const active = pi.getActiveTools();
@@ -144,10 +171,13 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		const wanted = new Set(active);
 		const completeWanted = planToolsActivated;
 		const fallbackWanted = planToolsActivated && hasUI && !globalQuestionAvailable;
+		const implementedWanted = implementedToolActivated;
 		if (completeWanted) wanted.add(PLAN_MODE_COMPLETE_TOOL_NAME);
 		else wanted.delete(PLAN_MODE_COMPLETE_TOOL_NAME);
 		if (fallbackWanted) wanted.add(PLAN_MODE_QUESTION_TOOL);
 		else wanted.delete(PLAN_MODE_QUESTION_TOOL);
+		if (implementedWanted) wanted.add(PLAN_IMPLEMENTED_TOOL_NAME);
+		else wanted.delete(PLAN_IMPLEMENTED_TOOL_NAME);
 		const next = [...wanted];
 		if (next.length !== active.length || next.some((name, index) => name !== active[index])) {
 			pi.setActiveTools(next);
@@ -155,6 +185,10 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 	};
 	const activatePlanTools = (hasUI: boolean) => {
 		planToolsActivated = true;
+		reconcilePlanToolSurface(hasUI);
+	};
+	const activateImplementedTool = (hasUI: boolean) => {
+		implementedToolActivated = true;
 		reconcilePlanToolSurface(hasUI);
 	};
 
@@ -277,6 +311,22 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		},
 	});
 
+	pi.registerTool({
+		name: PLAN_IMPLEMENTED_TOOL_NAME,
+		label: "Plan implemented",
+		description: PLAN_IMPLEMENTED_DESCRIPTION,
+		promptSnippet: "Mark the approved plan as implemented",
+		promptGuidelines: [PLAN_IMPLEMENTED_GUIDELINE],
+		parameters: PLAN_IMPLEMENTED_PARAMS,
+		async execute(_toolCallId, _params: unknown, _signal, _onUpdate, ctx) {
+			if (state.enabled || !state.planPath) {
+				throw new Error("plan_implemented is only available while an approved plan is being implemented");
+			}
+			const archivePath = await finishImplementation(ctx);
+			return planImplementedResult(archivePath);
+		},
+	});
+
 	// Registered tools remain available for transcript replay; the active set is
 	// narrowed at session_start rather than here, because Pi refuses action
 	// methods (getActiveTools/setActiveTools) during extension loading.
@@ -311,6 +361,10 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 					return;
 				}
 				await startImplementation(ctx);
+				return;
+			}
+			if (command === "done") {
+				await markImplemented(ctx);
 				return;
 			}
 			const exportMatch = /^export(?:\s+([\s\S]+))?$/iu.exec(prompt);
@@ -397,6 +451,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 	pi.on("session_start", async (event, ctx) => {
 		const session = lifecycle.nextSession("Plan mode session replaced");
 		planToolsActivated = false;
+		implementedToolActivated = false;
 		currentHasUI = ctx.hasUI;
 		reconcilePlanToolSurface(ctx.hasUI);
 		refreshStateBeforeFirstAgentStart = event.reason === "new";
@@ -414,6 +469,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		}
 		if (persistFlagActivation) persistState();
 		if (state.enabled) activatePlanTools(ctx.hasUI);
+		else if (state.planPath) activateImplementedTool(ctx.hasUI);
 		updateUi(ctx);
 	});
 
@@ -456,7 +512,9 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 			setState(ctx, { awaitingAction: false });
 		}
 		if (state.enabled && !planToolsActivated) activatePlanTools(ctx.hasUI);
-		else reconcilePlanToolSurface(ctx.hasUI);
+		else if (!state.enabled && state.planPath && !implementedToolActivated) {
+			activateImplementedTool(ctx.hasUI);
+		} else reconcilePlanToolSurface(ctx.hasUI);
 		// A headless run has no legitimate question tool, whatever the active set
 		// still says: pi-ask-user-question strips its own tool on this same hook,
 		// and hook order between the two packages is not ours to depend on.
@@ -507,6 +565,34 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		pendingReadyNonce = undefined;
 		setState(ctx, { enabled: false, planPath: undefined, awaitingAction: false });
 		if (planPath && !options.keepPlanFile) await deletePlanFile(planPath);
+	}
+
+	/**
+	 * Implementation is over: the plan file is archived beside the live slot
+	 * (never deleted — it is the record of what was agreed), the pointer and
+	 * widget go, and plan_implemented leaves the active set. Shared by the tool,
+	 * `/plan done`, the menu item, and "Start a new plan", so the session's next
+	 * plan never overwrites the one it just finished.
+	 */
+	async function finishImplementation(ctx: ExtensionContext): Promise<string | undefined> {
+		lifecycle.nextWorkflow();
+		const planPath = state.planPath;
+		pendingReadyNonce = undefined;
+		const archivePath = planPath ? await archivePlanFile(planPath) : undefined;
+		setState(ctx, { enabled: false, planPath: undefined, awaitingAction: false });
+		return archivePath;
+	}
+
+	async function markImplemented(ctx: ExtensionContext) {
+		if (state.enabled || !state.planPath) {
+			ctx.ui.notify("No plan is being implemented.", "warning");
+			return;
+		}
+		const archivePath = await finishImplementation(ctx);
+		ctx.ui.notify(
+			archivePath ? `Plan implemented. Archived to ${archivePath}.` : "Plan implemented.",
+			"info",
+		);
 	}
 
 	/** Leaves Plan mode and reports it in one step, for menus and /plan alike. */
@@ -609,6 +695,8 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		const previousState = state;
 		pendingReadyNonce = undefined;
 		setState(ctx, { enabled: false, awaitingAction: false, planPath });
+		// The same transition that rewrites the system prompt stages the tool.
+		activateImplementedTool(currentHasUI);
 		sendOrRevert(formatImplementationHandoff(planPath), ctx, previousState);
 	}
 
@@ -648,9 +736,16 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 			show: () => showStoredPlan(pi, ctx, state),
 			exportPlan: (path, signal) => planExports.export(path, ctx, signal, menu.isCurrent),
 			settings: (signal) => showSettings(ctx, signal, menu.isCurrent),
+			done: () => {
+				void markImplemented(ctx);
+			},
 			startNew: () => {
-				enterPlanMode(ctx);
-				notifyEnabled(ctx);
+				// Archive first: the next plan_mode_complete writes to the same
+				// session slot, and a plan in progress is not something to overwrite.
+				void finishImplementation(ctx).then(() => {
+					enterPlanMode(ctx);
+					notifyEnabled(ctx);
+				});
 			},
 			clear: () => {
 				void exitAndNotify(ctx, "Active implementation plan cleared.");

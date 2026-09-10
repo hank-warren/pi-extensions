@@ -119,7 +119,7 @@ export function planModeView(state: PlanModeState): PlanModeView | undefined {
 			phase: "implementing",
 			footer: "▶ plan · implementing",
 			headline: "▶ plan · implementing",
-			hint: "/plan to show, replace, or clear the active plan.",
+			hint: "Ends with plan_implemented, or /plan to mark done, replace, or clear.",
 			tone: "normal",
 		};
 	}

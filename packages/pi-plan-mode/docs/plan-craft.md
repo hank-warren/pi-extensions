@@ -64,6 +64,8 @@ On revision, the next `plan_mode_complete` carries a **complete replacement**, n
 
 Once the plan is completed the user chooses what happens from the `/plan` menu: implement here, implement in a fresh session that reads the same file, export it, or discard it. The file is the source of truth from then on — it survives compaction, and the user may have hand-edited it, so re-read it before implementing rather than working from memory of what you wrote.
 
+Implementation has an end too: once the plan's verification section has been run and passed, call `plan_implemented` as the last action. That archives the plan and clears it as the active one. Call it once, at the end — not between steps, and never to abandon a plan that turned out wrong (say so and ask instead).
+
 ## When a plan is the wrong tool
 
 Plan mode is for work whose *shape* is uncertain. It is overhead when it is not:

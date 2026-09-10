@@ -11,6 +11,7 @@ interface ActiveImplementationMenuOptions {
 	show(): void | Promise<void>;
 	exportPlan(path: string, signal: AbortSignal): Promise<boolean>;
 	settings(signal: AbortSignal): Promise<boolean>;
+	done(): void;
 	startNew(): void;
 	clear(): void;
 }
@@ -20,7 +21,7 @@ export async function showActiveImplementationMenu(
 	options: ActiveImplementationMenuOptions,
 ) {
 	type Screen = "active" | "export";
-	type Action = "show" | "export" | "settings" | "start-new" | "clear";
+	type Action = "show" | "export" | "settings" | "done" | "start-new" | "clear";
 	const menu = defineMenu<undefined, Screen, Action, ExtensionContext>({
 		start: "active",
 		screens: {
@@ -30,10 +31,26 @@ export async function showActiveImplementationMenu(
 				lines: [options.statusText, ...(options.planPathLine ? [options.planPathLine] : [])],
 				items: [
 					{ id: "show", label: "Show active implementation plan", action: "show" },
+					{
+						id: "done",
+						label: "Mark as implemented",
+						description: "Archive the plan file and clear the active plan.",
+						action: "done",
+					},
 					{ id: "export", label: "Export plan…", to: "export" },
 					{ id: "settings", label: "Settings", action: "settings" },
-					{ id: "start-new", label: "Start a new plan", action: "start-new" },
-					{ id: "clear", label: "Clear active implementation plan", action: "clear" },
+					{
+						id: "start-new",
+						label: "Start a new plan",
+						description: "Archive the active plan and enter Plan mode.",
+						action: "start-new",
+					},
+					{
+						id: "clear",
+						label: "Clear active implementation plan",
+						description: "Delete the plan file and clear the active plan.",
+						action: "clear",
+					},
 				],
 				hint: "close",
 			}),
@@ -50,6 +67,10 @@ export async function showActiveImplementationMenu(
 				const close = await options.settings(signal);
 				if (signal.aborted || !options.isCurrent()) return { kind: "rejected" };
 				return close ? { kind: "close" } : { kind: "stay" };
+			},
+			done: async () => {
+				options.done();
+				return { kind: "close" };
 			},
 			"start-new": async () => {
 				options.startNew();

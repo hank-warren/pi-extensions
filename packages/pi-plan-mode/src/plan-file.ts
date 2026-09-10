@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { mkdir, open, rename, rm, unlink, writeFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { link, mkdir, open, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { basename, dirname, extname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 const PLANS_DIRECTORY = "plans";
@@ -78,4 +78,34 @@ export async function readPlanFile(path: string): Promise<string | undefined> {
 
 export async function deletePlanFile(path: string): Promise<void> {
 	await unlink(path).catch(() => undefined);
+}
+
+const MAX_ARCHIVE_ATTEMPTS = 1000;
+
+/**
+ * Move a finished or superseded plan out of the way without losing it:
+ * `plans/<session-id>.md` becomes `plans/<session-id>.<n>.md` at the first
+ * free `n`, so the history of a session that plans several times sits next to
+ * its live plan. `link` + `unlink` rather than `rename`, because `link` fails
+ * on an existing target where `rename` silently replaces it: a concurrent
+ * archive can never clobber another. Returns the archive path, or undefined
+ * when there was nothing to archive.
+ */
+export async function archivePlanFile(path: string): Promise<string | undefined> {
+	const extension = extname(path);
+	const stem = path.slice(0, path.length - extension.length);
+	for (let attempt = 1; attempt <= MAX_ARCHIVE_ATTEMPTS; attempt += 1) {
+		const target = `${stem}.${attempt}${extension}`;
+		try {
+			await link(path, target);
+		} catch (error: unknown) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code === "EEXIST") continue;
+			if (code === "ENOENT") return undefined;
+			throw error;
+		}
+		await unlink(path).catch(() => undefined);
+		return target;
+	}
+	throw new Error(`no free archive name for ${path} after ${MAX_ARCHIVE_ATTEMPTS} attempts`);
 }

@@ -67,7 +67,7 @@ async function storedPlanEntry(sessionId: string, enabled = false) {
 test("plan export autocomplete exposes a path-taking public route", () => {
 	assert.deepEqual(
 		completePlanArguments("")?.map((item) => item.value),
-		["start", "show", "finalize", "implement", "export", "exit", "off"],
+		["start", "show", "finalize", "implement", "done", "export", "exit", "off"],
 	);
 	assert.deepEqual(
 		completePlanArguments("ex")?.map((item) => item.value),
