@@ -20,7 +20,8 @@ async function withTempCwd<T>(fn: (cwd: string) => Promise<T>): Promise<T> {
 }
 
 test("extension registers provider with refreshModels capability", async () => {
-  const home = await mkdtemp(join(tmpdir(), "pi-cpa-extension-lifecycle-home-"));
+  const scratchHome = process.env.HOME!;
+  const home = await mkdtemp(join(scratchHome, "pi-cpa-extension-lifecycle-home-"));
   const originalFetch = globalThis.fetch;
 
   try {
@@ -52,12 +53,14 @@ test("extension registers provider with refreshModels capability", async () => {
     });
   } finally {
     globalThis.fetch = originalFetch;
+    process.env.HOME = scratchHome;
     await rm(home, { recursive: true, force: true });
   }
 });
 
 test("extension applies the full GPT-5.6 context window from settings.json", async () => {
-  const home = await mkdtemp(join(tmpdir(), "pi-cpa-extension-settings-home-"));
+  const scratchHome = process.env.HOME!;
+  const home = await mkdtemp(join(scratchHome, "pi-cpa-extension-settings-home-"));
   const originalFetch = globalThis.fetch;
   // Global settings resolve through pi's agent dir, which the hermetic preload
   // points at this process's scratch directory rather than `$HOME/.pi/agent`.
@@ -103,13 +106,15 @@ test("extension applies the full GPT-5.6 context window from settings.json", asy
     });
   } finally {
     globalThis.fetch = originalFetch;
+    process.env.HOME = scratchHome;
     await rm(settingsPath, { force: true });
     await rm(home, { recursive: true, force: true });
   }
 });
 
 test("manual refresh uses the active model registry credential", async () => {
-  const home = await mkdtemp(join(tmpdir(), "pi-cpa-extension-refresh-home-"));
+  const scratchHome = process.env.HOME!;
+  const home = await mkdtemp(join(scratchHome, "pi-cpa-extension-refresh-home-"));
   const originalFetch = globalThis.fetch;
 
   try {
@@ -152,12 +157,14 @@ test("manual refresh uses the active model registry credential", async () => {
     });
   } finally {
     globalThis.fetch = originalFetch;
+    process.env.HOME = scratchHome;
     await rm(home, { recursive: true, force: true });
   }
 });
 
 test("extension registers placeholder provider when global config is invalid", async () => {
-  const home = await mkdtemp(join(tmpdir(), "pi-cpa-extension-home-"));
+  const scratchHome = process.env.HOME!;
+  const home = await mkdtemp(join(scratchHome, "pi-cpa-extension-home-"));
 
   try {
     process.env.HOME = home;
@@ -179,6 +186,7 @@ test("extension registers placeholder provider when global config is invalid", a
       assert.equal(providers[0].config.models[0].compat.supportsStrictMode, false);
     });
   } finally {
+    process.env.HOME = scratchHome;
     await rm(home, { recursive: true, force: true });
   }
 });

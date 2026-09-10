@@ -1,4 +1,5 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
+import { VERSION as PI_VERSION } from "@earendil-works/pi-coding-agent";
 // Type-only, so it is erased: the runtime import below is the deliberate one.
 import type { BuiltinProvider } from "@earendil-works/pi-ai/providers/all";
 import type { ModelsDevCatalog, ModelsDevMetadata } from "./types.ts";
@@ -105,7 +106,10 @@ export async function builtinSeedCatalog(source?: BuiltinCatalogSource): Promise
     // CLIProxyAPI reports Codex models with `owned_by: openai`, which matches
     // metadata keyed `openai/<id>` only. Codex ids that OpenAI also publishes
     // directly keep the `openai/` entry they already have; the rest are
-    // registered as if OpenAI published them, so they match too.
+    // registered as if OpenAI published them, so they match too. The alias
+    // shares its name with the `openai-codex/` entry, so a CPA row without a
+    // canonical `owned_by` sees two suffix candidates for that id and falls
+    // through to the provider fallback rather than guessing between them.
     if (available.has("openai-codex")) {
       for (const model of catalogSource.getBuiltinModels("openai-codex")) {
         const openaiKey = `openai/${model.id}`;
@@ -117,7 +121,7 @@ export async function builtinSeedCatalog(source?: BuiltinCatalogSource): Promise
     return { catalog, generatedAt: catalogSource.getBuiltinModelDataGeneratedAt() };
   } catch (error) {
     console.warn(
-      `[pi-cliproxyapi-provider] pi's built-in model catalog (@earendil-works/pi-ai/providers/all) is unavailable, starting with no metadata seed: ${error instanceof Error ? error.message : String(error)}`,
+      `[pi-cliproxyapi-provider] pi ${PI_VERSION}'s built-in model catalog (@earendil-works/pi-ai/providers/all) is unavailable, starting with no metadata seed: ${error instanceof Error ? error.message : String(error)}`,
     );
     return { catalog: {}, generatedAt: undefined };
   }

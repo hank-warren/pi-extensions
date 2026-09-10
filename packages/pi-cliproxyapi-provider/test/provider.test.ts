@@ -467,6 +467,14 @@ const publishedMapCatalog: ModelsDevCatalog = {
     thinkingLevelMap: { off: null, max: null },
     reasoning_options: [{ type: "effort", values: ["low"] }],
   },
+  // The GPT-6 rule maps `minimal` down to low; a published map claiming
+  // otherwise must not override it.
+  "openai/gpt-6-astra": {
+    id: "openai/gpt-6-astra",
+    name: "GPT-6 Astra",
+    reasoning: true,
+    thinkingLevelMap: { off: "none", minimal: "minimal", low: "low" },
+  },
 };
 
 test("publishes a thinking map carried by metadata verbatim", () => {
@@ -490,11 +498,23 @@ test("a published thinking map beats the models.dev effort list", () => {
 });
 
 test("family capability rules win over a published thinking map", () => {
-  const result = buildProviderModels([{ id: "gpt-5.6-luna", owned_by: "openai" }], publishedMapCatalog, {});
+  const result = buildProviderModels([
+    { id: "gpt-5.6-luna", owned_by: "openai" },
+    { id: "gpt-6-astra", owned_by: "openai" },
+  ], publishedMapCatalog, {});
 
   assert.deepEqual(result.models[0].thinkingLevelMap, {
     off: "none",
     minimal: "minimal",
+    low: "low",
+    medium: "medium",
+    high: "high",
+    xhigh: "xhigh",
+    max: "max",
+  });
+  assert.deepEqual(result.models[1].thinkingLevelMap, {
+    off: null,
+    minimal: "low",
     low: "low",
     medium: "medium",
     high: "high",

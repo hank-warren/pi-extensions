@@ -64,8 +64,11 @@ test("every seeded entry carries its source provider, as matching requires", asy
 test("seeds pi's finished thinking map and pricing tiers verbatim", async () => {
   const { catalog } = await builtinSeedCatalog();
 
+  const pinned = getBuiltinModels("anthropic").find((model) => model.id === "claude-fable-5");
+  assert.ok(pinned, "pi-ai's catalog should still ship claude-fable-5");
   const fable = catalog["anthropic/claude-fable-5"];
-  assert.equal(fable.cost?.input, 10);
+  assert.equal(fable.cost?.input, pinned.cost.input);
+  assert.deepEqual(fable.thinkingLevelMap, pinned.thinkingLevelMap);
   assert.equal(fable.thinkingLevelMap?.xhigh, "xhigh");
 
   // models.dev's tier shape, rebuilt from pi's `inputTokensAbove` tiers.

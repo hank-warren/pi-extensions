@@ -48,7 +48,7 @@ export function metadataStatusLine(
   snapshot: Pick<CatalogSnapshot, "metadataSource" | "metadataUpdatedAt">,
   metadataStale = false,
 ): string {
-  const detail = snapshot.metadataUpdatedAt === undefined
+  const detail = !snapshot.metadataUpdatedAt
     ? ""
     : snapshot.metadataSource === "builtin"
       ? ` (pi catalog generated ${age(snapshot.metadataUpdatedAt)})`

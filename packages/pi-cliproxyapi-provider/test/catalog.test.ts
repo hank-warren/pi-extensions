@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { ProviderCatalog } from "../src/catalog.ts";
 import { cpaModelsCachePath, modelsDevCachePath } from "../src/discovery.ts";
 import { writeCache } from "../src/cache.ts";
@@ -20,12 +20,16 @@ const config: CpaProviderConfig = {
   modelOverrides: {},
 };
 
+// Each test gets its own cache tree under the hermetic preload's scratch HOME,
+// and HOME is put back so the next test never inherits a deleted directory.
 async function withTempHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
-  const home = await mkdtemp(join(tmpdir(), "pi-cpa-catalog-"));
+  const scratchHome = process.env.HOME!;
+  const home = await mkdtemp(join(scratchHome, "pi-cpa-catalog-"));
   process.env.HOME = home;
   try {
     return await fn(home);
   } finally {
+    process.env.HOME = scratchHome;
     await rm(home, { recursive: true, force: true });
   }
 }
@@ -74,11 +78,16 @@ test("seeds provider-qualified metadata from pi's built-in catalog on a first ru
     const snapshot = await catalog().load();
 
     assert.equal(snapshot.metadataSource, "builtin");
+    // Expectations come from the installed pi-ai so a catalog refresh in a
+    // newer pi cannot fail this test on a price change.
+    const pinned = getBuiltinModels("anthropic").find((model) => model.id === "claude-fable-5");
+    assert.ok(pinned, "pi-ai's catalog should still ship claude-fable-5");
     const seeded = snapshot.metadata["anthropic/claude-fable-5"];
     assert.equal(seeded.sourceProvider, "anthropic");
-    assert.equal(seeded.cost?.input, 10);
+    assert.equal(seeded.cost?.input, pinned.cost.input);
+    assert.deepEqual(seeded.thinkingLevelMap, pinned.thinkingLevelMap);
     assert.equal(seeded.thinkingLevelMap?.xhigh, "xhigh");
-    assert.equal(snapshot.built.models[0].name, "Claude Fable 5");
+    assert.equal(snapshot.built.models[0].name, pinned.name);
     assert.equal(snapshot.built.models[0].thinkingLevelMap?.xhigh, "xhigh");
     assert.equal(snapshot.built.stats.matchMethods["owner-prefix"], 1);
   });
