@@ -7,6 +7,32 @@ function isMetadata(value: unknown): value is ModelsDevMetadata {
   return !!value && typeof value === "object" && typeof (value as { id?: unknown }).id === "string";
 }
 
+/**
+ * The models.dev fields this package reads. Everything else the API returns
+ * (descriptions, release dates, tool-call flags, ...) is dropped at parse time:
+ * it is never consulted, and it was two thirds of a ~7.5 MB cache that every
+ * startup read and parsed.
+ */
+const METADATA_FIELDS = [
+  "id",
+  "sourceProvider",
+  "name",
+  "reasoning",
+  "reasoning_options",
+  "thinkingLevelMap",
+  "modalities",
+  "limit",
+  "cost",
+] as const satisfies ReadonlyArray<keyof ModelsDevMetadata>;
+
+function pruneMetadata(metadata: ModelsDevMetadata): ModelsDevMetadata {
+  const pruned: Partial<ModelsDevMetadata> = {};
+  for (const field of METADATA_FIELDS) {
+    if (metadata[field] !== undefined) (pruned as Record<string, unknown>)[field] = metadata[field];
+  }
+  return pruned as ModelsDevMetadata;
+}
+
 export function parseModelsDevCatalog(payload: unknown): ModelsDevCatalog {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new Error("models.dev catalog must be a JSON object");
@@ -22,13 +48,13 @@ export function parseModelsDevCatalog(payload: unknown): ModelsDevCatalog {
         if (!isMetadata(metadata)) continue;
         const canonicalId = metadata.id.includes("/") ? metadata.id : `${key}/${modelId}`;
         const catalogKey = canonicalId.startsWith(`${key}/`) ? canonicalId : `${key}/${canonicalId}`;
-        catalog[catalogKey] = { ...metadata, id: canonicalId, sourceProvider: key };
+        catalog[catalogKey] = pruneMetadata({ ...metadata, id: canonicalId, sourceProvider: key });
       }
       continue;
     }
 
     if (isMetadata(value)) {
-      catalog[key] = value;
+      catalog[key] = pruneMetadata(value);
     }
   }
 

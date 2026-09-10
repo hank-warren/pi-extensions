@@ -38,7 +38,11 @@ export class ProviderRuntime {
 
   async refreshModels(context: RefreshModelsContext): Promise<ProviderModelConfig[]> {
     if (!context.allowNetwork) {
-      const snapshot = await this.options.catalog.load();
+      // Pi issues several offline refreshes during startup (one per provider
+      // registration, one after services are created). The snapshot built at
+      // start() is already current; re-reading a ~7 MB models.dev cache from
+      // disk for each one is pure startup cost.
+      const snapshot = this.options.catalog.current() ?? await this.options.catalog.load();
       return normalizeProviderModels(
         snapshot.built.models.length > 0 ? snapshot.built.models : buildUnavailableProviderModels(),
         this.options.config.baseUrl,

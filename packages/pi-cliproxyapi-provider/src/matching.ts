@@ -49,6 +49,44 @@ function containsContiguousTokens(container: string[], sequence: string[]): bool
   );
 }
 
+/**
+ * Candidate lookups for one catalog, keyed by the three properties
+ * `findMetadataMatch` filters on. Built once per catalog object and cached
+ * on it: a live models.dev snapshot holds ~7 500 entries, and scanning them
+ * three times per CPA model (with a regex normalisation each) cost ~750 ms
+ * per `buildProviderModels` — paid at every startup and every `/model` open.
+ * Insertion order is preserved so candidate lists match the scan they replace.
+ */
+interface CatalogIndex {
+  byMetadataId: Map<string, string[]>;
+  bySuffix: Map<string, string[]>;
+  byNormalizedSuffix: Map<string, string[]>;
+}
+
+const catalogIndexes = new WeakMap<ModelsDevCatalog, CatalogIndex>();
+
+function push(map: Map<string, string[]>, key: string, value: string): void {
+  const list = map.get(key);
+  if (list) list.push(value);
+  else map.set(key, [value]);
+}
+
+function catalogIndex(catalog: ModelsDevCatalog): CatalogIndex {
+  const cached = catalogIndexes.get(catalog);
+  if (cached) return cached;
+  const index: CatalogIndex = { byMetadataId: new Map(), bySuffix: new Map(), byNormalizedSuffix: new Map() };
+  for (const key of Object.keys(catalog)) {
+    const metadata = catalog[key];
+    if (!metadata) continue;
+    push(index.byMetadataId, metadata.id, key);
+    const name = metadataModelName(key, metadata);
+    push(index.bySuffix, name, key);
+    push(index.byNormalizedSuffix, normalizeModelName(name), key);
+  }
+  catalogIndexes.set(catalog, index);
+  return index;
+}
+
 function sourceProvider(metadataId: string, metadata: ModelsDevMetadata): string {
   // sourceProvider is retained by current catalog snapshots. The prefix fallback
   // keeps older bundled/cache snapshots useful until they are refreshed.
@@ -97,20 +135,14 @@ export function findMetadataMatch(
     return { metadataId: cpaModel.id, metadata: catalog[cpaModel.id], method: "exact" };
   }
 
-  const catalogKeys = Object.keys(catalog);
-  const exactMetadataCandidates = catalogKeys.filter((key) => catalog[key]?.id === cpaModel.id);
-  const exactMetadataKey = oneMatch(exactMetadataCandidates);
+  const index = catalogIndex(catalog);
+  const exactMetadataKey = oneMatch(index.byMetadataId.get(cpaModel.id) ?? []);
   if (exactMetadataKey) {
     return { metadataId: exactMetadataKey, metadata: catalog[exactMetadataKey], method: "exact" };
   }
 
-  const suffixCandidates = catalogKeys.filter((key) =>
-    metadataModelName(key, catalog[key]) === cpaModel.id
-  );
-  const normalizedId = normalizeModelName(cpaModel.id);
-  const normalizedSuffixCandidates = catalogKeys.filter(
-    (key) => normalizeModelName(metadataModelName(key, catalog[key])) === normalizedId,
-  );
+  const suffixCandidates = index.bySuffix.get(cpaModel.id) ?? [];
+  const normalizedSuffixCandidates = index.byNormalizedSuffix.get(normalizeModelName(cpaModel.id)) ?? [];
   const owner = cpaModel.owned_by?.trim().toLowerCase();
   const canonicalOwner = owner ? CANONICAL_OWNER_PREFIXES[owner] : undefined;
   if (canonicalOwner) {
