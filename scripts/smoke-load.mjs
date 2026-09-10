@@ -93,6 +93,30 @@ const EXPECTED_SURFACES = {
 	"./packages/pi-stash/index.ts": {
 		shortcuts: ["alt+s"],
 	},
+	// Flags and event handlers only: no tool and no command, because the bridge
+	// client is a read projection the model never invokes. Every flag is
+	// required before it does anything at all, so a smoke run with none of them
+	// set registers exactly this surface and opens no socket.
+	"./packages/pi-muxr/index.ts": {
+		flags: [
+			"muxr-binding-file",
+			"muxr-bridge-socket",
+			"muxr-capability-file",
+			"muxr-experimental-chat-write",
+			"muxr-registration-id",
+		],
+		handlers: [
+			"agent_settled",
+			"message_end",
+			"message_start",
+			"message_update",
+			"session_shutdown",
+			"session_start",
+			"tool_execution_end",
+			"tool_execution_start",
+			"turn_end",
+		],
+	},
 };
 
 const CATEGORIES = ["tools", "commands", "handlers", "flags", "shortcuts"];

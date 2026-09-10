@@ -1,0 +1,1107 @@
+{
+  "host": {
+    "CURSORS": [
+      "eventSequence",
+      "bindingRevision",
+      "expectedLeaf",
+      "activeRunId",
+      "terminalControlGeneration"
+    ],
+    "LAUNCH_RECORD_HERDR_SHAPE": {
+      "paneId": {
+        "type": "string"
+      },
+      "serverId": {
+        "type": "string"
+      },
+      "sessionId": {
+        "type": "string"
+      },
+      "terminalId": {
+        "type": "string"
+      }
+    },
+    "LAUNCH_RECORD_SHAPE": {
+      "capabilityDigest": {
+        "type": "string"
+      },
+      "herdr": {
+        "shape": {
+          "paneId": {
+            "type": "string"
+          },
+          "serverId": {
+            "type": "string"
+          },
+          "sessionId": {
+            "type": "string"
+          },
+          "terminalId": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "pid": {
+        "min": 1,
+        "type": "integer"
+      },
+      "procStartTime": {
+        "min": 0,
+        "type": "integer"
+      },
+      "registrationId": {
+        "type": "string"
+      },
+      "tty": {
+        "type": "string"
+      }
+    },
+    "TERMINAL_LEASE_OWNERS": [
+      "none",
+      "observer",
+      "controller"
+    ],
+    "TERMINAL_LEASE_PAYLOAD_SHAPE": {
+      "expiresAt": {
+        "min": 0,
+        "type": "integer"
+      },
+      "generation": {
+        "min": 0,
+        "type": "integer"
+      },
+      "owner": {
+        "type": "string",
+        "values": [
+          "none",
+          "observer",
+          "controller"
+        ]
+      }
+    }
+  },
+  "wire": {
+    "BINDING_SHAPE": {
+      "herdrPaneRevision": {
+        "min": 0,
+        "type": "integer"
+      },
+      "herdrServerInstance": {
+        "type": "string"
+      },
+      "hostId": {
+        "type": "string"
+      },
+      "namedSession": {
+        "type": "string"
+      },
+      "paneId": {
+        "type": "string"
+      },
+      "piLeafId": {
+        "type": "string"
+      },
+      "piRuntimeGeneration": {
+        "min": 0,
+        "type": "integer"
+      },
+      "piSessionId": {
+        "type": "string"
+      },
+      "tabId": {
+        "type": "string"
+      },
+      "terminalId": {
+        "type": "string"
+      },
+      "workspaceId": {
+        "type": "string"
+      }
+    },
+    "CAPABILITIES": [
+      "history",
+      "streaming"
+    ],
+    "CHALLENGE_SHAPE": {
+      "bridgeEpoch": {
+        "min": 0,
+        "type": "integer"
+      },
+      "kind": {
+        "type": "string",
+        "values": [
+          "challenge"
+        ]
+      },
+      "mac": {
+        "type": "string"
+      },
+      "nonce": {
+        "type": "string"
+      },
+      "protocol": {
+        "min": 1,
+        "type": "integer"
+      },
+      "registrationId": {
+        "type": "string"
+      }
+    },
+    "CHAT_WRITE_RESULT_PAYLOAD_SHAPE": {
+      "entryId": {
+        "optional": true,
+        "type": "string"
+      },
+      "reason": {
+        "optional": true,
+        "type": "string"
+      },
+      "requestId": {
+        "type": "string"
+      },
+      "state": {
+        "type": "string",
+        "values": [
+          "accepted",
+          "rejected",
+          "unknown"
+        ]
+      }
+    },
+    "CHAT_WRITE_SHAPE": {
+      "bridgeEpoch": {
+        "min": 0,
+        "type": "integer"
+      },
+      "expectedLeafId": {
+        "type": "string"
+      },
+      "expectedRuntimeGeneration": {
+        "min": 0,
+        "type": "integer"
+      },
+      "kind": {
+        "type": "string",
+        "values": [
+          "chat_write"
+        ]
+      },
+      "protocol": {
+        "min": 1,
+        "type": "integer"
+      },
+      "registrationId": {
+        "type": "string"
+      },
+      "requestId": {
+        "type": "string"
+      },
+      "text": {
+        "type": "string"
+      }
+    },
+    "CHAT_WRITE_STATES": [
+      "accepted",
+      "rejected",
+      "unknown"
+    ],
+    "CONVERSATION_ENTRY_SHAPE": {
+      "entryId": {
+        "type": "string"
+      },
+      "provisional": {
+        "type": "boolean"
+      },
+      "role": {
+        "type": "string",
+        "values": [
+          "user",
+          "assistant",
+          "toolResult",
+          "compaction",
+          "branch_summary"
+        ]
+      },
+      "text": {
+        "type": "string"
+      },
+      "toolCallId": {
+        "optional": true,
+        "type": "string"
+      }
+    },
+    "CONVERSATION_ROLES": [
+      "user",
+      "assistant",
+      "toolResult",
+      "compaction",
+      "branch_summary"
+    ],
+    "DISABLED": {
+      "abortExactTarget": true,
+      "chatWrite": true,
+      "promptIdle": true
+    },
+    "DISABLED_SHAPE": {
+      "abortExactTarget": {
+        "type": "boolean"
+      },
+      "chatWrite": {
+        "type": "boolean"
+      },
+      "promptIdle": {
+        "type": "boolean"
+      }
+    },
+    "ENVELOPE_SHAPES": {
+      "challenge": {
+        "bridgeEpoch": {
+          "min": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "type": "string",
+          "values": [
+            "challenge"
+          ]
+        },
+        "mac": {
+          "type": "string"
+        },
+        "nonce": {
+          "type": "string"
+        },
+        "protocol": {
+          "min": 1,
+          "type": "integer"
+        },
+        "registrationId": {
+          "type": "string"
+        }
+      },
+      "chat_write": {
+        "bridgeEpoch": {
+          "min": 0,
+          "type": "integer"
+        },
+        "expectedLeafId": {
+          "type": "string"
+        },
+        "expectedRuntimeGeneration": {
+          "min": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "type": "string",
+          "values": [
+            "chat_write"
+          ]
+        },
+        "protocol": {
+          "min": 1,
+          "type": "integer"
+        },
+        "registrationId": {
+          "type": "string"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "error": {
+        "bridgeEpoch": {
+          "min": 0,
+          "optional": true,
+          "type": "integer"
+        },
+        "code": {
+          "type": "string",
+          "values": [
+            "protocol_mismatch",
+            "auth_failed",
+            "capability_expired",
+            "capability_consumed",
+            "binding_refused",
+            "epoch_mismatch",
+            "sequence_gap",
+            "frame_too_large",
+            "buffer_overflow",
+            "capability_disabled",
+            "internal"
+          ]
+        },
+        "fatal": {
+          "type": "boolean"
+        },
+        "kind": {
+          "type": "string",
+          "values": [
+            "error"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "protocol": {
+          "min": 1,
+          "type": "integer"
+        },
+        "registrationId": {
+          "optional": true,
+          "type": "string"
+        }
+      },
+      "event": {
+        "bindingRevision": {
+          "min": 0,
+          "type": "integer"
+        },
+        "bridgeEpoch": {
+          "min": 0,
+          "type": "integer"
+        },
+        "eventSequence": {
+          "min": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "type": "string",
+          "values": [
+            "event"
+          ]
+        },
+        "payload": {
+          "type": "object"
+        },
+        "protocol": {
+          "min": 1,
+          "type": "integer"
+        },
+        "registrationId": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "values": [
+            "session_start",
+            "session_shutdown",
+            "agent_start",
+            "agent_end",
+            "agent_settled",
+            "turn_start",
+            "turn_end",
+            "message_start",
+            "message_update",
+            "message_end",
+            "tool_execution_start",
+            "tool_execution_end",
+            "terminal_frame",
+            "terminal_lease",
+            "pane_lifecycle",
+            "message_reconciled",
+            "chat_write_result"
+          ]
+        }
+      },
+      "hello": {
+        "kind": {
+          "type": "string",
+          "values": [
+            "hello"
+          ]
+        },
+        "nonce": {
+          "type": "string"
+        },
+        "piVersion": {
+          "type": "string"
+        },
+        "protocol": {
+          "min": 1,
+          "type": "integer"
+        },
+        "registrationId": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string",
+          "values": [
+            "bridge",
+            "extension"
+          ]
+        }
+      },
+      "registered": {
+        "bindingRevision": {
+          "min": 0,
+          "type": "integer"
+        },
+        "bridgeEpoch": {
+          "min": 0,
+          "type": "integer"
+        },
+        "capabilities": {
+          "items": {
+            "type": "string",
+            "values": [
+              "history",
+              "streaming"
+            ]
+          },
+          "type": "array"
+        },
+        "disabled": {
+          "shape": {
+            "abortExactTarget": {
+              "type": "boolean"
+            },
+            "chatWrite": {
+              "type": "boolean"
+            },
+            "promptIdle": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "eventSequence": {
+          "min": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "type": "string",
+          "values": [
+            "registered"
+          ]
+        },
+        "protocol": {
+          "min": 1,
+          "type": "integer"
+        },
+        "registrationId": {
+          "type": "string"
+        },
+        "requestedCapabilities": {
+          "items": {
+            "type": "string",
+            "values": [
+              "chatWrite"
+            ]
+          },
+          "optional": true,
+          "type": "array"
+        }
+      },
+      "response": {
+        "bridgeEpoch": {
+          "min": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "type": "string",
+          "values": [
+            "response"
+          ]
+        },
+        "mac": {
+          "type": "string"
+        },
+        "protocol": {
+          "min": 1,
+          "type": "integer"
+        },
+        "registrationId": {
+          "type": "string"
+        }
+      },
+      "snapshot": {
+        "binding": {
+          "shape": {
+            "herdrPaneRevision": {
+              "min": 0,
+              "type": "integer"
+            },
+            "herdrServerInstance": {
+              "type": "string"
+            },
+            "hostId": {
+              "type": "string"
+            },
+            "namedSession": {
+              "type": "string"
+            },
+            "paneId": {
+              "type": "string"
+            },
+            "piLeafId": {
+              "type": "string"
+            },
+            "piRuntimeGeneration": {
+              "min": 0,
+              "type": "integer"
+            },
+            "piSessionId": {
+              "type": "string"
+            },
+            "tabId": {
+              "type": "string"
+            },
+            "terminalId": {
+              "type": "string"
+            },
+            "workspaceId": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "bindingRevision": {
+          "min": 0,
+          "type": "integer"
+        },
+        "bridgeEpoch": {
+          "min": 0,
+          "type": "integer"
+        },
+        "capabilities": {
+          "items": {
+            "type": "string",
+            "values": [
+              "history",
+              "streaming"
+            ]
+          },
+          "type": "array"
+        },
+        "disabled": {
+          "shape": {
+            "abortExactTarget": {
+              "type": "boolean"
+            },
+            "chatWrite": {
+              "type": "boolean"
+            },
+            "promptIdle": {
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "entries": {
+          "items": {
+            "shape": {
+              "entryId": {
+                "type": "string"
+              },
+              "provisional": {
+                "type": "boolean"
+              },
+              "role": {
+                "type": "string",
+                "values": [
+                  "user",
+                  "assistant",
+                  "toolResult",
+                  "compaction",
+                  "branch_summary"
+                ]
+              },
+              "text": {
+                "type": "string"
+              },
+              "toolCallId": {
+                "optional": true,
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "eventSequence": {
+          "min": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "type": "string",
+          "values": [
+            "snapshot"
+          ]
+        },
+        "lifecycle": {
+          "type": "string",
+          "values": [
+            "live",
+            "settled",
+            "ended",
+            "invalidated"
+          ]
+        },
+        "protocol": {
+          "min": 1,
+          "type": "integer"
+        },
+        "registrationId": {
+          "type": "string"
+        },
+        "terminalControlGeneration": {
+          "min": 0,
+          "type": "integer"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ERROR_CODES": [
+      "protocol_mismatch",
+      "auth_failed",
+      "capability_expired",
+      "capability_consumed",
+      "binding_refused",
+      "epoch_mismatch",
+      "sequence_gap",
+      "frame_too_large",
+      "buffer_overflow",
+      "capability_disabled",
+      "internal"
+    ],
+    "ERROR_SHAPE": {
+      "bridgeEpoch": {
+        "min": 0,
+        "optional": true,
+        "type": "integer"
+      },
+      "code": {
+        "type": "string",
+        "values": [
+          "protocol_mismatch",
+          "auth_failed",
+          "capability_expired",
+          "capability_consumed",
+          "binding_refused",
+          "epoch_mismatch",
+          "sequence_gap",
+          "frame_too_large",
+          "buffer_overflow",
+          "capability_disabled",
+          "internal"
+        ]
+      },
+      "fatal": {
+        "type": "boolean"
+      },
+      "kind": {
+        "type": "string",
+        "values": [
+          "error"
+        ]
+      },
+      "message": {
+        "type": "string"
+      },
+      "protocol": {
+        "min": 1,
+        "type": "integer"
+      },
+      "registrationId": {
+        "optional": true,
+        "type": "string"
+      }
+    },
+    "EVENT_SHAPE": {
+      "bindingRevision": {
+        "min": 0,
+        "type": "integer"
+      },
+      "bridgeEpoch": {
+        "min": 0,
+        "type": "integer"
+      },
+      "eventSequence": {
+        "min": 0,
+        "type": "integer"
+      },
+      "kind": {
+        "type": "string",
+        "values": [
+          "event"
+        ]
+      },
+      "payload": {
+        "type": "object"
+      },
+      "protocol": {
+        "min": 1,
+        "type": "integer"
+      },
+      "registrationId": {
+        "type": "string"
+      },
+      "type": {
+        "type": "string",
+        "values": [
+          "session_start",
+          "session_shutdown",
+          "agent_start",
+          "agent_end",
+          "agent_settled",
+          "turn_start",
+          "turn_end",
+          "message_start",
+          "message_update",
+          "message_end",
+          "tool_execution_start",
+          "tool_execution_end",
+          "terminal_frame",
+          "terminal_lease",
+          "pane_lifecycle",
+          "message_reconciled",
+          "chat_write_result"
+        ]
+      }
+    },
+    "EVENT_TYPES": [
+      "session_start",
+      "session_shutdown",
+      "agent_start",
+      "agent_end",
+      "agent_settled",
+      "turn_start",
+      "turn_end",
+      "message_start",
+      "message_update",
+      "message_end",
+      "tool_execution_start",
+      "tool_execution_end",
+      "terminal_frame",
+      "terminal_lease",
+      "pane_lifecycle",
+      "message_reconciled",
+      "chat_write_result"
+    ],
+    "HELLO_SHAPE": {
+      "kind": {
+        "type": "string",
+        "values": [
+          "hello"
+        ]
+      },
+      "nonce": {
+        "type": "string"
+      },
+      "piVersion": {
+        "type": "string"
+      },
+      "protocol": {
+        "min": 1,
+        "type": "integer"
+      },
+      "registrationId": {
+        "type": "string"
+      },
+      "role": {
+        "type": "string",
+        "values": [
+          "bridge",
+          "extension"
+        ]
+      }
+    },
+    "HERDR_EVENT_TYPES": [
+      "terminal_frame",
+      "terminal_lease",
+      "pane_lifecycle"
+    ],
+    "LIFECYCLE_STATES": [
+      "live",
+      "settled",
+      "ended",
+      "invalidated"
+    ],
+    "LIMITS": {
+      "capabilityTtlMs": 60000,
+      "events": 2048,
+      "frameBytes": 1048576,
+      "totalBytes": 4194304
+    },
+    "MESSAGE_KINDS": [
+      "hello",
+      "challenge",
+      "response",
+      "registered",
+      "snapshot",
+      "event",
+      "error",
+      "chat_write"
+    ],
+    "MESSAGE_RECONCILED_PAYLOAD_SHAPE": {
+      "reconciled": {
+        "items": {
+          "shape": {
+            "entryId": {
+              "type": "string"
+            },
+            "provisionalId": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "type": "array"
+      }
+    },
+    "MUXR_EVENT_TYPES": [
+      "message_reconciled",
+      "chat_write_result"
+    ],
+    "PI_EVENT_TYPES": [
+      "session_start",
+      "session_shutdown",
+      "agent_start",
+      "agent_end",
+      "agent_settled",
+      "turn_start",
+      "turn_end",
+      "message_start",
+      "message_update",
+      "message_end",
+      "tool_execution_start",
+      "tool_execution_end"
+    ],
+    "PROTOCOL": {
+      "bridge": 1,
+      "herdrProtocol": 22,
+      "piVersion": "0.85.1"
+    },
+    "REGISTERED_SHAPE": {
+      "bindingRevision": {
+        "min": 0,
+        "type": "integer"
+      },
+      "bridgeEpoch": {
+        "min": 0,
+        "type": "integer"
+      },
+      "capabilities": {
+        "items": {
+          "type": "string",
+          "values": [
+            "history",
+            "streaming"
+          ]
+        },
+        "type": "array"
+      },
+      "disabled": {
+        "shape": {
+          "abortExactTarget": {
+            "type": "boolean"
+          },
+          "chatWrite": {
+            "type": "boolean"
+          },
+          "promptIdle": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "eventSequence": {
+        "min": 0,
+        "type": "integer"
+      },
+      "kind": {
+        "type": "string",
+        "values": [
+          "registered"
+        ]
+      },
+      "protocol": {
+        "min": 1,
+        "type": "integer"
+      },
+      "registrationId": {
+        "type": "string"
+      },
+      "requestedCapabilities": {
+        "items": {
+          "type": "string",
+          "values": [
+            "chatWrite"
+          ]
+        },
+        "optional": true,
+        "type": "array"
+      }
+    },
+    "RESPONSE_SHAPE": {
+      "bridgeEpoch": {
+        "min": 0,
+        "type": "integer"
+      },
+      "kind": {
+        "type": "string",
+        "values": [
+          "response"
+        ]
+      },
+      "mac": {
+        "type": "string"
+      },
+      "protocol": {
+        "min": 1,
+        "type": "integer"
+      },
+      "registrationId": {
+        "type": "string"
+      }
+    },
+    "ROLES": [
+      "bridge",
+      "extension"
+    ],
+    "SNAPSHOT_SHAPE": {
+      "binding": {
+        "shape": {
+          "herdrPaneRevision": {
+            "min": 0,
+            "type": "integer"
+          },
+          "herdrServerInstance": {
+            "type": "string"
+          },
+          "hostId": {
+            "type": "string"
+          },
+          "namedSession": {
+            "type": "string"
+          },
+          "paneId": {
+            "type": "string"
+          },
+          "piLeafId": {
+            "type": "string"
+          },
+          "piRuntimeGeneration": {
+            "min": 0,
+            "type": "integer"
+          },
+          "piSessionId": {
+            "type": "string"
+          },
+          "tabId": {
+            "type": "string"
+          },
+          "terminalId": {
+            "type": "string"
+          },
+          "workspaceId": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "bindingRevision": {
+        "min": 0,
+        "type": "integer"
+      },
+      "bridgeEpoch": {
+        "min": 0,
+        "type": "integer"
+      },
+      "capabilities": {
+        "items": {
+          "type": "string",
+          "values": [
+            "history",
+            "streaming"
+          ]
+        },
+        "type": "array"
+      },
+      "disabled": {
+        "shape": {
+          "abortExactTarget": {
+            "type": "boolean"
+          },
+          "chatWrite": {
+            "type": "boolean"
+          },
+          "promptIdle": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "entries": {
+        "items": {
+          "shape": {
+            "entryId": {
+              "type": "string"
+            },
+            "provisional": {
+              "type": "boolean"
+            },
+            "role": {
+              "type": "string",
+              "values": [
+                "user",
+                "assistant",
+                "toolResult",
+                "compaction",
+                "branch_summary"
+              ]
+            },
+            "text": {
+              "type": "string"
+            },
+            "toolCallId": {
+              "optional": true,
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "type": "array"
+      },
+      "eventSequence": {
+        "min": 0,
+        "type": "integer"
+      },
+      "kind": {
+        "type": "string",
+        "values": [
+          "snapshot"
+        ]
+      },
+      "lifecycle": {
+        "type": "string",
+        "values": [
+          "live",
+          "settled",
+          "ended",
+          "invalidated"
+        ]
+      },
+      "protocol": {
+        "min": 1,
+        "type": "integer"
+      },
+      "registrationId": {
+        "type": "string"
+      },
+      "terminalControlGeneration": {
+        "min": 0,
+        "type": "integer"
+      },
+      "truncated": {
+        "type": "boolean"
+      }
+    }
+  }
+}

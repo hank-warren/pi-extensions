@@ -1,0 +1,42 @@
+{
+  "name": "@hank-warren/pi-muxr",
+  "version": "0.1.0",
+  "description": "muxr bridge client: projects a Pi session's active branch and live stream to the muxr mobile gateway over a capability-authenticated Unix socket.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "coding-agent",
+    "muxr"
+  ],
+  "author": "Hank Warren",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hank-warren/pi-extensions.git",
+    "directory": "packages/pi-muxr"
+  },
+  "bugs": {
+    "url": "https://github.com/hank-warren/pi-extensions/issues"
+  },
+  "homepage": "https://github.com/hank-warren/pi-extensions/tree/main/packages/pi-muxr#readme",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "src",
+    "README.md",
+    "UPSTREAM-PROPOSAL.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}

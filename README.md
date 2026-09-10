@@ -21,6 +21,7 @@ Each package under [`packages/`](packages/) is a self-contained Pi package publi
 | [`@hank-warren/pi-multi-login`](packages/pi-multi-login) | Additional OAuth logins for built-in providers under aliased provider ids, managed with `/multi-login` |
 | [`@hank-warren/pi-loop`](packages/pi-loop) | **Deprecated** in favour of [`pi-orchestrator`](packages/pi-orchestrator); not loaded by the git install of this repo. `/loop` long-running work: menu-first planning to an approval card with ground rules, settle-paced continuations, a durable on-disk ledger, loop-aware compaction with its own re-anchor, `loop_wait`, no-progress breakers, completion gated on cited evidence, and a loop-craft doc injected by path while drafting or completing |
 | [`@hank-warren/pi-stash`](packages/pi-stash) | Park an unsent prompt with `Ctrl+S`, run `/model` or anything else against an empty editor, then restore it with `Ctrl+S` — in-memory, paste-preserving, never submitted |
+| [`@hank-warren/pi-muxr`](packages/pi-muxr) | [muxr](https://github.com/hank-warren/muxr) bridge client: projects a session's active branch and live stream to the muxr mobile gateway over a capability-authenticated Unix socket. Read-only by default — no tool, no command, inert without its CLI flags; the experimental chat-write path is disabled behind three independent consent gates |
 
 ## Install
 
