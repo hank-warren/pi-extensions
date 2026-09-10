@@ -43,6 +43,12 @@ export interface ModelsDevMetadata {
    * `/v1/models` carries no such data.
    */
   reasoning_options?: ModelsDevReasoningOption[];
+  /**
+   * A finished thinking map, as pi's built-in catalog publishes one. models.dev
+   * never carries this field; when it is absent the map is derived from
+   * {@link ModelsDevMetadata.reasoning_options}.
+   */
+  thinkingLevelMap?: ThinkingLevelMap;
   modalities?: {
     input?: string[];
     output?: string[];

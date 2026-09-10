@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { buildProviderModels, PI_MODEL_DEFAULTS } from "../src/provider.ts";
 import type { CpaModel } from "../src/cpa.ts";
+import type { ModelsDevCatalog } from "../src/types.ts";
 
 const cpaModels: CpaModel[] = [
   { id: "gpt-5.5", object: "model", owned_by: "openai", created: 1776902400 },
@@ -440,6 +441,66 @@ test("family capability rules win over the models.dev effort list", () => {
   assert.equal(map?.off, "none");
   assert.equal(map?.xhigh, "xhigh");
   assert.equal(map?.max, "max");
+});
+
+const publishedMapCatalog: ModelsDevCatalog = {
+  // Shaped like a pi built-in catalog entry: a finished map, no effort list.
+  "anthropic/claude-fable-5": {
+    id: "anthropic/claude-fable-5",
+    name: "Claude Fable 5",
+    reasoning: true,
+    thinkingLevelMap: { off: null, xhigh: "xhigh", max: "max" },
+  },
+  // Both: the published map wins over what the effort list would derive.
+  "anthropic/claude-opus-4-6": {
+    id: "anthropic/claude-opus-4-6",
+    name: "Claude Opus 4.6",
+    reasoning: true,
+    thinkingLevelMap: { off: null, low: "low", medium: "medium", high: "high", max: "max" },
+    reasoning_options: [{ type: "effort", values: ["low", "medium", "high", "xhigh", "max"] }],
+  },
+  // A family rule covers this id, and stays above both.
+  "openai/gpt-5.6-luna": {
+    id: "openai/gpt-5.6-luna",
+    name: "GPT-5.6 Luna",
+    reasoning: true,
+    thinkingLevelMap: { off: null, max: null },
+    reasoning_options: [{ type: "effort", values: ["low"] }],
+  },
+};
+
+test("publishes a thinking map carried by metadata verbatim", () => {
+  const result = buildProviderModels([{ id: "claude-fable-5", owned_by: "anthropic" }], publishedMapCatalog, {});
+
+  assert.equal(result.stats.enriched, 1);
+  assert.deepEqual(result.models[0].thinkingLevelMap, { off: null, xhigh: "xhigh", max: "max" });
+});
+
+test("a published thinking map beats the models.dev effort list", () => {
+  const result = buildProviderModels([{ id: "claude-opus-4-6", owned_by: "anthropic" }], publishedMapCatalog, {});
+
+  // The effort list would have produced xhigh: "xhigh" and minimal: null.
+  assert.deepEqual(result.models[0].thinkingLevelMap, {
+    off: null,
+    low: "low",
+    medium: "medium",
+    high: "high",
+    max: "max",
+  });
+});
+
+test("family capability rules win over a published thinking map", () => {
+  const result = buildProviderModels([{ id: "gpt-5.6-luna", owned_by: "openai" }], publishedMapCatalog, {});
+
+  assert.deepEqual(result.models[0].thinkingLevelMap, {
+    off: "none",
+    minimal: "minimal",
+    low: "low",
+    medium: "medium",
+    high: "high",
+    xhigh: "xhigh",
+    max: "max",
+  });
 });
 
 test("keeps the derived thinking map under a user reasoning override, like family maps", () => {

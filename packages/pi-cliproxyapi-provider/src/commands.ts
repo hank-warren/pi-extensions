@@ -39,6 +39,24 @@ function age(timestamp?: number): string {
   return `${Math.round(seconds / 86_400)}d ago`;
 }
 
+/**
+ * The status line for the metadata snapshot. The built-in seed's timestamp is
+ * pi's catalog generation date rather than a fetch of our own, so it is labelled
+ * as such instead of reading like a stale download.
+ */
+export function metadataStatusLine(
+  snapshot: Pick<CatalogSnapshot, "metadataSource" | "metadataUpdatedAt">,
+  metadataStale = false,
+): string {
+  const detail = snapshot.metadataUpdatedAt === undefined
+    ? ""
+    : snapshot.metadataSource === "builtin"
+      ? ` (pi catalog generated ${age(snapshot.metadataUpdatedAt)})`
+      : `, ${age(snapshot.metadataUpdatedAt)}`;
+  const stale = metadataStale ? " (stale; refreshes on next model discovery)" : "";
+  return `models.dev metadata: ${snapshot.metadataSource}${detail}${stale}`;
+}
+
 function capabilityCount(snapshot: CatalogSnapshot, key: "reasoning" | "image"): number {
   return snapshot.built.models.filter((model) => key === "reasoning" ? model.reasoning : model.input.includes("image")).length;
 }
@@ -102,7 +120,7 @@ function statusText(config: ReturnType<typeof loadConfig>, snapshot: CatalogSnap
     `Reasoning models: ${capabilityCount(snapshot, "reasoning")}`,
     `Image-capable models: ${capabilityCount(snapshot, "image")}`,
     `CPA snapshot: ${age(snapshot.cpaUpdatedAt)}`,
-    `models.dev metadata: ${snapshot.metadataSource}${snapshot.metadataUpdatedAt ? `, ${age(snapshot.metadataUpdatedAt)}` : ""}${metadataStale ? " (stale; refreshes on next model discovery)" : ""}`,
+    metadataStatusLine(snapshot, metadataStale),
     `GPT-5.6 context window: ${snapshot.gpt56ContextWindow === "full" ? "full models.dev limit" : "canonical 272000"}`,
   ].join("\n");
 }

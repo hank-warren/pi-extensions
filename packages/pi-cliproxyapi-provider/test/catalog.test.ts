@@ -20,35 +20,32 @@ const config: CpaProviderConfig = {
   modelOverrides: {},
 };
 
-async function withTempHome<T>(fn: (home: string, fallback: string) => Promise<T>): Promise<T> {
+async function withTempHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
   const home = await mkdtemp(join(tmpdir(), "pi-cpa-catalog-"));
   process.env.HOME = home;
-  const fallback = join(home, "models-dev-fallback.json");
-  await writeFile(fallback, JSON.stringify({ openai: { models: { fresh: { id: "fresh", name: "Fresh", reasoning: true } } } }));
   try {
-    return await fn(home, fallback);
+    return await fn(home);
   } finally {
     await rm(home, { recursive: true, force: true });
   }
 }
 
-function catalog(fallback: string): ProviderCatalog {
+function catalog(): ProviderCatalog {
   return new ProviderCatalog({
     config,
     gpt56ContextWindow: "canonical",
-    bundledModelsDevPath: fallback,
     getApiKey: async () => undefined,
     backgroundTimeoutMs: 50,
   });
 }
 
 test("catalog load ignores malformed source snapshots", async () => {
-  await withTempHome(async (_home, fallback) => {
+  await withTempHome(async () => {
     const path = cpaModelsCachePath(config);
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, JSON.stringify({ fetchedAt: Date.now(), data: { id: "not-an-array" } }));
 
-    const snapshot = await catalog(fallback).load();
+    const snapshot = await catalog().load();
 
     assert.deepEqual(snapshot.cpaModels, []);
     assert.equal(snapshot.built.stats.total, 0);
@@ -56,12 +53,12 @@ test("catalog load ignores malformed source snapshots", async () => {
 });
 
 test("catalog load is cache-first and performs no network request", async () => {
-  await withTempHome(async (_home, fallback) => {
+  await withTempHome(async () => {
     await writeCache(cpaModelsCachePath(config), [{ id: "cached", owned_by: "openai" }], 1234);
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () => { throw new Error("network should not run"); }) as typeof fetch;
     try {
-      const snapshot = await catalog(fallback).load();
+      const snapshot = await catalog().load();
       assert.deepEqual(snapshot.cpaModels.map((model) => model.id), ["cached"]);
       assert.equal(snapshot.cpaUpdatedAt, 1234);
     } finally {
@@ -70,67 +67,45 @@ test("catalog load is cache-first and performs no network request", async () => 
   });
 });
 
-test("loads bundled provider-qualified metadata for first-run fallback matching", async () => {
-  await withTempHome(async (_home, fallback) => {
-    await writeFile(fallback, JSON.stringify({
-      openrouter: {
-        models: {
-          "minimax/minimax-m3": {
-            id: "minimax/minimax-m3",
-            name: "MiniMax-M3",
-            reasoning: true,
-          },
-        },
-      },
-      other: {
-        models: {
-          "minimax/minimax-m3": { id: "minimax/minimax-m3", reasoning: true },
-        },
-      },
-    }));
-    await writeCache(cpaModelsCachePath(config), [{ id: "minimax-m3", owned_by: "ken-team-litellm" }]);
+test("seeds provider-qualified metadata from pi's built-in catalog on a first run", async () => {
+  await withTempHome(async () => {
+    await writeCache(cpaModelsCachePath(config), [{ id: "claude-fable-5", owned_by: "anthropic" }]);
 
-    const snapshot = await catalog(fallback).load();
+    const snapshot = await catalog().load();
 
-    assert.equal(snapshot.metadataSource, "bundled");
-    assert.equal(snapshot.built.models[0].name, "MiniMax-M3");
-    assert.equal(snapshot.built.models[0].reasoning, true);
-    assert.equal(snapshot.built.stats.matchMethods["provider-fallback"], 1);
+    assert.equal(snapshot.metadataSource, "builtin");
+    const seeded = snapshot.metadata["anthropic/claude-fable-5"];
+    assert.equal(seeded.sourceProvider, "anthropic");
+    assert.equal(seeded.cost?.input, 10);
+    assert.equal(seeded.thinkingLevelMap?.xhigh, "xhigh");
+    assert.equal(snapshot.built.models[0].name, "Claude Fable 5");
+    assert.equal(snapshot.built.models[0].thinkingLevelMap?.xhigh, "xhigh");
+    assert.equal(snapshot.built.stats.matchMethods["owner-prefix"], 1);
   });
 });
 
-test("ignores legacy flat metadata caches and falls back to bundled metadata", async () => {
-  await withTempHome(async (_home, fallback) => {
-    await writeFile(fallback, JSON.stringify({
-      openrouter: {
-        models: {
-          "minimax/minimax-m3": { id: "minimax/minimax-m3", name: "Bundled MiniMax", reasoning: true },
-        },
-      },
-      other: {
-        models: {
-          "minimax/minimax-m3": { id: "minimax/minimax-m3", name: "Other MiniMax", reasoning: true },
-        },
-      },
-    }));
+test("ignores legacy flat metadata caches and falls back to the built-in seed", async () => {
+  await withTempHome(async () => {
     await writeCache(modelsDevCachePath(), {
-      "minimax/minimax-m3": { id: "minimax/minimax-m3", name: "Legacy MiniMax", reasoning: true },
+      "anthropic/claude-fable-5": { id: "anthropic/claude-fable-5", name: "Legacy Fable", reasoning: true },
     }, 1234);
-    await writeCache(cpaModelsCachePath(config), [{ id: "minimax-m3", owned_by: "ken-team-litellm" }]);
+    await writeCache(cpaModelsCachePath(config), [{ id: "claude-fable-5", owned_by: "anthropic" }]);
 
-    const snapshot = await catalog(fallback).load();
+    const snapshot = await catalog().load();
 
-    assert.equal(snapshot.metadataSource, "bundled");
-    assert.equal(snapshot.metadataUpdatedAt, undefined);
-    assert.equal(snapshot.built.models[0].name, "Bundled MiniMax");
-    assert.equal(snapshot.built.stats.matchMethods["provider-fallback"], 1);
+    assert.equal(snapshot.metadataSource, "builtin");
+    assert.notEqual(snapshot.metadataUpdatedAt, 1234);
+    assert.equal(snapshot.built.models[0].name, "Claude Fable 5");
   });
 });
 
 test("metadata comparison ignores object key order", async () => {
-  await withTempHome(async (_home, fallback) => {
-    const instance = catalog(fallback);
-    await instance.load();
+  await withTempHome(async () => {
+    await writeCache(modelsDevCachePath(), {
+      "openai/fresh": { id: "openai/fresh", sourceProvider: "openai", reasoning: true, name: "Fresh" },
+    }, 1234);
+    const instance = catalog();
+    assert.equal((await instance.load()).metadataSource, "cache");
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (url: string | URL | Request) => {
       assert.equal(String(url), "https://models.dev/api.json");
@@ -149,20 +124,21 @@ test("metadata comparison ignores object key order", async () => {
 });
 
 test("background refresh updates CPA models while retaining metadata", async () => {
-  await withTempHome(async (_home, fallback) => {
+  await withTempHome(async () => {
     await writeCache(cpaModelsCachePath(config), [{ id: "cached", owned_by: "openai" }]);
-    const instance = catalog(fallback);
+    const instance = catalog();
     await instance.load();
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (url: string | URL | Request) => {
       assert.equal(String(url), "http://cliproxyapi.test/v1/models");
-      return new Response(JSON.stringify({ data: [{ id: "fresh", owned_by: "openai" }] }), { status: 200 });
+      return new Response(JSON.stringify({ data: [{ id: "gpt-5.6-luna", owned_by: "openai" }] }), { status: 200 });
     }) as typeof fetch;
     try {
       const result = await instance.refresh("models", "background");
       assert.equal(result.models.updated, true);
       assert.equal(result.models.changed, true);
-      assert.deepEqual(result.snapshot.cpaModels.map((model) => model.id), ["fresh"]);
+      assert.deepEqual(result.snapshot.cpaModels.map((model) => model.id), ["gpt-5.6-luna"]);
+      // Metadata is still the built-in seed, which is what marks this model reasoning.
       assert.equal(result.snapshot.built.models[0].reasoning, true);
     } finally {
       globalThis.fetch = originalFetch;
@@ -171,12 +147,11 @@ test("background refresh updates CPA models while retaining metadata", async () 
 });
 
 test("snapshot write failure preserves the in-memory CPA snapshot", async () => {
-  await withTempHome(async (_home, fallback) => {
+  await withTempHome(async () => {
     await writeCache(cpaModelsCachePath(config), [{ id: "cached", owned_by: "openai" }]);
     const instance = new ProviderCatalog({
       config,
       gpt56ContextWindow: "canonical",
-      bundledModelsDevPath: fallback,
       getApiKey: async () => undefined,
       writeSnapshot: async () => { throw new Error("disk full"); },
     });
@@ -195,9 +170,9 @@ test("snapshot write failure preserves the in-memory CPA snapshot", async () => 
 });
 
 test("failed background refresh preserves the last-known-good CPA snapshot", async () => {
-  await withTempHome(async (_home, fallback) => {
+  await withTempHome(async () => {
     await writeCache(cpaModelsCachePath(config), [{ id: "cached", owned_by: "openai" }]);
-    const instance = catalog(fallback);
+    const instance = catalog();
     await instance.load();
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () => { throw new Error("offline"); }) as typeof fetch;
@@ -212,8 +187,8 @@ test("failed background refresh preserves the last-known-good CPA snapshot", asy
 });
 
 test("refresh deduplicates concurrent requests", async () => {
-  await withTempHome(async (_home, fallback) => {
-    const instance = catalog(fallback);
+  await withTempHome(async () => {
+    const instance = catalog();
     await instance.load();
     const originalFetch = globalThis.fetch;
     let fetches = 0;
@@ -236,8 +211,8 @@ test("refresh deduplicates concurrent requests", async () => {
 });
 
 test("deduplicated callers can abort without cancelling the shared refresh", async () => {
-  await withTempHome(async (_home, fallback) => {
-    const instance = catalog(fallback);
+  await withTempHome(async () => {
+    const instance = catalog();
     await instance.load();
     const originalFetch = globalThis.fetch;
     let fetches = 0;
@@ -266,8 +241,8 @@ test("deduplicated callers can abort without cancelling the shared refresh", asy
 });
 
 test("refresh propagates the initiating caller's cancellation reason", async () => {
-  await withTempHome(async (_home, fallback) => {
-    const instance = catalog(fallback);
+  await withTempHome(async () => {
+    const instance = catalog();
     await instance.load();
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
@@ -290,11 +265,10 @@ test("refresh propagates the initiating caller's cancellation reason", async () 
   });
 });
 
-function catalogWithClock(fallback: string, now: () => number, staleAfterMs = 1_000): ProviderCatalog {
+function catalogWithClock(now: () => number, staleAfterMs = 1_000): ProviderCatalog {
   return new ProviderCatalog({
     config,
     gpt56ContextWindow: "canonical",
-    bundledModelsDevPath: fallback,
     getApiKey: async () => undefined,
     backgroundTimeoutMs: 50,
     metadataStaleAfterMs: staleAfterMs,
@@ -302,22 +276,28 @@ function catalogWithClock(fallback: string, now: () => number, staleAfterMs = 1_
   });
 }
 
-const modelsDevPayload = { openai: { models: { fresh: { id: "fresh", name: "Fresh from models.dev", reasoning: true, limit: { context: 400000, output: 64000 } } } } };
+const modelsDevPayload = {
+  openai: {
+    models: {
+      "gpt-5.6-luna": { id: "gpt-5.6-luna", name: "Fresh from models.dev", reasoning: true, limit: { context: 400000, output: 64000 } },
+    },
+  },
+};
 
-test("metadata is stale when only the bundled seed is loaded", async () => {
-  await withTempHome(async (_home, fallback) => {
-    const instance = catalog(fallback);
+test("metadata is stale when only the built-in seed is loaded", async () => {
+  await withTempHome(async () => {
+    const instance = catalog();
     const snapshot = await instance.load();
-    assert.equal(snapshot.metadataSource, "bundled");
+    assert.equal(snapshot.metadataSource, "builtin");
     assert.equal(instance.metadataIsStale(snapshot), true);
   });
 });
 
 test("metadata is fresh inside the threshold and stale past it", async () => {
-  await withTempHome(async (_home, fallback) => {
+  await withTempHome(async () => {
     let now = 100_000;
     await writeCache(modelsDevCachePath(), { "openai/fresh": { id: "openai/fresh", sourceProvider: "openai" } }, now);
-    const instance = catalogWithClock(fallback, () => now, 1_000);
+    const instance = catalogWithClock(() => now, 1_000);
     const snapshot = await instance.load();
     assert.equal(snapshot.metadataSource, "cache");
 
@@ -329,11 +309,10 @@ test("metadata is fresh inside the threshold and stale past it", async () => {
 });
 
 test("metadata is never stale when models.dev is disabled", async () => {
-  await withTempHome(async (_home, fallback) => {
+  await withTempHome(async () => {
     const instance = new ProviderCatalog({
       config: { ...config, modelsDevEnabled: false },
       gpt56ContextWindow: "canonical",
-      bundledModelsDevPath: fallback,
       getApiKey: async () => undefined,
     });
     const snapshot = await instance.load();
@@ -343,11 +322,11 @@ test("metadata is never stale when models.dev is disabled", async () => {
 });
 
 test("models-if-stale skips models.dev when the metadata snapshot is fresh", async () => {
-  await withTempHome(async (_home, fallback) => {
+  await withTempHome(async () => {
     const now = 100_000;
     await writeCache(cpaModelsCachePath(config), [{ id: "cached", owned_by: "openai" }]);
     await writeCache(modelsDevCachePath(), { "openai/fresh": { id: "openai/fresh", sourceProvider: "openai" } }, now);
-    const instance = catalogWithClock(fallback, () => now);
+    const instance = catalogWithClock(() => now);
     await instance.load();
     const urls: string[] = [];
     const originalFetch = globalThis.fetch;
@@ -366,19 +345,19 @@ test("models-if-stale skips models.dev when the metadata snapshot is fresh", asy
   });
 });
 
-test("models-if-stale fetches models.dev when the snapshot is bundled or stale", async () => {
-  await withTempHome(async (_home, fallback) => {
-    await writeCache(cpaModelsCachePath(config), [{ id: "fresh", owned_by: "openai" }]);
-    const instance = catalog(fallback);
+test("models-if-stale fetches models.dev when the snapshot is the built-in seed or stale", async () => {
+  await withTempHome(async () => {
+    await writeCache(cpaModelsCachePath(config), [{ id: "gpt-5.6-luna", owned_by: "openai" }]);
+    const instance = catalog();
     const before = await instance.load();
-    assert.equal(before.metadataSource, "bundled");
-    assert.equal(before.built.models[0].name, "Fresh");
+    assert.equal(before.metadataSource, "builtin");
+    assert.equal(before.built.models[0].name, "GPT-5.6 Luna");
     const urls: string[] = [];
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (url: string | URL | Request) => {
       urls.push(String(url));
       if (String(url).includes("models.dev")) return new Response(JSON.stringify(modelsDevPayload), { status: 200 });
-      return new Response(JSON.stringify({ data: [{ id: "fresh", owned_by: "openai" }] }), { status: 200 });
+      return new Response(JSON.stringify({ data: [{ id: "gpt-5.6-luna", owned_by: "openai" }] }), { status: 200 });
     }) as typeof fetch;
     try {
       const result = await instance.refresh("models-if-stale", "background");
@@ -397,24 +376,24 @@ test("models-if-stale fetches models.dev when the snapshot is bundled or stale",
 });
 
 test("a failed stale-metadata fetch keeps the previous metadata and still publishes CPA models", async () => {
-  await withTempHome(async (_home, fallback) => {
+  await withTempHome(async () => {
     await writeCache(cpaModelsCachePath(config), [{ id: "cached", owned_by: "openai" }]);
-    const instance = catalog(fallback);
+    const instance = catalog();
     await instance.load();
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (url: string | URL | Request) => {
       if (String(url).includes("models.dev")) return new Response("upstream down", { status: 503 });
-      return new Response(JSON.stringify({ data: [{ id: "fresh", owned_by: "openai" }] }), { status: 200 });
+      return new Response(JSON.stringify({ data: [{ id: "gpt-5.6-luna", owned_by: "openai" }] }), { status: 200 });
     }) as typeof fetch;
     try {
       const result = await instance.refresh("models-if-stale", "background");
       assert.equal(result.models.updated, true);
-      assert.deepEqual(result.snapshot.cpaModels.map((model) => model.id), ["fresh"]);
+      assert.deepEqual(result.snapshot.cpaModels.map((model) => model.id), ["gpt-5.6-luna"]);
       assert.equal(result.metadata.attempted, true);
       assert.equal(result.metadata.updated, false);
       assert.ok(result.metadata.error);
-      assert.equal(result.snapshot.metadataSource, "bundled");
-      assert.equal(result.snapshot.built.models[0].name, "Fresh");
+      assert.equal(result.snapshot.metadataSource, "builtin");
+      assert.equal(result.snapshot.built.models[0].name, "GPT-5.6 Luna");
     } finally {
       globalThis.fetch = originalFetch;
     }

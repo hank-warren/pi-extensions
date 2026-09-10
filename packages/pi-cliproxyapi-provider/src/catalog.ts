@@ -1,12 +1,13 @@
 import { cpaModelsCachePath, discoveryHeaders, modelsDevCachePath } from "./discovery.ts";
 import { readCache, writeCache, type CacheEnvelope } from "./cache.ts";
 import { fetchCpaModels, parseCpaModelsCache, type CpaModel } from "./cpa.ts";
-import { fetchModelsDevCatalog, hasSourceProviderMetadata, parseModelsDevCatalog, readBundledModelsDevFallback } from "./models-dev.ts";
+import { builtinSeedCatalog } from "./builtin-seed.ts";
+import { fetchModelsDevCatalog, hasSourceProviderMetadata, parseModelsDevCatalog } from "./models-dev.ts";
 import { buildProviderModels, type BuildProviderModelsResult } from "./provider.ts";
 import type { Gpt56ContextWindowMode } from "./settings.ts";
 import type { CpaProviderConfig, ModelsDevCatalog } from "./types.ts";
 
-export type MetadataSource = "cache" | "bundled" | "disabled";
+export type MetadataSource = "cache" | "builtin" | "disabled";
 
 /**
  * `models-if-stale` is the routine target Pi's own `refreshModels` hook uses:
@@ -53,8 +54,6 @@ export interface CatalogRefreshResult {
 export interface ProviderCatalogOptions {
   config: CpaProviderConfig;
   gpt56ContextWindow: Gpt56ContextWindowMode;
-  /** First-run models.dev seed read from disk. Omitted outside tests: the shipped package has no seed file. */
-  bundledModelsDevPath?: string;
   getApiKey: () => Promise<string | undefined>;
   backgroundTimeoutMs?: number;
   manualTimeoutMs?: number;
@@ -138,9 +137,9 @@ export class ProviderCatalog {
   /**
    * Whether a routine refresh should re-fetch models.dev.
    *
-   * Stale means: metadata is enabled, and the snapshot is either the bundled
-   * first-run seed (which is frozen at package-publish time and only ever gets
-   * older) or a cached fetch older than the configured threshold. A cached
+   * Stale means: metadata is enabled, and the snapshot is either the built-in
+   * first-run seed (which is frozen at the running pi's release and only ever
+   * gets older) or a cached fetch older than the configured threshold. A cached
    * snapshot with no timestamp is treated as stale rather than trusted forever.
    */
   metadataIsStale(snapshot: Pick<CatalogSnapshot, "metadataSource" | "metadataUpdatedAt"> | undefined = this.snapshot): boolean {
@@ -259,8 +258,8 @@ export class ProviderCatalog {
     if (cached && hasSourceProviderMetadata(cached.data)) {
       return { data: cached.data, fetchedAt: cached.fetchedAt, source: "cache" };
     }
-    if (!this.options.bundledModelsDevPath) return { data: {}, source: "bundled" };
-    return { data: await readBundledModelsDevFallback(this.options.bundledModelsDevPath), source: "bundled" };
+    const seed = await builtinSeedCatalog();
+    return { data: seed.catalog, fetchedAt: seed.generatedAt, source: "builtin" };
   }
 
   private setSnapshot(

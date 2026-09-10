@@ -81,7 +81,12 @@ const PI_EFFORT_LEVELS: readonly ThinkingLevel[] = [
 ];
 
 /**
- * Derive a thinking map from models.dev `reasoning_options`.
+ * A model's thinking map: published verbatim when the metadata carries one,
+ * otherwise derived from models.dev `reasoning_options`.
+ *
+ * Pi's built-in catalog publishes a finished map per model and is the seed this
+ * package starts from, so that map is used as-is. models.dev never carries one,
+ * which is what the derivation below exists for.
  *
  * Pi treats an omitted map as "standard levels through `high`, no `xhigh` or
  * `max`", so a model that accepts those efforts (Claude Fable 5.x, Opus 4.7+,
@@ -99,6 +104,8 @@ const PI_EFFORT_LEVELS: readonly ThinkingLevel[] = [
  * return `undefined` so pi keeps its default budget mapping.
  */
 export function thinkingLevelMapFromMetadata(metadata: ModelsDevMetadata): ThinkingLevelMap | undefined {
+  if (metadata.thinkingLevelMap) return metadata.thinkingLevelMap;
+
   const options = metadata.reasoning_options;
   if (!Array.isArray(options)) return undefined;
 

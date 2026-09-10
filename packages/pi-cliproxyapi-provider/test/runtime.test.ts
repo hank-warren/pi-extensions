@@ -29,7 +29,7 @@ function snapshot(id: string, reasoning = false): any {
   return {
     cpaModels: id ? [{ id }] : [],
     metadata: {},
-    metadataSource: "bundled",
+    metadataSource: "builtin",
     built: { models: id ? [model] : [], stats: { total: id ? 1 : 0, enriched: 0, unmatched: id ? 1 : 0, matchMethods: {}, unmatchedModelIds: id ? [id] : [] } },
   };
 }

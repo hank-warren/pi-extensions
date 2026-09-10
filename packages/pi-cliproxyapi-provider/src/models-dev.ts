@@ -1,4 +1,3 @@
-import { readFile } from "node:fs/promises";
 import type { ModelsDevCatalog, ModelsDevMetadata } from "./types.ts";
 import { withNetworkTimeout } from "./network.ts";
 
@@ -51,8 +50,4 @@ export async function fetchModelsDevCatalog(timeoutMs?: number, signal?: AbortSi
 
 export function hasSourceProviderMetadata(catalog: ModelsDevCatalog): boolean {
   return Object.values(catalog).every((metadata) => typeof metadata.sourceProvider === "string");
-}
-
-export async function readBundledModelsDevFallback(path: string): Promise<ModelsDevCatalog> {
-  return parseModelsDevCatalog(JSON.parse(await readFile(path, "utf8")));
 }
