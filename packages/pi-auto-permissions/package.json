@@ -1,6 +1,6 @@
 {
   "name": "@hank-warren/pi-auto-permissions",
-  "version": "0.16.1",
+  "version": "0.16.2",
   "description": "Fork of @ogulcancelik/pi-auto-permissions with dialog-answer user evidence: context-aware Bash permissions for Pi with automated guardian review.",
   "type": "module",
   "keywords": [

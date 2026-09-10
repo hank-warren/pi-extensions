@@ -1,5 +1,17 @@
 # @hank-warren/pi-plan-mode
 
+## 1.8.0
+
+### Minor Changes
+
+- Implementation now has an end. `plan_implemented`, a parameterless tool staged when implementation starts, lets the model close out an approved plan once its verification has passed; `/plan done` and a **Mark as implemented** menu item do the same by hand. Finishing archives the plan file to `plans/<session-id>.<n>.md` beside the live slot instead of leaving it to be overwritten, so a session that plans several times keeps every plan. **Start a new plan** archives on its way into Plan mode; **Clear**, `/plan exit` and `/plan off` still delete.
+
+  A fresh implementation session shares its parent's plan file, so when it finishes, the parent's pointer names a file that has moved. The parent now notices on its next start, reports the archive, clears the stale pointer, and `/plan show` there renders the archived plan as history.
+
+  Plan tools are staged on the `input` event rather than `before_agent_start`, so a newly staged tool ships with its guideline on the same turn instead of the next; the tool list changes only at the two mode transitions that already rewrite the system prompt, and staged tools are never withdrawn mid-session. Archives and writes to one plan slot are serialized, a plan replaced while it was being archived is left intact and reported, symlinked plan files are refused, and an archive the filesystem rejects leaves the active plan unchanged with an error notification.
+
+  The planning prompt is shorter: the craft it used to restate lives only in `docs/plan-craft.md`, which the prompt names by path. The completion rule lists the same plan sections the craft doc teaches. The active-plan pointer reads `[APPROVED PLAN] Plan mode is off.` instead of `[PLAN MODE]`, so implementation turns no longer carry a marker that resembles the planning one.
+
 ## 1.7.1
 
 ### Patch Changes
