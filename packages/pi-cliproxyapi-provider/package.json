@@ -1,0 +1,50 @@
+{
+  "name": "@hank-warren/pi-cliproxyapi-provider",
+  "version": "0.1.0",
+  "description": "Fork of 0xRichardH/pi-cliproxyapi-provider: Pi provider for CLIProxyAPI with model discovery, models.dev enrichment seeded from pi's built-in catalog, Anthropic Messages routing for Claude, Responses routing for Codex, and derived xhigh/max thinking levels.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "cliproxyapi",
+    "provider",
+    "models.dev"
+  ],
+  "author": "Hank Warren",
+  "contributors": [
+    {
+      "name": "Richard Hao",
+      "url": "https://github.com/0xRichardH"
+    }
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hank-warren/pi-extensions.git",
+    "directory": "packages/pi-cliproxyapi-provider"
+  },
+  "bugs": {
+    "url": "https://github.com/hank-warren/pi-extensions/issues"
+  },
+  "homepage": "https://github.com/hank-warren/pi-extensions/tree/main/packages/pi-cliproxyapi-provider#readme",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "src",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}

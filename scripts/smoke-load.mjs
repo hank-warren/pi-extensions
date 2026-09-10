@@ -117,6 +117,14 @@ const EXPECTED_SURFACES = {
 			"turn_end",
 		],
 	},
+	// The provider registration itself is not asserted: `registerProvider` has no
+	// CATEGORIES entry, so the harness never records it. Startup is cache-first
+	// and opens no socket, and the placeholder path registers the same command
+	// and handler, so this surface holds with or without a CPA snapshot.
+	"./packages/pi-cliproxyapi-provider/index.ts": {
+		commands: ["cliproxyapi"],
+		handlers: ["before_provider_request"],
+	},
 };
 
 const CATEGORIES = ["tools", "commands", "handlers", "flags", "shortcuts"];
