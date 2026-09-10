@@ -11,8 +11,8 @@ interface ActiveImplementationMenuOptions {
 	show(): void | Promise<void>;
 	exportPlan(path: string, signal: AbortSignal): Promise<boolean>;
 	settings(signal: AbortSignal): Promise<boolean>;
-	done(): void;
-	startNew(): void;
+	done(): void | Promise<unknown>;
+	startNew(): void | Promise<unknown>;
 	clear(): void;
 }
 
@@ -68,12 +68,15 @@ export async function showActiveImplementationMenu(
 				if (signal.aborted || !options.isCurrent()) return { kind: "rejected" };
 				return close ? { kind: "close" } : { kind: "stay" };
 			},
+			// Both await their work: an archive can fail, and a failure has to
+			// reach the user as a notification rather than an unhandled rejection
+			// behind a menu that already closed.
 			done: async () => {
-				options.done();
+				await options.done();
 				return { kind: "close" };
 			},
 			"start-new": async () => {
-				options.startNew();
+				await options.startNew();
 				return { kind: "close" };
 			},
 			clear: async () => {

@@ -27,6 +27,7 @@ import {
 import {
 	archivePlanFile,
 	deletePlanFile,
+	latestArchiveFor,
 	planFilePathForSession,
 	readPlanFile,
 	writePlanFile,
@@ -157,12 +158,15 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 	const persistState = () => pi.appendEntry<PlanModeState>(STATE_ENTRY_TYPE, state);
 
 	/**
-	 * The active set grows at exactly two moments in a plan's life: entering
-	 * Plan mode (the planning tools are staged) and starting implementation
+	 * The active set grows at two moments in a plan's life: entering Plan mode
+	 * (the planning tools are staged) and starting implementation
 	 * (plan_implemented is staged). Both already rewrite the system prompt, so
 	 * neither costs a prompt-cache miss the lifecycle was not paying anyway, and
-	 * nothing is ever removed mid-session. Between those moments every call here
-	 * is a no-op.
+	 * staged tools are never withdrawn. The one thing that can move outside
+	 * those moments is the plan_mode_question fallback, which follows
+	 * ask_user_question's availability (a headless turn, or that package being
+	 * installed or removed mid-session) — rare, and predating this design.
+	 * Everything else here is a no-op that preserves the existing order.
 	 */
 	const reconcilePlanToolSurface = (hasUI: boolean, availability?: boolean) => {
 		currentHasUI = hasUI;
@@ -322,8 +326,11 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 			if (state.enabled || !state.planPath) {
 				throw new Error("plan_implemented is only available while an approved plan is being implemented");
 			}
-			const archivePath = await finishImplementation(ctx);
-			return planImplementedResult(archivePath);
+			const result = await finishImplementation(ctx);
+			if (result.kind === "stale") {
+				throw new Error("plan_implemented was superseded: the session moved on before the plan was archived");
+			}
+			return planImplementedResult(result.archivePath);
 		},
 	});
 
@@ -462,6 +469,8 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		restoreState(ctx);
 		await loadPlanModeSettings(session, ctx);
 		if (!session.isCurrent()) return;
+		await reconcileMissingPlan(ctx);
+		if (!session.isCurrent()) return;
 		startPlanModeSettingsWatch(session);
 		const persistFlagActivation = pi.getFlag("plan") === true && !state.enabled;
 		if (persistFlagActivation) {
@@ -498,23 +507,44 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		};
 	});
 
-	pi.on("before_agent_start", (event, ctx) => {
+	/**
+	 * Everything the first prompt of a turn needs settled before Pi snapshots
+	 * the base system prompt: the state a fresh destination was seeded with,
+	 * and the tools that state wants staged. Pi rebuilds the base prompt
+	 * synchronously inside setActiveTools, but before_agent_start receives a
+	 * snapshot taken before its handlers run — a tool staged there ships
+	 * without its guideline on that turn and with it on the next, which is one
+	 * more prefix change than the transition needed. The `input` event fires
+	 * earlier, before that snapshot, for every prompt that reaches the model
+	 * (typed, RPC, and sendUserMessage — which is how the fresh-session handoff
+	 * arrives). So staging happens here, and before_agent_start only repeats
+	 * it as a fallback for a host that reached it some other way.
+	 */
+	function settleBeforePrompt(ctx: ExtensionContext) {
 		currentHasUI = ctx.hasUI;
 		if (refreshStateBeforeFirstAgentStart) {
 			refreshStateBeforeFirstAgentStart = false;
 			restoreState(ctx);
 			updateUi(ctx);
 		}
+		if (state.enabled && !planToolsActivated) activatePlanTools(ctx.hasUI);
+		else if (!state.enabled && state.planPath && !implementedToolActivated) {
+			activateImplementedTool(ctx.hasUI);
+		} else reconcilePlanToolSurface(ctx.hasUI);
+	}
+
+	pi.on("input", (_event, ctx) => {
+		settleBeforePrompt(ctx);
+	});
+
+	pi.on("before_agent_start", (event, ctx) => {
+		settleBeforePrompt(ctx);
 		if (state.enabled && state.awaitingAction) {
 			// A new turn supersedes the previous ready plan: revision feedback
 			// re-opens planning until another plan_mode_complete arrives.
 			pendingReadyNonce = undefined;
 			setState(ctx, { awaitingAction: false });
 		}
-		if (state.enabled && !planToolsActivated) activatePlanTools(ctx.hasUI);
-		else if (!state.enabled && state.planPath && !implementedToolActivated) {
-			activateImplementedTool(ctx.hasUI);
-		} else reconcilePlanToolSurface(ctx.hasUI);
 		// A headless run has no legitimate question tool, whatever the active set
 		// still says: pi-ask-user-question strips its own tool on this same hook,
 		// and hook order between the two packages is not ours to depend on.
@@ -570,29 +600,65 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 	/**
 	 * Implementation is over: the plan file is archived beside the live slot
 	 * (never deleted — it is the record of what was agreed), the pointer and
-	 * widget go, and plan_implemented leaves the active set. Shared by the tool,
-	 * `/plan done`, the menu item, and "Start a new plan", so the session's next
-	 * plan never overwrites the one it just finished.
+	 * widget go. plan_implemented stays staged and refuses to run. Shared by the
+	 * tool, `/plan done`, the menu item, and "Start a new plan", so the
+	 * session's next plan never overwrites the one it just finished.
+	 *
+	 * The archive is a filesystem wait, and the session can move on underneath
+	 * it: a `/plan start` while it is pending opens a new workflow, and a
+	 * session replacement or shutdown ends this one. The state write after the
+	 * wait must not land on either. So the workflow generation is advanced first
+	 * (superseding menus opened against the finished plan), the scope that
+	 * results is captured, and nothing after the await touches state unless
+	 * that scope is still current. Returns `stale` in that case: the archive,
+	 * if it happened, is a fact on disk; the state it would have produced is
+	 * not, because something newer already owns it.
 	 */
-	async function finishImplementation(ctx: ExtensionContext): Promise<string | undefined> {
+	async function finishImplementation(
+		ctx: ExtensionContext,
+	): Promise<{ kind: "finished"; archivePath?: string } | { kind: "stale" }> {
 		lifecycle.nextWorkflow();
+		const scope = lifecycle.capture();
 		const planPath = state.planPath;
 		pendingReadyNonce = undefined;
 		const archivePath = planPath ? await archivePlanFile(planPath) : undefined;
-		setState(ctx, { enabled: false, planPath: undefined, awaitingAction: false });
-		return archivePath;
+		if (!scope.isCurrent()) return { kind: "stale" };
+		setState(ctx, {
+			enabled: false,
+			planPath: undefined,
+			awaitingAction: false,
+			...(archivePath ? { archivePath } : {}),
+		});
+		return { kind: "finished", archivePath };
 	}
 
-	async function markImplemented(ctx: ExtensionContext) {
+	/**
+	 * `/plan done`, the menu item, and the model's tool all end here. A failed
+	 * archive (a filesystem without hard links, a permissions error, a plan
+	 * replaced under us) leaves the state exactly as it was and says why; the
+	 * user can export and clear by hand. Returns whether implementation ended.
+	 */
+	async function markImplemented(ctx: ExtensionContext): Promise<boolean> {
 		if (state.enabled || !state.planPath) {
 			ctx.ui.notify("No plan is being implemented.", "warning");
-			return;
+			return false;
 		}
-		const archivePath = await finishImplementation(ctx);
+		let result: Awaited<ReturnType<typeof finishImplementation>>;
+		try {
+			result = await finishImplementation(ctx);
+		} catch (error: unknown) {
+			const detail = error instanceof Error ? error.message : String(error);
+			ctx.ui.notify(`Unable to archive the plan: ${detail}. The active plan is unchanged.`, "error");
+			return false;
+		}
+		if (result.kind === "stale") return false;
 		ctx.ui.notify(
-			archivePath ? `Plan implemented. Archived to ${archivePath}.` : "Plan implemented.",
+			result.archivePath
+				? `Plan implemented. Archived to ${result.archivePath}.`
+				: "Plan implemented.",
 			"info",
 		);
+		return true;
 	}
 
 	/** Leaves Plan mode and reports it in one step, for menus and /plan alike. */
@@ -736,16 +802,15 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 			show: () => showStoredPlan(pi, ctx, state),
 			exportPlan: (path, signal) => planExports.export(path, ctx, signal, menu.isCurrent),
 			settings: (signal) => showSettings(ctx, signal, menu.isCurrent),
-			done: () => {
-				void markImplemented(ctx);
-			},
-			startNew: () => {
+			done: () => markImplemented(ctx),
+			startNew: async () => {
 				// Archive first: the next plan_mode_complete writes to the same
-				// session slot, and a plan in progress is not something to overwrite.
-				void finishImplementation(ctx).then(() => {
-					enterPlanMode(ctx);
-					notifyEnabled(ctx);
-				});
+				// session slot, and a plan in progress is not something to
+				// overwrite. A failed or superseded archive means no new plan: the
+				// user is told, and the active plan stays where it was.
+				if (!(await markImplemented(ctx))) return;
+				enterPlanMode(ctx);
+				notifyEnabled(ctx);
 			},
 			clear: () => {
 				void exitAndNotify(ctx, "Active implementation plan cleared.");
@@ -785,6 +850,35 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 
 	function restoreState(ctx: ExtensionContext) {
 		state = restorePlanModeState(ctx.sessionManager.getBranch(), STATE_ENTRY_TYPE);
+	}
+
+	/**
+	 * A restored pointer can name a file that is no longer there. The usual
+	 * cause is a fresh implementation session: it shares this session's live
+	 * slot, and when it finished it archived the file — in its own entries, not
+	 * ours. Rather than restore a ready plan that `/plan show` and `/plan
+	 * implement` cannot read, follow the archive if one exists and clear the
+	 * pointer either way, saying which happened. Runs once, at session start,
+	 * before the first prompt is built.
+	 */
+	async function reconcileMissingPlan(ctx: ExtensionContext) {
+		const planPath = state.planPath;
+		if (!planPath) return;
+		if ((await readPlanFile(planPath)) !== undefined) return;
+		const archivePath = await latestArchiveFor(planPath);
+		state = {
+			enabled: state.enabled,
+			planPath: undefined,
+			awaitingAction: false,
+			...(archivePath ? { archivePath } : {}),
+		};
+		persistState();
+		ctx.ui.notify(
+			archivePath
+				? `The plan file was archived elsewhere (implemented in another session); cleared here. The archive is at ${archivePath}.`
+				: "The plan file is gone; the stored plan pointer was cleared.",
+			"info",
+		);
 	}
 
 	function updateUi(ctx: ExtensionContext) {

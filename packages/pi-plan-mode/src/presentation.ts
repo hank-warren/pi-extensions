@@ -178,6 +178,13 @@ export async function showStoredPlan(
 ) {
 	const plan = state.planPath ? await readPlanFile(state.planPath) : undefined;
 	if (!plan) {
+		// No live plan, but the last finished one is still on disk: show it as
+		// history rather than pretending there is nothing.
+		const archived = state.archivePath ? await readPlanFile(state.archivePath) : undefined;
+		if (archived && state.archivePath) {
+			showPlanModePlan(pi, ctx, `Archived Plan (${state.archivePath})`, archived);
+			return;
+		}
 		ctx.ui.notify(
 			"No completed plan is available. Use /plan finalize when planning is complete.",
 			"info",

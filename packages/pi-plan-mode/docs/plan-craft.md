@@ -74,4 +74,4 @@ Plan mode is for work whose *shape* is uncertain. It is overhead when it is not:
 - **Pure investigation with no change in view** — investigate in the conversation. Plan mode blocks the tools that would let you experiment, and there is nothing to decide yet.
 - **Work whose difficulty is execution, not design** ("run this migration on 40 hosts") → the interesting part is a runbook and a rollout order, not a design decision.
 
-You cannot leave Plan mode yourself, and a turn that ends in prose is a turn that produced nothing — so say it in one line and then **ask**, with the question tool: leave Plan mode (`/plan exit`) and do the work directly, or plan it anyway. If they choose to plan, plan it properly.
+You cannot leave Plan mode yourself, and a turn that ends in prose announcing future work is a turn that produced nothing — so say it in one line and then **ask**: leave Plan mode (`/plan exit`) and do the work directly, or plan it anyway. Use the question tool when the session has one, and a plain-text question when it does not (a plain-text question is a legitimate ending; an announcement is not). If they choose to plan, plan it properly.

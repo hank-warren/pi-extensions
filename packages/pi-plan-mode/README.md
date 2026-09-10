@@ -67,7 +67,11 @@ While a plan is being implemented the footer shows `▶ plan · implementing` an
 - **`/plan done`**, or **Mark as implemented** from the `/plan` menu.
 - **Start a new plan** from the same menu, which ends the current one on its way into Plan mode.
 
-All three archive the plan file to `plans/<session-id>.<n>.md` beside the live slot and clear the pointer. **Clear active implementation plan** is the one path that deletes instead of archiving.
+All three archive the plan file to `plans/<session-id>.<n>.md` beside the live slot and clear the pointer. **Clear active implementation plan**, `/plan exit` and `/plan off` delete instead of archiving.
+
+An archive that fails (a filesystem without hard links, a permissions error, a plan file replaced while it was being archived) is reported and changes nothing: the plan stays active, and you can export and clear by hand. If the session moved on while the archive was in flight — a `/plan start`, a session replacement — the newer state wins and the finish is dropped.
+
+A **fresh implementation session shares its parent's plan file**, so when it finishes, the parent's pointer names a file that has moved. The parent notices on its next start, clears the pointer, and remembers the archive: `/plan show` there displays the archived plan as history.
 
 Print and JSON modes cannot show the interactive menu; use `/plan start`, `/plan <prompt>`, `/plan show`, `/plan export`, and `/plan exit` there.
 
@@ -110,7 +114,9 @@ A settings file that does not parse is reported at session start and the default
 
 Plan mode blocks exactly two tools while planning: `edit` and `write`. That is the whole enforcement surface.
 
-Its own tools are **staged, and never withdrawn mid-session**: `plan_mode_complete` (and the `plan_mode_question` fallback) join the active set when Plan mode is entered, `plan_implemented` joins when implementation starts, and each stays until the session ends, refusing to run outside its phase. Both joins happen at a transition that already rewrites the system prompt, so a plan's whole lifecycle costs two prompt-cache misses that the mode switch was paying anyway; nothing else Plan mode does changes the tool list or the prompt prefix between turns. Checklist tools (a `todo` extension, for example) are deliberately not blocked — a task list is ephemeral planning scratch, and the planning prompt steers the model away from execution-progress tracking.
+Its own tools are **staged, and never withdrawn mid-session**: `plan_mode_complete` joins the active set when Plan mode is entered, `plan_implemented` joins when implementation starts, and each stays until the session ends, refusing to run outside its phase. Staging happens on the `input` event, before Pi snapshots the base system prompt for the turn, so a staged tool ships with its guideline on the same turn rather than the next. Both joins land on a transition that already rewrites the system prompt, so a plan's whole lifecycle changes the **tool list** twice, at moments the mode switch was paying for anyway. The system prompt itself changes at those two moments and once more when implementation ends (the pointer line leaves); nothing else Plan mode does changes either between turns.
+
+The one exception is the `plan_mode_question` fallback, which follows `ask_user_question`'s availability and so can leave and rejoin when that changes mid-session (a headless turn, or the package being installed or removed) — rare, and older than this design. Checklist tools (a `todo` extension, for example) are deliberately not blocked — a task list is ephemeral planning scratch, and the planning prompt steers the model away from execution-progress tracking.
 
 It deliberately does **not** police Bash, subagents, MCP tools, or any other extension tool. Those decisions belong to your permission layer, which can see the whole session and judge each call. Pair Plan mode with a permission extension such as `@hank-warren/pi-auto-permissions` if you want command review during planning.
 

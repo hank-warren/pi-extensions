@@ -62,9 +62,12 @@ const EXPECTED_SURFACES = {
 		// No context hook: the plan lives in a file, so nothing is reinjected.
 		// No thinking_level_select hook: Plan mode never changes the thinking
 		// level, so it has no manual override to detect.
+		// input: stages plan tools before Pi snapshots the base system prompt,
+		// so a staged tool ships with its guideline on the same turn.
 		handlers: [
 			"agent_settled",
 			"before_agent_start",
+			"input",
 			"session_shutdown",
 			"session_start",
 			"tool_call",

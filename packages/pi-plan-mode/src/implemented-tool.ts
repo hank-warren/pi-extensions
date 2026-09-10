@@ -3,10 +3,11 @@
  *
  * Without it the active-plan pointer and the `▶ plan · implementing` widget
  * stayed up until the user cleared them by hand, because nothing could tell
- * when implementation had ended. The tool is in the active set only while a
- * plan is active, and it joins and leaves the set at the same moments
- * `plan_mode_complete` leaves and the pointer line appears/disappears — so it
- * adds no prompt-cache invalidation of its own to the plan lifecycle.
+ * when implementation had ended. The tool is staged into the active set when
+ * implementation starts — the same transition that rewrites the system
+ * prompt — and stays for the rest of the session, refusing to run when no
+ * plan is active. Finishing therefore changes the system prompt (the pointer
+ * line leaves) but never the tool list.
  *
  * It takes no parameters and its description is a fixed string, so the tool
  * definition is byte-stable across turns.
