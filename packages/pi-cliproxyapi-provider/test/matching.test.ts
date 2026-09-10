@@ -142,3 +142,20 @@ test("allows an explicit alias to override a canonical owner match", () => {
   assert.equal(match?.metadataId, "other/gpt-5.5");
   assert.equal(match?.method, "alias");
 });
+
+test("matches against a large catalog in constant time per model", () => {
+  // A live models.dev snapshot holds ~7 500 entries; the first call builds an
+  // index, and every call after that is a handful of map lookups. This pins
+  // the shape (a linear scan over 20 000 entries per model takes seconds).
+  const large: Record<string, { id: string; name: string }> = {};
+  for (let i = 0; i < 20_000; i++) {
+    large[`vendor-${i % 200}/model-${i}`] = { id: `vendor-${i % 200}/model-${i}`, name: `Model ${i}` };
+  }
+  large["openai/gpt-5.5"] = { id: "openai/gpt-5.5", name: "GPT-5.5" };
+  const started = performance.now();
+  for (let n = 0; n < 700; n += 7) {
+    assert.equal(findMetadataMatch({ id: `model-${n}`, owned_by: "router" }, large, {})?.metadataId, `vendor-${n % 200}/model-${n}`);
+  }
+  assert.equal(findMetadataMatch({ id: "gpt-5.5", owned_by: "openai" }, large, {})?.method, "owner-prefix");
+  assert.ok(performance.now() - started < 500, "100 matches against 20 000 entries should be fast");
+});
