@@ -31,6 +31,7 @@
       "./packages/pi-stats/index.ts",
       "./packages/pi-auto-permissions/index.ts",
       "./packages/pi-plan-mode/index.ts",
+      "./packages/pi-tasks/index.ts",
       "./packages/pi-ask-user-question/index.ts",
       "./packages/pi-multi-login/index.ts",
       "./packages/pi-stash/index.ts",
@@ -49,6 +50,7 @@
     "@earendil-works/pi-coding-agent": "^0.84.0",
     "@earendil-works/pi-tui": "^0.84.0",
     "@types/node": "^22.0.0",
+    "@types/proper-lockfile": "^4.1.4",
     "tsx": "^4.20.0",
     "typebox": "1.1.38",
     "typescript": "^5.9.0"

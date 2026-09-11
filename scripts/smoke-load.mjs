@@ -73,6 +73,16 @@ const EXPECTED_SURFACES = {
 			"tool_call",
 		],
 	},
+	// No agent_settled hook: the review card opens from inside the update_tasks
+	// tool call, so nothing waits for the session to settle — and a tool that
+	// waited on its own session's idle state would deadlock.
+	// No tool_call hook: pi-tasks blocks nothing. The managed document is kept
+	// honest by a digest check at every read and write, not by policing `edit`.
+	"./packages/pi-tasks/index.ts": {
+		tools: ["get_tasks", "update_tasks"],
+		commands: ["tasks"],
+		handlers: ["before_agent_start", "session_shutdown", "session_start", "session_tree"],
+	},
 	// ask_user_question registers unconditionally; reconcile.ts strips it from
 	// the ACTIVE tool set at before_agent_start when ctx.hasUI is false. The
 	// smoke run inspects the registration surface, not the active set, so the
