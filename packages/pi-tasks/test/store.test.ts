@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import {
 	existsSync,
 	mkdirSync,
+	readdirSync,
 	mkdtempSync,
 	readFileSync,
 	rmSync,
@@ -29,9 +30,11 @@ import {
 	commitTaskDocument,
 	digestOf,
 	isSafeTaskSetId,
-	latestSnapshot,
+	findRecoverySnapshot,
+	highestReservedRevision,
 	loadTaskDocument,
-	matchesOwnSnapshot,
+	isPublishedRevision,
+	publishExclusively,
 	MAX_DOCUMENT_BYTES,
 	snapshotPath,
 	taskDocumentPath,
@@ -79,7 +82,9 @@ test("the first commit publishes revision 1 and its immutable snapshot", async (
 
 	const snapshot = readFileSync(snapshotPath(root, SET_ID, 1), "utf8");
 	assert.equal(snapshot, live.kind === "loaded" ? live.loaded.raw : "");
-	assert.equal(await matchesOwnSnapshot(root, SET_ID, 1, digestOf(snapshot)), true);
+	assert.equal(await isPublishedRevision(root, SET_ID, 1, digestOf(snapshot)), true);
+	// Provable, not assumed: the preparation record is what says so.
+	assert.equal((await findRecoverySnapshot(root, SET_ID))?.certainty, "published");
 });
 
 test("a second first-commit refuses rather than replacing an existing set", async (t) => {
@@ -185,7 +190,7 @@ test("two overlapping commits in one process produce one revision, not two", asy
 
 	const live = await loadTaskDocument(first.path);
 	assert.equal(live.kind === "loaded" && live.loaded.document.set.revision, 2);
-	assert.equal(await latestSnapshot(root, SET_ID).then((entry) => entry?.revision), 2);
+	assert.equal(await findRecoverySnapshot(root, SET_ID).then((entry) => entry?.revision), 2);
 });
 
 test("an oversized document is refused on the way in and on the way out", async (t) => {
@@ -220,7 +225,7 @@ test("a document nobody wrote is invalid rather than missing", async (t) => {
 test("an absent document is missing, not an error", async (t) => {
 	const root = scratchRoot(t);
 	assert.equal((await loadTaskDocument(taskDocumentPath(root, SET_ID))).kind, "missing");
-	assert.equal(await latestSnapshot(root, SET_ID), undefined);
+	assert.equal(await findRecoverySnapshot(root, SET_ID), undefined);
 });
 
 test("a document edited outside the package no longer matches its own snapshot", async (t) => {
@@ -229,43 +234,45 @@ test("a document edited outside the package no longer matches its own snapshot",
 	assert.ok(first.kind === "committed");
 	const tampered = readFileSync(first.path, "utf8").replace("add the column", "add a column");
 	writeFileSync(first.path, tampered);
-	assert.equal(await matchesOwnSnapshot(root, SET_ID, 1, digestOf(tampered)), false);
+	assert.equal(await isPublishedRevision(root, SET_ID, 1, digestOf(tampered)), false);
 	// The snapshot itself is untouched, which is what recovery offers back.
 	const snapshot = parseTaskDocument(readFileSync(snapshotPath(root, SET_ID, 1), "utf8"));
 	assert.ok(snapshot.ok);
 	assert.equal(snapshot.document.set.phases[0]?.tasks[0]?.content, "add the column");
 });
 
-test("an interrupted publication resumes instead of wedging the set forever", async (t) => {
+/**
+ * Fault injection for the window between publication and finalization: the
+ * live document is renamed into place and the process dies before the snapshot
+ * is linked. Reproduced by publishing normally and then deleting the snapshot,
+ * which leaves exactly the on-disk state that crash produces.
+ */
+function loseSnapshotOf(root: string, revision: number): string {
+	const path = snapshotPath(root, SET_ID, revision);
+	const bytes = readFileSync(path, "utf8");
+	rmSync(path);
+	return bytes;
+}
+
+test("a publication interrupted before its snapshot is finished from the preparation record", async (t) => {
 	const root = scratchRoot(t);
 	const first = await commitSeed(root);
 	assert.ok(first.kind === "committed");
+	const lost = loseSnapshotOf(root, 1);
+	assert.equal(existsSync(snapshotPath(root, SET_ID, 1)), false);
+
+	// The live document still holds revision 1, and the preparation record still
+	// says this package prepared exactly those bytes for it — which is the only
+	// evidence that authorises writing the history entry back.
 	const loaded = await loadTaskDocument(first.path);
 	assert.ok(loaded.kind === "loaded");
+	assert.equal(await isPublishedRevision(root, SET_ID, 1, loaded.loaded.digest), true);
+
 	const next = applyTaskChanges(loaded.loaded.document.set, [{ op: "start", taskId: "t1" }], {
 		now: NOW,
 		hasExistingSet: true,
 	});
 	assert.ok(next.ok);
-
-	// Fault injection: the snapshot for revision 2 lands and the process dies
-	// before the live document is renamed into place. This is exactly the window
-	// the snapshot-first order opens.
-	const interrupted = serializeTaskDocument({
-		set: { ...next.result.set, revision: 2, updatedAt: NOW },
-		extras: [],
-	});
-	writeFileSync(snapshotPath(root, SET_ID, 2), interrupted);
-	assert.equal((await loadTaskDocument(first.path)).kind === "loaded", true);
-	assert.equal(
-		(await loadTaskDocument(first.path)).kind === "loaded" &&
-			((await loadTaskDocument(first.path)) as { loaded: { document: { set: { revision: number } } } })
-				.loaded.document.set.revision,
-		1,
-	);
-
-	// Retrying the identical write resumes: the prepared bytes are the bytes this
-	// call is publishing, so it finishes the transaction rather than refusing.
 	const resumed = await commitTaskDocument({
 		root,
 		taskSetId: SET_ID,
@@ -274,99 +281,297 @@ test("an interrupted publication resumes instead of wedging the set forever", as
 		now: NOW,
 	});
 	assert.equal(resumed.kind, "committed");
+	assert.equal(resumed.kind === "committed" && resumed.repairedRevision, 1);
+	// Revision 1's history is back, byte-identical, and the new revision is its
+	// own number rather than a second set of bytes for an existing one.
+	assert.equal(readFileSync(snapshotPath(root, SET_ID, 1), "utf8"), lost);
 	assert.equal(resumed.kind === "committed" && resumed.revision, 2);
-	assert.equal(resumed.kind === "committed" && resumed.retainedOrphanSnapshot, undefined);
-	assert.equal(readFileSync(first.path, "utf8"), interrupted);
-
-	// And the set keeps moving afterwards.
-	const after = await loadTaskDocument(first.path);
-	assert.ok(after.kind === "loaded");
-	const third = applyTaskChanges(after.loaded.document.set, [{ op: "done", taskId: "t1", summary: "s" }], {
-		now: NOW,
-		hasExistingSet: true,
-	});
-	assert.ok(third.ok);
-	const forward = await commitTaskDocument({
-		root,
-		taskSetId: SET_ID,
-		document: { set: third.result.set, extras: [] },
-		expectedDigest: after.loaded.digest,
-		now: NOW,
-	});
-	assert.equal(forward.kind === "committed" && forward.revision, 3);
+	assert.equal(resumed.kind === "committed" && resumed.historyPending, undefined);
 });
 
-test("a different interrupted snapshot is retained aside, never overwritten or accepted", async (t) => {
+test("an unexplained live document is never repaired into history", async (t) => {
 	const root = scratchRoot(t);
 	const first = await commitSeed(root);
 	assert.ok(first.kind === "committed");
+	loseSnapshotOf(root, 1);
+
+	// Same revision number, bytes this package never prepared. Being parseable is
+	// not evidence of anything, so nothing is written and nothing is displaced.
+	const foreign = readFileSync(first.path, "utf8").replace("add the column", "add a column");
+	writeFileSync(first.path, foreign);
 	const loaded = await loadTaskDocument(first.path);
 	assert.ok(loaded.kind === "loaded");
-
-	// A prepared snapshot for revision 2 whose content is *not* what the next
-	// write publishes: an abandoned transaction from some other batch.
-	const abandoned = "# Tasks\n\nabandoned transaction bytes\n";
-	writeFileSync(snapshotPath(root, SET_ID, 2), abandoned);
+	assert.equal(await isPublishedRevision(root, SET_ID, 1, loaded.loaded.digest), false);
 
 	const next = applyTaskChanges(loaded.loaded.document.set, [{ op: "start", taskId: "t1" }], {
 		now: NOW,
 		hasExistingSet: true,
 	});
 	assert.ok(next.ok);
-	const result = await commitTaskDocument({
+	const refused = await commitTaskDocument({
 		root,
 		taskSetId: SET_ID,
 		document: { set: next.result.set, extras: [] },
 		expectedDigest: loaded.loaded.digest,
 		now: NOW,
 	});
-	assert.equal(result.kind, "committed");
-	assert.ok(result.kind === "committed" && result.retainedOrphanSnapshot);
-
-	// The abandoned bytes are kept, under a name that can never be mistaken for
-	// accepted history, and the accepted snapshot is the one just published.
-	const orphanPath = result.kind === "committed" ? String(result.retainedOrphanSnapshot) : "";
-	assert.match(orphanPath, /revisions\/orphan-2\./u);
-	assert.equal(readFileSync(orphanPath, "utf8"), abandoned);
-	assert.equal(readFileSync(snapshotPath(root, SET_ID, 2), "utf8"), readFileSync(first.path, "utf8"));
-	// `latestSnapshot` never offers an orphan as recovered history.
-	assert.deepEqual(await latestSnapshot(root, SET_ID), {
-		revision: 2,
-		path: snapshotPath(root, SET_ID, 2),
-	});
+	assert.equal(refused.kind, "conflict");
+	assert.match(refused.kind === "conflict" ? refused.reason : "", /no record of publishing those bytes/u);
+	assert.equal(existsSync(snapshotPath(root, SET_ID, 1)), false);
 });
 
-test("an interrupted initial creation is resumable too", async (t) => {
-	const root = scratchRoot(t);
-	mkdirSync(join(root, SET_ID, "revisions"), { recursive: true });
-	writeFileSync(snapshotPath(root, SET_ID, 1), "# Tasks\n\nabandoned first attempt\n");
-
-	const result = await commitSeed(root);
-	assert.equal(result.kind, "committed");
-	assert.ok(result.kind === "committed" && result.retainedOrphanSnapshot);
-	const live = await loadTaskDocument(taskDocumentPath(root, SET_ID));
-	assert.equal(live.kind === "loaded" && live.loaded.document.set.revision, 1);
-});
-
-test("a snapshot that is already accepted history is never disturbed", async (t) => {
+test("a snapshot disagreeing with the live document blocks rather than being displaced", async (t) => {
 	const root = scratchRoot(t);
 	const first = await commitSeed(root);
 	assert.ok(first.kind === "committed");
 	const accepted = readFileSync(snapshotPath(root, SET_ID, 1), "utf8");
 
-	// A caller that tries to re-publish revision 1 over accepted history: the
-	// live document is already at 1, so this is not an orphan and is refused.
-	const seeded = seedDocument();
+	// The live document claims revision 1 with bytes that are not what 1.md holds.
+	const foreign = accepted.replace("add the column", "add a column");
+	writeFileSync(first.path, foreign);
+	const loaded = await loadTaskDocument(first.path);
+	assert.ok(loaded.kind === "loaded");
+	const next = applyTaskChanges(loaded.loaded.document.set, [{ op: "start", taskId: "t1" }], {
+		now: NOW,
+		hasExistingSet: true,
+	});
+	assert.ok(next.ok);
 	const refused = await commitTaskDocument({
 		root,
 		taskSetId: SET_ID,
-		document: { set: { ...seeded.set, revision: 0 }, extras: [] },
-		expectedDigest: digestOf(accepted),
+		document: { set: next.result.set, extras: [] },
+		expectedDigest: loaded.loaded.digest,
 		now: NOW,
 	});
 	assert.equal(refused.kind, "conflict");
-	assert.match(refused.kind === "conflict" ? refused.reason : "", /already accepted history/u);
+	assert.match(refused.kind === "conflict" ? refused.reason : "", /holds different bytes/u);
 	assert.equal(readFileSync(snapshotPath(root, SET_ID, 1), "utf8"), accepted);
+});
+
+test("a restored older document never costs the history published above it", async (t) => {
+	const root = scratchRoot(t);
+	await commitSeed(root);
+	const path = taskDocumentPath(root, SET_ID);
+
+	// Publish up to revision 3.
+	for (const change of [{ op: "start", taskId: "t1" }, { op: "done", taskId: "t1", summary: "s" }] as const) {
+		const loaded = await loadTaskDocument(path);
+		assert.ok(loaded.kind === "loaded");
+		const applied = applyTaskChanges(loaded.loaded.document.set, [change], {
+			now: NOW,
+			hasExistingSet: true,
+		});
+		assert.ok(applied.ok);
+		const result = await commitTaskDocument({
+			root,
+			taskSetId: SET_ID,
+			document: { set: applied.result.set, extras: [] },
+			expectedDigest: loaded.loaded.digest,
+			now: NOW,
+		});
+		assert.equal(result.kind, "committed");
+	}
+	const three = readFileSync(snapshotPath(root, SET_ID, 3), "utf8");
+
+	// The user restores revision 2 over the live document — a backup, or a plain
+	// `cp revisions/2.md tasks.md`. The old code called 3.md "not accepted"
+	// because the live document was behind it, and renamed it aside.
+	const two = readFileSync(snapshotPath(root, SET_ID, 2), "utf8");
+	writeFileSync(path, two);
+	const restored = await loadTaskDocument(path);
+	assert.ok(restored.kind === "loaded");
+	assert.equal(restored.loaded.document.set.revision, 2);
+
+	const next = applyTaskChanges(
+		restored.loaded.document.set,
+		[{ op: "block", taskId: "t1", blocker: "waiting on the dump" }],
+		{ now: NOW, hasExistingSet: true },
+	);
+	assert.ok(next.ok, next.ok ? "" : next.error);
+	const published = await commitTaskDocument({
+		root,
+		taskSetId: SET_ID,
+		document: { set: next.result.set, extras: [] },
+		expectedDigest: restored.loaded.digest,
+		now: NOW,
+	});
+
+	// The new publication takes the next unused number, and revision 3 is exactly
+	// where it was: same bytes, same name, still addressable.
+	assert.equal(published.kind, "committed");
+	assert.equal(published.kind === "committed" && published.revision, 4);
+	assert.equal(readFileSync(snapshotPath(root, SET_ID, 3), "utf8"), three);
+	assert.equal(readFileSync(snapshotPath(root, SET_ID, 2), "utf8"), two);
+	assert.deepEqual(
+		readdirSync(join(root, SET_ID, "revisions")).filter((name) => /^\d+\.md$/u.test(name)).sort(),
+		["1.md", "2.md", "3.md", "4.md"],
+	);
+});
+
+test("a number consumed by a publication that never landed is never handed out again", async (t) => {
+	const root = scratchRoot(t);
+	const first = await commitSeed(root);
+	assert.ok(first.kind === "committed");
+	const loaded = await loadTaskDocument(first.path);
+	assert.ok(loaded.kind === "loaded");
+
+	// A reservation for revision 2 whose bytes never reached the live document:
+	// the crash-before-publication case. It consumed its number regardless.
+	mkdirSync(join(root, SET_ID, "revisions"), { recursive: true });
+	writeFileSync(
+		join(root, SET_ID, "revisions", "pending-2-00000000-0000-4000-8000-000000000000.json"),
+		`${JSON.stringify({ schemaVersion: 1, taskSetId: SET_ID, revision: 2, digest: "f".repeat(64), createdAt: NOW })}\n`,
+	);
+	assert.equal(await highestReservedRevision(root, SET_ID), 2);
+
+	const next = applyTaskChanges(loaded.loaded.document.set, [{ op: "start", taskId: "t1" }], {
+		now: NOW,
+		hasExistingSet: true,
+	});
+	assert.ok(next.ok);
+	const published = await commitTaskDocument({
+		root,
+		taskSetId: SET_ID,
+		document: { set: next.result.set, extras: [] },
+		expectedDigest: loaded.loaded.digest,
+		now: NOW,
+	});
+	assert.equal(published.kind, "committed");
+	assert.equal(published.kind === "committed" && published.revision, 3, "2 was consumed, so 3 is next");
+	assert.equal(existsSync(snapshotPath(root, SET_ID, 2)), false);
+});
+
+test("a malformed reservation still consumes its number", async (t) => {
+	const root = scratchRoot(t);
+	await commitSeed(root);
+	// Unparseable beyond its number, which is all that matters for allocation.
+	writeFileSync(join(root, SET_ID, "revisions", "pending-9-truncated"), "{");
+	assert.equal(await highestReservedRevision(root, SET_ID), 9);
+
+	const loaded = await loadTaskDocument(taskDocumentPath(root, SET_ID));
+	assert.ok(loaded.kind === "loaded");
+	const next = applyTaskChanges(loaded.loaded.document.set, [{ op: "start", taskId: "t1" }], {
+		now: NOW,
+		hasExistingSet: true,
+	});
+	assert.ok(next.ok);
+	const published = await commitTaskDocument({
+		root,
+		taskSetId: SET_ID,
+		document: { set: next.result.set, extras: [] },
+		expectedDigest: loaded.loaded.digest,
+		now: NOW,
+	});
+	assert.equal(published.kind === "committed" && published.revision, 10);
+});
+
+test("an interrupted initial publication leaves its reservation and takes the next number", async (t) => {
+	const root = scratchRoot(t);
+	mkdirSync(join(root, SET_ID, "revisions"), { recursive: true });
+	// A first attempt that reserved revision 1 and never published.
+	writeFileSync(
+		join(root, SET_ID, "revisions", "pending-1-00000000-0000-4000-8000-000000000000.md"),
+		"# Tasks\n\nabandoned first attempt\n",
+	);
+
+	const result = await commitSeed(root);
+	assert.equal(result.kind, "committed");
+	assert.equal(result.kind === "committed" && result.revision, 2, "1 was consumed by the attempt");
+	const live = await loadTaskDocument(taskDocumentPath(root, SET_ID));
+	assert.equal(live.kind === "loaded" && live.loaded.document.set.revision, 2);
+	assert.equal(existsSync(snapshotPath(root, SET_ID, 1)), false);
+});
+
+test("a legacy snapshot is preserved and reserved, but never claimed as published", async (t) => {
+	const root = scratchRoot(t);
+	const first = await commitSeed(root);
+	assert.ok(first.kind === "committed");
+
+	// What an older build left behind: a numbered snapshot with no preparation
+	// record, so its provenance cannot be proven either way.
+	const legacy = readFileSync(snapshotPath(root, SET_ID, 1), "utf8").replace(
+		'"revision":1',
+		'"revision":5',
+	);
+	writeFileSync(snapshotPath(root, SET_ID, 5), legacy);
+
+	const candidate = await findRecoverySnapshot(root, SET_ID);
+	assert.equal(candidate?.revision, 5);
+	assert.equal(candidate?.certainty, "unverified", "no record, so no claim that it was published");
+	assert.equal(await highestReservedRevision(root, SET_ID), 5);
+
+	// Revision 1, which this build did publish, is reported as such.
+	const one = await loadTaskDocument(snapshotPath(root, SET_ID, 1));
+	assert.ok(one.kind === "loaded");
+	assert.equal(await isPublishedRevision(root, SET_ID, 1, one.loaded.digest), true);
+	// And the legacy file is untouched by any of this.
+	assert.equal(readFileSync(snapshotPath(root, SET_ID, 5), "utf8"), legacy);
+});
+
+test("recovery steps over a corrupt newest snapshot to the newest valid one", async (t) => {
+	const root = scratchRoot(t);
+	await commitSeed(root);
+	const path = taskDocumentPath(root, SET_ID);
+	const loaded = await loadTaskDocument(path);
+	assert.ok(loaded.kind === "loaded");
+	const next = applyTaskChanges(loaded.loaded.document.set, [{ op: "start", taskId: "t1" }], {
+		now: NOW,
+		hasExistingSet: true,
+	});
+	assert.ok(next.ok);
+	await commitTaskDocument({
+		root,
+		taskSetId: SET_ID,
+		document: { set: next.result.set, extras: [] },
+		expectedDigest: loaded.loaded.digest,
+		now: NOW,
+	});
+
+	const corrupt = "# Tasks\n\ntruncated\n";
+	writeFileSync(snapshotPath(root, SET_ID, 2), corrupt);
+	const candidate = await findRecoverySnapshot(root, SET_ID);
+	assert.equal(candidate?.revision, 1, "the newest that actually parses");
+	// Stepped over, never repaired, never deleted, never renamed.
+	assert.equal(readFileSync(snapshotPath(root, SET_ID, 2), "utf8"), corrupt);
+});
+
+test("a snapshot belonging to another set is not a recovery candidate", async (t) => {
+	const root = scratchRoot(t);
+	await commitSeed(root);
+	const foreign = readFileSync(snapshotPath(root, SET_ID, 1), "utf8").replace(
+		SET_ID,
+		"00000000-0000-4000-8000-000000000009",
+	);
+	writeFileSync(snapshotPath(root, SET_ID, 7), foreign);
+	const candidate = await findRecoverySnapshot(root, SET_ID);
+	assert.equal(candidate?.revision, 1, "7 names another set, so it is skipped");
+	assert.equal(readFileSync(snapshotPath(root, SET_ID, 7), "utf8"), foreign);
+});
+
+test("no valid candidate means recovery offers nothing rather than something broken", async (t) => {
+	const root = scratchRoot(t);
+	mkdirSync(join(root, SET_ID, "revisions"), { recursive: true });
+	writeFileSync(snapshotPath(root, SET_ID, 1), "not a task document\n");
+	assert.equal(await findRecoverySnapshot(root, SET_ID), undefined);
+	assert.equal(readFileSync(snapshotPath(root, SET_ID, 1), "utf8"), "not a task document\n");
+});
+
+test("an export never replaces a destination that appears after the check", async (t) => {
+	const root = scratchRoot(t);
+	const destination = join(root, "exported.md");
+	const squatter = "someone else's file\n";
+	writeFileSync(destination, squatter);
+	assert.equal(await publishExclusively(destination, "# Tasks\n"), false);
+	assert.equal(readFileSync(destination, "utf8"), squatter, "its bytes are unchanged");
+
+	const fresh = join(root, "fresh.md");
+	assert.equal(await publishExclusively(fresh, "# Tasks\n"), true);
+	assert.equal(readFileSync(fresh, "utf8"), "# Tasks\n");
+	// No temp files left behind by either outcome.
+	assert.deepEqual(
+		readdirSync(root).filter((name) => name.startsWith(".tasks-export")),
+		[],
+	);
 });
 
 test("a commit cancelled while queued for the lock writes nothing", async (t) => {

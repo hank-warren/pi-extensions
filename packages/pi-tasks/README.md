@@ -71,21 +71,35 @@ Retired never means deleted. A superseded or cancelled proposal stays on disk, r
 
 ```
 ~/.pi/agent/tasks/<task-set-id>/
-  tasks.md                 the accepted document
-  revisions/<n>.md         an immutable snapshot of every accepted revision
-  revisions/orphan-*.md    a snapshot an interrupted transaction prepared and
-                           never published — retained, never accepted history
-  proposals/<id>.json      candidates, pending and resolved
-  tasks.lock               the cross-process lock
+  tasks.md                        the current document
+  revisions/<n>.md                the snapshot of revision n
+  revisions/pending-<n>-<id>.md   bytes prepared for revision n
+  revisions/pending-<n>-<id>.json the record of what they are
+  proposals/<id>.json             candidates, pending and resolved
+  tasks.lock                      the cross-process lock
 ```
 
-`tasks.md` is readable Markdown with `[ ] [/] [!] [x] [-]` status markers and HTML-comment annotations carrying ids and completions. Lines the parser does not recognise are preserved verbatim in place, so a status-only update leaves the rest of the document alone.
+`tasks.md` is readable Markdown with `[ ] [/] [!] [x] [-]` status markers and HTML-comment annotations carrying ids and completions.
+
+Lines the parser does not recognise are kept and written back where they were, blank lines within them included, so a note keeps its paragraphs across a status-only update. This is line-level preservation of unrecognised content, not byte-level preservation of the whole document: the title, the metadata comment and the separators around headings and task blocks are regenerated on every write, and a task line is re-serialized from the structure rather than echoed.
 
 Three layers guard a write: an in-process queue per path, a [`proper-lockfile`](https://www.npmjs.com/package/proper-lockfile) lock around the whole read-validate-write window, and a SHA-256 digest of the bytes the change was computed from, rechecked under the lock immediately before the rename.
 
-**That is optimistic conflict detection, not a filesystem compare-and-swap.** A writer that ignores the lock — an editor, another tool — can change the file between the digest check and the rename, and no POSIX filesystem prevents it. What the digest buys is that the next read *notices*, stops mutating, and asks a human, instead of merging silently. Every accepted revision is still under `revisions/`.
+**That is optimistic conflict detection, not a filesystem compare-and-swap.** A writer that ignores the lock — an editor, another tool — can change the file between the digest check and the rename, and no POSIX filesystem prevents it. What the digest buys is that the next read *notices*, stops mutating, and asks a human, instead of merging silently.
 
-The snapshot lands before the live document is renamed, so a crash between the two leaves a snapshot for a revision the live document never reached. That snapshot was *prepared*, never accepted — accepted history is exactly the revisions the live document has reached — and the next write resolves it rather than wedging: identical bytes are an idempotent resume, anything else is moved aside under an `orphan-` name and reported. Nothing is deleted, no accepted snapshot is ever overwritten, and approval is never inferred from bytes nobody published.
+### Why a numbered snapshot can be trusted
+
+Publication is the rename of `tasks.md`, and nothing else. A revision is prepared first, under `pending-<n>-<id>`, alongside a record of its identity, revision and digest; the rename publishes it; only then are the bytes linked to `revisions/<n>.md`. Because the snapshot is created *after* the rename, a `<n>.md` this package wrote always means "published".
+
+Nothing renames, replaces or reassigns a numbered snapshot, for any reason. Revision numbers are allocated past everything ever reserved — finalized snapshots and preparations alike — so a number consumed by an interrupted or rolled-back publication is never handed out again. **Gaps in the numbering are normal**; a reused number would not be.
+
+A crash between the rename and the link leaves the revision published with its snapshot missing. That is repaired only on evidence: a preparation record naming this set, this revision, and the digest the live document is holding. Bytes that merely parse are never evidence, and a snapshot that already disagrees is never displaced — the conflict goes to recovery instead.
+
+Snapshots written by versions of this package before that record keeping existed cannot be proven to have been published. They are preserved and their numbers stay reserved, and recovery will offer their content, but it says plainly that it cannot prove they were published rather than merely prepared.
+
+If history on disk runs ahead of the document — after a restore from backup, say, or a document rolled back over work another session had already published — the set stops accepting changes and asks. Attaching the current document records how much history was accounted for, so the next change is numbered above it and the session carries on; the revisions it passed over stay exactly where they were. A restore that is indistinguishable from normal state cannot be detected at all, which is the documented limit rather than a promise.
+
+Durability is fsync-on-the-file before each rename. The containing directory is not fsynced, so what is promised is ordering and no-clobber, not surviving a power loss on a filesystem that reorders directory entries.
 
 ## The session's side
 
@@ -105,8 +119,11 @@ For the human: `show`, `review`, `new`, `archive`, `export <path>`, `recover`. B
 
 - **Resolved proposals are never pruned.** The pending scan reads every file under `proposals/`, and it runs on each read, write, and turn boundary. Proportional to how many revisions a set has ever proposed, not to how many are open. An index or a `resolved/` subdirectory would bound it; that is deferred rather than done here, because it is a storage-layout change and this is not the round for one.
 - **The containing directory is not fsynced after the rename.** The document is fsynced before it; recovery covers the remaining window.
+- **Preparations and their records are never pruned.** Every revision leaves a small JSON record, and an interrupted publication also leaves its candidate bytes. They are what reserve the number and what later proves a publication happened, so nothing here deletes them; a set with a long history accumulates one small file per revision.
+- **A crash during a commit needs one explicit recovery.** The reservation it left is indistinguishable from a publication that landed and was then rolled back, so the set asks rather than guessing. `/tasks recover → attach` clears it and the next change is numbered above the gap.
+- **A concurrent commit can briefly look like that ambiguity.** A session reading in the window between another session's reservation and its rename sees history above the document and asks for recovery. Attaching resolves it; nothing is lost either way.
 - **No live canary.** Every test here mocks `ExtensionAPI`, so nothing in this package proves what a model *chooses* to call, or how the card renders in a real terminal.
-- A line you type into `tasks.md` by hand is preserved verbatim, but it is never promoted to a task — `/tasks recover → attach` keeps it as a note, not as work.
+- A line you type into `tasks.md` by hand is kept as a note and written back in place, but it is never promoted to a task — `/tasks recover → attach` keeps it as text, not as work.
 
 ## Install
 

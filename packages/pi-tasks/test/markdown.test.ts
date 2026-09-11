@@ -125,6 +125,59 @@ test("unrecognised lines are preserved in place across a status-only update", ()
 	assert.match(after, /<!-- a stray comment -->/u);
 });
 
+test("a note keeps its paragraphs, and the document does not grow on every write", () => {
+	const document: TaskDocument = {
+		set: seed(),
+		extras: [
+			{ anchor: { kind: "task", id: "t1" }, text: "First paragraph of the note." },
+			{ anchor: { kind: "task", id: "t1" }, text: "" },
+			{ anchor: { kind: "task", id: "t1" }, text: "Second paragraph, after a blank line." },
+		],
+	};
+	const once = serializeTaskDocument(document);
+	assert.match(once, /First paragraph of the note\.\n\nSecond paragraph, after a blank line\./u);
+
+	// The blank between the paragraphs survives the round trip — it is part of
+	// what the user wrote, not a separator this serializer put there.
+	const parsed = parseOrThrow(once);
+	assert.deepEqual(
+		parsed.extras.map((extra) => extra.text),
+		["First paragraph of the note.", "", "Second paragraph, after a blank line."],
+	);
+
+	// And the separators the serializer emits are not mistaken for content: three
+	// more rounds must produce exactly the same bytes, not a document that gains
+	// a blank line each time.
+	let text = once;
+	for (let round = 0; round < 3; round += 1) {
+		text = serializeTaskDocument(parseOrThrow(text));
+		assert.equal(text, once, `round ${round + 1} changed the document`);
+	}
+});
+
+test("a status-only update leaves an unrelated note's paragraphs exactly as they were", () => {
+	const note = [
+		{ anchor: { kind: "phase", id: "p1" } as const, text: "Why this phase exists:" },
+		{ anchor: { kind: "phase", id: "p1" } as const, text: "" },
+		{ anchor: { kind: "phase", id: "p1" } as const, text: "Because the column has to land first." },
+	];
+	const before = serializeTaskDocument({ set: seed(), extras: note });
+	const parsed = parseOrThrow(before);
+	const changed = applyTaskChanges(parsed.set, [{ op: "start", taskId: "t1" }], {
+		now: NOW,
+		hasExistingSet: true,
+	});
+	assert.ok(changed.ok);
+	const after = serializeTaskDocument({ set: changed.result.set, extras: parsed.extras });
+
+	assert.match(after, /Why this phase exists:\n\nBecause the column has to land first\./u);
+	// The only difference is the status marker and the timestamp metadata.
+	assert.equal(
+		after.replace(/- \[\/\]/u, "- [ ]").replace(/"updatedAt":"[^"]*"/u, '"updatedAt":"x"'),
+		before.replace(/"updatedAt":"[^"]*"/u, '"updatedAt":"x"'),
+	);
+});
+
 test("a note whose task is removed is retained, not silently deleted", () => {
 	const document: TaskDocument = {
 		set: seed(),

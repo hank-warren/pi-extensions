@@ -39,6 +39,13 @@ interface WorkerResult {
 	reason?: string;
 }
 
+/** Only finalized snapshots; preparation records share the directory. */
+function snapshotNames(root: string): string[] {
+	return readdirSync(join(root, SET_ID, "revisions"))
+		.filter((name) => /^\d+\.md$/u.test(name))
+		.sort();
+}
+
 async function commitInChildProcess(
 	root: string,
 	label: string,
@@ -120,7 +127,7 @@ test("two cooperating writers in separate processes: one publishes, one is refus
 		readFileSync(taskDocumentPath(root, SET_ID), "utf8"),
 	);
 	assert.deepEqual(
-		readdirSync(join(root, SET_ID, "revisions")).sort(),
+		snapshotNames(root),
 		["1.md", "2.md"],
 		"the refused writer must not leave a snapshot behind",
 	);
@@ -180,8 +187,5 @@ test("across repeated cross-process races, no acknowledged commit is ever lost",
 		);
 	}
 	assert.equal(new Set(tasks.map((task) => task.id)).size, tasks.length);
-	assert.deepEqual(
-		readdirSync(join(root, SET_ID, "revisions")).sort(),
-		revisions.map((revision) => `${revision}.md`).concat("1.md").sort(),
-	);
+	assert.deepEqual(snapshotNames(root), revisions.map((revision) => `${revision}.md`).concat("1.md").sort());
 });

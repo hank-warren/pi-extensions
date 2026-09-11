@@ -58,15 +58,17 @@ import { createSessionGuard, type GuardScope } from "./session-guard.js";
 import { restoreTasksAttachment, type TasksAttachment } from "./state.js";
 import {
 	commitTaskDocument,
+	findRecoverySnapshot,
+	highestReservedRevision,
+	historyAheadOf,
+	isPublishedRevision,
 	isSafeTaskSetId,
-	latestSnapshot,
 	type LoadedDocument,
 	loadTaskDocument,
-	matchesOwnSnapshot,
 	newTaskSetId,
+	publishExclusively,
 	taskDocumentPath,
 	tasksRootDirectory,
-	writeAtomically,
 } from "./store.js";
 import type { ReviewOutcome } from "./task-menus.js";
 
@@ -90,6 +92,14 @@ export interface RecoveryState {
 	recordedRevision?: number;
 	snapshotRevision?: number;
 	snapshotPath?: string;
+	/** Whether the offered snapshot is provably published or merely retained. */
+	snapshotCertainty?: "published" | "unverified";
+	/**
+	 * Set when history on disk runs ahead of the live document. Attaching the
+	 * current document records this number, which is what lets the session move
+	 * on afterwards instead of meeting the same ambiguity every read.
+	 */
+	historyAhead?: number;
 }
 
 export interface UpdateTasksInput {
@@ -266,32 +276,35 @@ export class TasksController {
 			this.attachment = undefined;
 			return;
 		}
+		// Same identity check every other managed read performs: a document that
+		// names another set must not be adopted, or this session's pointer and its
+		// directory silently disagree.
 		const path = taskDocumentPath(this.root, attachment.taskSetId);
-		const result = await loadTaskDocument(path);
+		const result = await loadTaskDocument(path, attachment.taskSetId);
 		if (!scope.isCurrent()) return;
 		if (result.kind === "missing") {
-			const snapshot = await latestSnapshot(this.root, attachment.taskSetId);
+			const snapshot = await this.snapshotHint(attachment.taskSetId);
 			if (!scope.isCurrent()) return;
 			this.recovery = {
 				reason: "the task document is gone",
 				recordedRevision: attachment.revision,
-				...(snapshot ? { snapshotRevision: snapshot.revision, snapshotPath: snapshot.path } : {}),
+				...snapshot,
 			};
 			ctx.ui.notify(
-				snapshot
-					? `The task document for this session is missing. A snapshot of revision ${snapshot.revision} is on disk; run /tasks recover to choose what to do.`
-					: "The task document for this session is missing and no snapshot was found. Run /tasks recover.",
+				snapshot.snapshotRevision !== undefined
+					? `The task document for this session is missing. A snapshot of revision ${snapshot.snapshotRevision} is on disk; run /tasks recover to choose what to do.`
+					: "The task document for this session is missing and no readable snapshot was found. Run /tasks recover.",
 				"warning",
 			);
 			return;
 		}
 		if (result.kind === "invalid") {
-			const snapshot = await latestSnapshot(this.root, attachment.taskSetId);
+			const snapshot = await this.snapshotHint(attachment.taskSetId);
 			if (!scope.isCurrent()) return;
 			this.recovery = {
 				reason: `the task document is unreadable (${result.reason})`,
 				recordedRevision: attachment.revision,
-				...(snapshot ? { snapshotRevision: snapshot.revision, snapshotPath: snapshot.path } : {}),
+				...snapshot,
 			};
 			ctx.ui.notify(
 				`The task document is unreadable: ${result.reason}. Run /tasks recover.`,
@@ -338,14 +351,31 @@ export class TasksController {
 		attachment: TasksAttachment,
 	): Promise<"same" | "advanced" | "diverged"> {
 		this.loaded = loaded;
+		const revision = loaded.document.set.revision;
+		// Before anything else: does the store hold history above this document?
+		// That means either an interrupted publication or a document restored over
+		// work that was already published — possibly another session's. The two are
+		// not distinguishable from the bytes, so neither is assumed and neither is
+		// called harmless; a human accounts for it once, and that decision is
+		// recorded so the next read does not ask again.
+		const ahead = await historyAheadOf(this.root, attachment.taskSetId, revision);
+		if (ahead !== undefined && (attachment.reconciledThrough ?? -1) < ahead) {
+			this.recovery = {
+				reason: `this task set has history recorded up to revision ${ahead}, but the document is at revision ${revision}; it may have been restored over work that was already published`,
+				documentRevision: revision,
+				recordedRevision: attachment.revision,
+				historyAhead: ahead,
+				...(await this.snapshotHint(attachment.taskSetId)),
+			};
+			return "diverged";
+		}
 		if (loaded.digest === attachment.digest) {
 			this.recovery = undefined;
 			return "same";
 		}
-		const revision = loaded.document.set.revision;
 		if (
 			revision > attachment.revision &&
-			(await matchesOwnSnapshot(this.root, attachment.taskSetId, revision, loaded.digest))
+			(await isPublishedRevision(this.root, attachment.taskSetId, revision, loaded.digest))
 		) {
 			this.recovery = undefined;
 			this.recordAttachment(ctx, loaded);
@@ -406,11 +436,19 @@ export class TasksController {
 		this.refreshUi(ctx);
 	}
 
-	private async snapshotHint(
-		taskSetId: string,
-	): Promise<{ snapshotRevision?: number; snapshotPath?: string }> {
-		const snapshot = await latestSnapshot(this.root, taskSetId);
-		return snapshot ? { snapshotRevision: snapshot.revision, snapshotPath: snapshot.path } : {};
+	private async snapshotHint(taskSetId: string): Promise<{
+		snapshotRevision?: number;
+		snapshotPath?: string;
+		snapshotCertainty?: "published" | "unverified";
+	}> {
+		const snapshot = await findRecoverySnapshot(this.root, taskSetId);
+		return snapshot
+			? {
+					snapshotRevision: snapshot.revision,
+					snapshotPath: snapshot.path,
+					snapshotCertainty: snapshot.certainty,
+				}
+			: {};
 	}
 
 	/**
@@ -485,12 +523,26 @@ export class TasksController {
 		this.pendingProposals = live;
 	}
 
-	private recordAttachment(ctx: ExtensionContext | undefined, loaded: LoadedDocument): boolean {
+	private recordAttachment(
+		ctx: ExtensionContext | undefined,
+		loaded: LoadedDocument,
+		reconciledThrough?: number,
+	): boolean {
+		// A recorded reconciliation is never silently dropped by an ordinary
+		// re-record: once a human has accounted for history above the document, that
+		// stays accounted for until something above it appears.
+		const carried = Math.max(
+			reconciledThrough ?? -1,
+			this.attachment?.taskSetId === loaded.document.set.taskSetId
+				? (this.attachment.reconciledThrough ?? -1)
+				: -1,
+		);
 		this.attachment = {
 			taskSetId: loaded.document.set.taskSetId,
 			revision: loaded.document.set.revision,
 			digest: loaded.digest,
 			recordedAt: this.now(),
+			...(carried >= 0 ? { reconciledThrough: carried } : {}),
 		};
 		return this.appendStateEntry(
 			ctx,
@@ -595,6 +647,37 @@ export class TasksController {
 	}
 
 	private async describeAttached(): Promise<ToolOutcome> {
+		// Attached, but the document could not be read. This is emphatically not
+		// "no task set": the set exists, its snapshots are on disk, and telling the
+		// agent to create a replacement would strand every one of them. The reply
+		// says what is attached, what was recorded, what recovery has to offer, and
+		// that the way out is /tasks recover — not init.
+		if (this.attachment && !this.loaded) {
+			return {
+				payload: {
+					status: "recovery_required",
+					attached: true,
+					taskSetId: this.attachment.taskSetId,
+					recordedRevision: this.attachment.revision,
+					path: taskDocumentPath(this.root, this.attachment.taskSetId),
+					mutationsBlocked: true,
+					recovery: this.recovery?.reason ?? "the task document could not be read",
+					...(this.recovery?.snapshotRevision !== undefined
+						? {
+								recoverySnapshotRevision: this.recovery.snapshotRevision,
+								recoverySnapshotCertainty: this.recovery.snapshotCertainty,
+							}
+						: {}),
+					...(this.recovery?.historyAhead !== undefined
+						? { historyAhead: this.recovery.historyAhead }
+						: {}),
+					recoveryInstruction:
+						"ask the user to run /tasks recover and choose attach or fork. Do not create a replacement set with init, and do not detach: the task set and its recorded revisions are still on disk and recoverable.",
+					...this.attachmentWarning,
+				},
+				isError: true,
+			};
+		}
 		if (!this.attachment || !this.loaded) {
 			return {
 				payload: {
@@ -651,11 +734,13 @@ export class TasksController {
 				"the turn was interrupted before the task set was touched; nothing was changed",
 			);
 		}
+		// Re-read before deciding anything, `init` included: an attached session
+		// whose document is unreadable must hear "recover", not "already attached",
+		// which would send the agent looking for a way to replace a set that is
+		// still on disk and still recoverable.
+		await this.refreshFromDisk(ctx);
 		const isInit = input.changes.some((change) => change.op === "init");
 		if (isInit) return this.initialize(input, scope, ctx);
-		// Re-read before deciding anything: the document this batch will be built on
-		// is the one on disk right now, not the one this session last saw.
-		await this.refreshFromDisk(ctx);
 		if (scope.isStale()) {
 			return fail("cancelled", "the turn was interrupted; the task set was not changed");
 		}
@@ -743,6 +828,13 @@ export class TasksController {
 		if (input.changes.length > 1) {
 			return fail("invalid_change", "init must be the only change in a batch");
 		}
+		if (this.recovery && this.attachment) {
+			return fail(
+				"recovery_required",
+				`task set ${this.attachment.taskSetId} is attached and needs recovery: ${this.recovery.reason}. Ask the user to run /tasks recover and choose attach or fork; a new set would strand the recorded revisions rather than replace them.`,
+				{ taskSetId: this.attachment.taskSetId, mutationsBlocked: true },
+			);
+		}
 		if (this.attachment) {
 			return fail(
 				"already_attached",
@@ -827,8 +919,9 @@ export class TasksController {
 				tasks: applied.result.allocatedTasks,
 				applied: applied.result.applied,
 				...this.attachmentWarning,
-				...(result.retainedOrphanSnapshot
-					? { retainedOrphanSnapshot: result.retainedOrphanSnapshot }
+				...(result.historyPending ? { historyPending: result.historyPending } : {}),
+				...(result.repairedRevision !== undefined
+					? { repairedRevision: result.repairedRevision }
 					: {}),
 			},
 		};
@@ -850,6 +943,9 @@ export class TasksController {
 			expectedDigest: current.digest,
 			now: this.now(),
 			signal: scope.signal,
+			// A document this session explicitly attached through recovery is a
+			// decision already taken; it must not re-block every later write.
+			liveDocumentAuthorized: this.attachment?.reconciledThrough !== undefined,
 		});
 		if (result.kind === "cancelled") {
 			return fail("cancelled", `${result.reason}; the task set is unchanged`);
@@ -898,8 +994,9 @@ export class TasksController {
 				applied: applied.applied,
 				counts: { total: counts.total, open: counts.open, completed: counts.completed },
 				...this.attachmentWarning,
-				...(result.retainedOrphanSnapshot
-					? { retainedOrphanSnapshot: result.retainedOrphanSnapshot }
+				...(result.historyPending ? { historyPending: result.historyPending } : {}),
+				...(result.repairedRevision !== undefined
+					? { repairedRevision: result.repairedRevision }
 					: {}),
 			},
 		};
@@ -943,7 +1040,7 @@ export class TasksController {
 			diff: diffTaskSets(current.document.set, next.set),
 			applied: appliedLines,
 		};
-		await this.publishReplacement(proposal);
+		await this.publishReplacement(proposal, scope);
 		if (scope.isStale()) {
 			// The candidate is on disk and inspectable; nothing was accepted.
 			return {
@@ -973,7 +1070,10 @@ export class TasksController {
 	 * the user with nothing to review and no record of why. Serialized so two
 	 * proposals in one session cannot interleave their transitions.
 	 */
-	private async publishReplacement(proposal: TaskProposal): Promise<void> {
+	private async publishReplacement(
+		proposal: TaskProposal,
+		scope: OperationScope,
+	): Promise<void> {
 		const transition = this.proposalTransition.then(async () => {
 			await writeProposal(this.root, proposal);
 			const superseded = await listPendingProposals(this.root, proposal.taskSetId);
@@ -984,6 +1084,11 @@ export class TasksController {
 					resolutionReason: "a corrected proposal replaced it",
 				});
 			}
+			// Two awaited writes have happened; the session may have detached or
+			// moved to another branch in the meantime. The candidate belongs on disk
+			// either way, but putting it back into this session's state would
+			// re-arm a review for a set the user walked away from.
+			if (scope.isStale() || this.attachment?.taskSetId !== proposal.taskSetId) return;
 			this.pendingProposals = [proposal];
 		});
 		this.proposalTransition = transition.then(
@@ -1094,6 +1199,35 @@ export class TasksController {
 				{ proposalId: proposal.proposalId },
 			);
 		}
+		// Publication is a mutation, so it is gated exactly like one. The state is
+		// re-read and re-classified first: a card can be older than the conflict it
+		// is about to publish through, and when the conflict is a rollback to this
+		// proposal's own base, the digest check below would sail straight past it.
+		await this.refreshFromDisk(ctx);
+		if (scope.isStale()) {
+			return fail(
+				"cancelled",
+				"the turn was interrupted before the proposal could be published; it is still on file and unapproved",
+				{ proposalId: proposal.proposalId },
+			);
+		}
+		if (this.recovery) {
+			return fail(
+				"recovery_required",
+				`the task document needs recovery before anything can be published: ${this.recovery.reason}. Ask the user to run /tasks recover; the proposal is kept on file and unapproved.`,
+				{ proposalId: proposal.proposalId, mutationsBlocked: true },
+			);
+		}
+		// A proposal only ever publishes into the set this session is attached to.
+		// Publishing into an abandoned set would also silently re-attach the session
+		// to it, which is the opposite of what walking away meant.
+		if (!this.attachment || this.attachment.taskSetId !== proposal.taskSetId) {
+			return fail(
+				"wrong_task_set",
+				`this proposal belongs to task set ${proposal.taskSetId}, which this session is no longer attached to; it was not published and is kept on file.`,
+				{ proposalId: proposal.proposalId, attachedTaskSetId: this.attachment?.taskSetId },
+			);
+		}
 		// The card in hand may be older than the directory. Identity and status are
 		// re-read from disk before anything is published, so a card left over from a
 		// superseded round, a cancelled one, or one already accepted cannot publish
@@ -1163,6 +1297,7 @@ export class TasksController {
 			expectedDigest: proposal.baseDigest,
 			now: this.now(),
 			signal: scope.signal,
+			liveDocumentAuthorized: this.attachment?.reconciledThrough !== undefined,
 		});
 		if (result.kind === "cancelled") {
 			return fail("cancelled", `${result.reason}; the proposal is still on file and unapproved`, {
@@ -1218,8 +1353,9 @@ export class TasksController {
 				revision: result.revision,
 				applied: proposal.applied,
 				...this.attachmentWarning,
-				...(result.retainedOrphanSnapshot
-					? { retainedOrphanSnapshot: result.retainedOrphanSnapshot }
+				...(result.historyPending ? { historyPending: result.historyPending } : {}),
+				...(result.repairedRevision !== undefined
+					? { repairedRevision: result.repairedRevision }
 					: {}),
 			},
 		};
@@ -1254,6 +1390,16 @@ export class TasksController {
 	}
 
 	async reviewPending(ctx: ExtensionContext): Promise<void> {
+		// The command is another door to the same decision, so it meets the same
+		// gate: classify first, and refuse to open a card that could not be acted on.
+		await this.refreshFromDisk(ctx);
+		if (this.recovery) {
+			ctx.ui.notify(
+				`The task document needs recovery before a revision can be accepted: ${this.recovery.reason}. Run /tasks recover first; the proposal is kept on file.`,
+				"warning",
+			);
+			return;
+		}
 		// Newest, not oldest: after a corrected proposal the older candidate is the
 		// one the user rejected, and reopening it would offer exactly the content
 		// they asked to change. `refreshProposals` normally leaves only one.
@@ -1333,6 +1479,7 @@ export class TasksController {
 			},
 			expectedDigest: this.loaded.digest,
 			now,
+			liveDocumentAuthorized: this.attachment?.reconciledThrough !== undefined,
 		});
 		if (result.kind !== "committed") {
 			ctx.ui.notify(`Unable to archive the task set: ${result.reason}`, "error");
@@ -1351,6 +1498,17 @@ export class TasksController {
 	 * clobbers something is a worse outcome than an export that asks again.
 	 */
 	async exportTasks(destination: string, ctx: ExtensionContext): Promise<boolean> {
+		// Read before writing: an export is a claim about what the list currently
+		// is, and exporting a cached document that no longer exists on disk would
+		// be that claim quietly becoming false.
+		await this.refreshFromDisk(ctx);
+		if (this.recovery) {
+			ctx.ui.notify(
+				`The task document needs recovery, so there is no current list to export: ${this.recovery.reason}. Run /tasks recover first.`,
+				"warning",
+			);
+			return false;
+		}
 		if (!this.loaded) {
 			ctx.ui.notify("No task set is attached to export.", "warning");
 			return false;
@@ -1360,19 +1518,22 @@ export class TasksController {
 			ctx.ui.notify(resolved.error, "warning");
 			return false;
 		}
-		const existing = await loadTaskDocument(resolved.path);
-		if (existing.kind !== "missing") {
-			ctx.ui.notify(`${resolved.path} already exists. Choose another path.`, "warning");
-			return false;
-		}
+		let published: boolean;
 		try {
-			await writeAtomically(
+			// Exclusive publication, not check-then-write: a destination that appears
+			// between the two would be replaced by a plain rename, which is exactly
+			// the promise an export must not break.
+			published = await publishExclusively(
 				resolved.path,
 				`# Tasks\n\n${formatTaskSetMarkdown(this.loaded.document.set)}\n`,
 			);
 		} catch (error: unknown) {
 			const detail = error instanceof Error ? error.message : String(error);
 			ctx.ui.notify(`Unable to export the task list: ${detail}`, "error");
+			return false;
+		}
+		if (!published) {
+			ctx.ui.notify(`${resolved.path} already exists. Choose another path.`, "warning");
 			return false;
 		}
 		ctx.ui.notify(`Task list exported to ${resolved.path}.`, "info");
@@ -1396,13 +1557,21 @@ export class TasksController {
 			);
 			return;
 		}
+		// This is the explicit decision the ambiguity was waiting for. Recording
+		// how much history the user was told about is what makes it stick: without
+		// it the next read would raise the same "history runs ahead" conflict and
+		// the session could never move again.
+		const reconciledThrough = await highestReservedRevision(this.root, taskSetId);
 		this.loaded = current.loaded;
 		this.recovery = undefined;
 		await this.refreshProposals(ctx, taskSetId, current.loaded.digest);
-		this.recordAttachment(ctx, current.loaded);
+		this.recordAttachment(ctx, current.loaded, reconciledThrough);
 		this.refreshUi(ctx);
+		const revision = current.loaded.document.set.revision;
 		ctx.ui.notify(
-			`Attached to the task document as it stands, at revision ${current.loaded.document.set.revision}.`,
+			reconciledThrough > revision
+				? `Attached to the task document as it stands, at revision ${revision}. Revisions up to ${reconciledThrough} stay on disk and are not reverted; the next change will be numbered above them.`
+				: `Attached to the task document as it stands, at revision ${revision}.`,
 			"info",
 		);
 	}
@@ -1415,12 +1584,19 @@ export class TasksController {
 	 * overwritten by this session's idea of history.
 	 */
 	async recoverForkSnapshot(ctx: ExtensionContext): Promise<void> {
-		const snapshotPath = this.recovery?.snapshotPath;
-		if (!snapshotPath) {
-			ctx.ui.notify("No snapshot is available to fork.", "warning");
+		const taskSetId = this.attachment?.taskSetId ?? this.loaded?.document.set.taskSetId;
+		// Re-resolve rather than trusting the hint the conflict was raised with:
+		// it may be stale, and this walks down past corrupt candidates to the
+		// newest one that actually parses for this set.
+		const candidate = taskSetId ? await findRecoverySnapshot(this.root, taskSetId) : undefined;
+		if (!candidate) {
+			ctx.ui.notify(
+				"No readable snapshot is available to fork. Nothing on disk was changed.",
+				"warning",
+			);
 			return;
 		}
-		const snapshot = await loadTaskDocument(snapshotPath);
+		const snapshot = await loadTaskDocument(candidate.path, taskSetId);
 		if (snapshot.kind !== "loaded") {
 			ctx.ui.notify("The snapshot could not be read.", "warning");
 			return;
@@ -1470,7 +1646,11 @@ export class TasksController {
 		this.recordAttachment(ctx, this.loaded);
 		this.refreshUi(ctx);
 		ctx.ui.notify(
-			`Forked the recorded snapshot into task set ${forked.taskSetId}. The previous document is untouched.`,
+			`Forked revision ${candidate.revision}${
+				candidate.certainty === "published"
+					? ""
+					: " (a retained snapshot this package cannot prove it published)"
+			} into task set ${forked.taskSetId}. The previous document is untouched.`,
 			"info",
 		);
 	}

@@ -18,6 +18,17 @@ export interface TasksAttachment {
 	revision: number;
 	digest: string;
 	recordedAt: string;
+	/**
+	 * The highest revision number this session has been told about and has
+	 * explicitly accounted for.
+	 *
+	 * Set when a human resolves an ambiguity — history on disk running ahead of
+	 * the live document, which means the document may have been restored over
+	 * work that was already published. Without it, "attach the document as it
+	 * stands" would be re-blocked by the same ambiguity on the very next read and
+	 * the session could never make progress again.
+	 */
+	reconciledThrough?: number;
 }
 
 type SessionEntry = {
@@ -54,10 +65,14 @@ function parseAttachment(value: unknown): TasksAttachment | undefined {
 	const digest = data.digest;
 	if (!Number.isSafeInteger(revision) || (revision as number) < 0) return undefined;
 	if (typeof digest !== "string" || !/^[0-9a-f]{64}$/u.test(digest)) return undefined;
+	const reconciledThrough = data.reconciledThrough;
 	return {
 		taskSetId,
 		revision: revision as number,
 		digest,
 		recordedAt: typeof data.recordedAt === "string" ? data.recordedAt : "",
+		...(Number.isSafeInteger(reconciledThrough) && (reconciledThrough as number) >= 0
+			? { reconciledThrough: reconciledThrough as number }
+			: {}),
 	};
 }

@@ -167,8 +167,14 @@ export function tasksMenuScreen(
 					{
 						id: "review",
 						label: "Review the proposed revision",
-						description: "Accept it, ask for changes, or cancel it.",
+						// Greyed out during a conflict because accepting it would be
+						// refused anyway; the refusal itself lives in the controller, so
+						// this is a courtesy rather than the guard.
+						description: state.needsRecovery
+							? "Unavailable until the task document conflict is recovered."
+							: "Accept it, ask for changes, or cancel it.",
 						action: "review" as const,
+						disabled: state.needsRecovery,
 					},
 				]
 			: []),

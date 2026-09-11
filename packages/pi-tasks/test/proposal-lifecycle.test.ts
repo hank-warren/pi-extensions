@@ -204,6 +204,58 @@ test("two pending candidates left by an interrupted transition converge on the n
 	assert.ok(retired?.proposedDocument.length);
 });
 
+test("a detach during the proposal write leaves no candidate behind in the session", async (t) => {
+	let harness: TasksHarness | undefined;
+	let detached = false;
+	harness = await seeded({
+		onTimestamp: () => {
+			// Fires inside the clock the proposal consults, so the session detaches
+			// while `publishReplacement` still has two awaited writes to go.
+			if (detached || !harness?.controller.attachedSet) return;
+			detached = true;
+			void harness.controller.startNew(harness.ctx);
+		},
+	});
+	t.after(() => harness?.cleanup());
+
+	const before = documentText(harness);
+	const result = await updateTasks(harness, CORRECTED);
+	assert.equal(detached, true, "the race must actually have been run");
+	// The candidate belongs on disk — nothing the agent drafted is thrown away —
+	// but it must not re-arm a review for a set the user walked away from.
+	assert.equal((await listProposals(harness.root, FIRST_SET)).length, 1);
+	assert.deepEqual(harness.controller.pending, []);
+	assert.equal(harness.controller.attachedSet, undefined);
+	assert.equal(result.payload.status, "pending_review");
+
+	// And the card that would have been contaminated cannot publish into the
+	// abandoned set, nor silently re-attach the session to it.
+	const orphaned = (await listProposals(harness.root, FIRST_SET))[0];
+	assert.ok(orphaned);
+	const refused = await harness.controller.acceptProposal(orphaned, harness.ctx);
+	assert.equal(refused.isError, true);
+	assert.equal(refused.payload.status, "wrong_task_set");
+	assert.equal(harness.controller.attachedSet, undefined, "no silent reattachment");
+	assert.equal(documentText(harness), before, "the abandoned set is untouched");
+});
+
+test("a proposal cannot publish into a set this session has left", async (t) => {
+	const harness = await seeded({ reviews: [{ kind: "dismissed" }] });
+	t.after(harness.cleanup);
+	await updateTasks(harness, CORRECTED);
+	const pending = (await listProposals(harness.root, FIRST_SET))[0];
+	assert.ok(pending);
+	const before = documentText(harness);
+
+	await harness.controller.startNew(harness.ctx);
+	const refused = await harness.controller.acceptProposal(pending, harness.ctx);
+	assert.equal(refused.isError, true);
+	assert.equal(refused.payload.status, "wrong_task_set");
+	assert.equal(refused.payload.attachedTaskSetId, undefined);
+	assert.equal(documentText(harness), before, "the abandoned set is untouched");
+	assert.equal(harness.controller.attachedSet, undefined);
+});
+
 test("an obsolete candidate never blocks the prompt or the widget forever", async (t) => {
 	const harness = await seeded({ reviews: [{ kind: "dismissed" }] });
 	t.after(harness.cleanup);

@@ -181,28 +181,43 @@ export function parseTaskDocument(text: string): ParseResult {
 	const seenTaskIds = new Set<string>();
 	let anchor: ExtraAnchor = { kind: "start" };
 	let currentPhase: Phase | undefined;
+	/**
+	 * Blank lines are held until the next line says what they were.
+	 *
+	 * A blank between two lines of someone's note is part of the note — dropping
+	 * it collapses their paragraphs into one. A blank before a heading or a task
+	 * is a separator this serializer emitted itself, and keeping it would grow the
+	 * document by one line on every write. Only the first kind is flushed.
+	 */
+	let pendingBlanks: string[] = [];
 
 	for (const rawLine of lines) {
 		const line = rawLine.trimEnd();
 		// Our own marker for retained orphans: structural, so it is regenerated on
 		// each write rather than kept as an extra that would re-emit a second copy.
-		if (line.trim() === ORPHANED_EXTRAS_HEADING) continue;
+		if (line.trim() === ORPHANED_EXTRAS_HEADING) {
+			pendingBlanks = [];
+			continue;
+		}
 		const metadataMatch = METADATA_RE.exec(line.trim());
 		if (metadataMatch) {
 			if (metadata) return { ok: false, error: "document has more than one metadata comment" };
 			const parsed = parseMetadata(metadataMatch[1], metadataMatch[2]);
 			if (!parsed.ok) return parsed;
 			metadata = parsed.metadata;
+			pendingBlanks = [];
 			continue;
 		}
 		if (!sawTitle && TITLE_RE.test(line)) {
 			// The title is derived from the label on every write, so the original
 			// line is not kept as an extra; keeping it would duplicate the heading.
 			sawTitle = true;
+			pendingBlanks = [];
 			continue;
 		}
 		const phaseMatch = PHASE_RE.exec(line);
 		if (phaseMatch) {
+			pendingBlanks = [];
 			const name = phaseMatch[1]?.trim() ?? "";
 			const id = phaseMatch[2] ?? "";
 			if (!name) return { ok: false, error: `phase ${id} has no name` };
@@ -215,6 +230,7 @@ export function parseTaskDocument(text: string): ParseResult {
 		}
 		const taskMatch = TASK_RE.exec(line);
 		if (taskMatch) {
+			pendingBlanks = [];
 			if (!currentPhase) return { ok: false, error: `task ${taskMatch[3]} appears before any phase` };
 			const marker = taskMatch[1] ?? "";
 			const content = taskMatch[2]?.trim() ?? "";
@@ -239,7 +255,12 @@ export function parseTaskDocument(text: string): ParseResult {
 			anchor = { kind: "task", id };
 			continue;
 		}
-		if (line.trim() === "") continue;
+		if (line.trim() === "") {
+			pendingBlanks.push("");
+			continue;
+		}
+		for (const blank of pendingBlanks) extras.push({ anchor, text: blank });
+		pendingBlanks = [];
 		extras.push({ anchor, text: rawLine });
 	}
 

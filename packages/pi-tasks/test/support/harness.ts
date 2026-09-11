@@ -38,6 +38,14 @@ export interface TasksHarnessOptions {
 	 * replacement, an answer that arrives too late.
 	 */
 	onReview?: (summary: ReviewRequest, index: number) => ReviewOutcome | Promise<ReviewOutcome>;
+	/**
+	 * Runs synchronously inside the controller's clock, which every mutation
+	 * consults before it starts writing. It is the one deterministic way to make
+	 * something happen *between* a controller's decision and its awaited writes,
+	 * which is where the detach/proposal race lives — a timer or a microtask
+	 * would only reproduce it sometimes.
+	 */
+	onTimestamp?: (index: number) => void;
 	branch?: unknown[];
 	idle?: boolean;
 	/**
@@ -112,6 +120,7 @@ export function createTasksHarness(options: TasksHarnessOptions = {}): TasksHarn
 
 	let clock = 0;
 	let nextId = 0;
+	let timestampCalls = 0;
 
 	const pi = mock.pi as ExtensionAPI;
 	const ctx = context.ctx as ExtensionContext;
@@ -119,6 +128,7 @@ export function createTasksHarness(options: TasksHarnessOptions = {}): TasksHarn
 		root,
 		now: () => {
 			clock += 1;
+			options.onTimestamp?.(timestampCalls++);
 			return new Date(Date.UTC(2026, 0, 1, 0, 0, clock)).toISOString();
 		},
 		newTaskSetId: () => {
