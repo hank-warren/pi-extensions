@@ -441,10 +441,68 @@ export type CommitResult =
 			historyPending?: string;
 			/** Set when this commit finished a previous interrupted publication. */
 			repairedRevision?: number;
+			/** Set when the lock lease was lost at some point during the commit. */
+			lockCompromised?: string;
 		}
 	| { kind: "conflict"; reason: string }
+	| {
+			/**
+			 * The live document cannot be accounted for: neither a finalized snapshot
+			 * nor a preparation record explains the bytes it holds.
+			 *
+			 * Its own outcome rather than a `conflict`, because the two need opposite
+			 * answers. A conflict means "read again and rebuild the batch", which here
+			 * would loop forever — rebuilding cannot produce evidence that does not
+			 * exist. This needs a human to look at the document and say what it is.
+			 */
+			kind: "unaccountable";
+			reason: string;
+			revision: number;
+		}
 	| { kind: "cancelled"; reason: string }
 	| { kind: "failed"; reason: string };
+
+/**
+ * Ownership of the cross-process lock, and whether it is still ours.
+ *
+ * `proper-lockfile` refreshes the lock on a timer and calls `onCompromised`
+ * when a refresh finds the lockfile gone or owned by someone else. Its default
+ * handler *throws from inside that timer*, which is an `uncaughtException`, and
+ * Pi's interactive mode turns those into `process.exit(1)`. So a session that
+ * merely stalls past the stale window — a laptop sleeping, a suspended process,
+ * a slow agent dir — while a cooperating session legitimately reclaims the lock
+ * would kill the user's editor. Recording the loss instead is the whole point
+ * of installing a handler.
+ *
+ * Suppressing the throw is not sufficient on its own: a commit that keeps
+ * writing after its lease is gone is exactly the concurrency hazard the lock
+ * exists to prevent. So the loss is *observable*, and the commit re-checks it
+ * after every await that could span the timer, refusing to publish once the
+ * lease is known lost.
+ *
+ * What this cannot be is fencing. The check and the write are not atomic, so a
+ * lease that is lost in the instant between them is not caught, and nothing
+ * here stops a writer that never takes the lock at all. It narrows a real crash
+ * and a real write-without-ownership window; it is not a distributed lock.
+ */
+export interface LockLease {
+	/** Passed straight to `proper-lockfile`; never throws. */
+	onCompromised(error: Error): void;
+	/** True once the lease is known lost. Never becomes false again. */
+	isLost(): boolean;
+	lostReason(): string | undefined;
+}
+
+export function createLockLease(): LockLease {
+	let lost: string | undefined;
+	return {
+		onCompromised(error: Error) {
+			lost ??= describe(error);
+		},
+		isLost: () => lost !== undefined,
+		lostReason: () => lost,
+	};
+}
 
 /**
  * Publish one revision: reserve, prepare, publish, finalize.
@@ -472,6 +530,11 @@ export async function commitTaskDocument(input: CommitInput): Promise<CommitResu
 	return serializePath(path, async () => {
 		const directory = taskSetDirectory(root, taskSetId);
 		await mkdir(join(directory, REVISIONS_DIRECTORY), { recursive: true });
+		// Created before `lock()` so a compromise reported while the acquisition
+		// promise is still settling is recorded rather than lost.
+		const lease = createLockLease();
+		const leaseLost = () =>
+			`the task lock for ${taskSetId} was lost before the change was published (${lease.lostReason()}); nothing was written`;
 		let release: (() => Promise<void>) | undefined;
 		try {
 			release = await lock(path, {
@@ -479,6 +542,7 @@ export async function commitTaskDocument(input: CommitInput): Promise<CommitResu
 				lockfilePath: join(directory, LOCK_NAME),
 				stale: LOCK_STALE_MS,
 				retries: LOCK_RETRIES,
+				onCompromised: lease.onCompromised,
 			});
 		} catch (error: unknown) {
 			return {
@@ -493,6 +557,9 @@ export async function commitTaskDocument(input: CommitInput): Promise<CommitResu
 			if (signal?.aborted) {
 				return { kind: "cancelled", reason: "the turn was interrupted before anything was written" };
 			}
+			// Lost between acquisition and here: another process already owns the
+			// lock, so this commit has no standing to read-modify-write behind it.
+			if (lease.isLost()) return { kind: "conflict", reason: leaseLost() };
 			const current = await loadTaskDocument(path, taskSetId);
 			if (expectedDigest === undefined && current.kind !== "missing") {
 				return {
@@ -522,10 +589,15 @@ export async function commitTaskDocument(input: CommitInput): Promise<CommitResu
 				const repair = await repairMissingSnapshot(root, taskSetId, current.loaded);
 				if (repair.kind === "failed") return repair.result;
 				if (repair.kind === "unaccountable" && !liveDocumentAuthorized) {
-					return { kind: "conflict", reason: repair.reason };
+					return {
+						kind: "unaccountable",
+						reason: repair.reason,
+						revision: current.loaded.document.set.revision,
+					};
 				}
 				if (repair.kind === "repaired") repairedRevision = repair.revision;
 			}
+			if (lease.isLost()) return { kind: "conflict", reason: leaseLost() };
 
 			// Past everything ever reserved, never merely past the live document: a
 			// number consumed by an interrupted or rolled-back publication stays
@@ -543,18 +615,40 @@ export async function commitTaskDocument(input: CommitInput): Promise<CommitResu
 			const digest = digestOf(raw);
 			const prepared = await prepareRevision(root, taskSetId, revision, raw, digest, now);
 			if (prepared.kind !== "ok") return prepared.result;
+			// Last check before the rename. Publishing on a lease already known lost
+			// is the write this handler exists to prevent; the reservation stays
+			// consumed, which is what reservations are for.
+			if (lease.isLost()) return { kind: "conflict", reason: leaseLost() };
 
 			// The publication boundary. Nothing below may report "not applied".
 			await writeAtomically(path, raw);
 
-			const finalized = await finalizeRevision(root, taskSetId, revision, prepared.candidatePath);
+			// A loss noticed from here on cannot un-publish anything, so it is
+			// reported, not pretended away. Finalization is skipped rather than run
+			// without a lease: the preparation record still matches the live bytes,
+			// so the next commit repairs the history entry on evidence.
+			const lostAfterPublication = lease.isLost();
+			const finalized = lostAfterPublication
+				? false
+				: await finalizeRevision(root, taskSetId, revision, prepared.candidatePath);
 			return {
 				kind: "committed",
 				revision,
 				digest,
 				raw,
 				path,
-				...(finalized ? {} : { historyPending: `revision ${revision} was published, but its history entry under revisions/ could not be written` }),
+				...(finalized
+					? {}
+					: {
+							historyPending: lostAfterPublication
+								? `revision ${revision} was published, but the task lock was lost before its history entry could be written; the next change repairs it`
+								: `revision ${revision} was published, but its history entry under revisions/ could not be written`,
+						}),
+				...(lostAfterPublication
+					? {
+							lockCompromised: `the task lock was lost after revision ${revision} was published (${lease.lostReason()}); the change is live and must not be retried`,
+						}
+					: {}),
 				...(repairedRevision !== undefined ? { repairedRevision } : {}),
 			};
 		} catch (error: unknown) {

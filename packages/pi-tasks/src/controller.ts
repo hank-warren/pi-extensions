@@ -90,6 +90,12 @@ export interface RecoveryState {
 	reason: string;
 	documentRevision?: number;
 	recordedRevision?: number;
+	/**
+	 * The document itself cannot be explained, as opposed to merely disagreeing
+	 * with this session's pointer. Attaching it is a decision to adopt bytes this
+	 * package did not publish, so the authorization it grants is scoped to them.
+	 */
+	unaccountable?: boolean;
 	snapshotRevision?: number;
 	snapshotPath?: string;
 	/** Whether the offered snapshot is provably published or merely retained. */
@@ -314,7 +320,7 @@ export class TasksController {
 		}
 
 		const outcome = await this.adopt(ctx, result.loaded, attachment);
-		if (!scope.isCurrent()) return;
+		if (outcome === "stale" || !scope.isCurrent()) return;
 		await this.loadProposals(ctx, attachment.taskSetId, result.loaded, outcome);
 		if (!scope.isCurrent()) return;
 		if (outcome === "advanced") {
@@ -349,7 +355,13 @@ export class TasksController {
 		ctx: ExtensionContext,
 		loaded: LoadedDocument,
 		attachment: TasksAttachment,
-	): Promise<"same" | "advanced" | "diverged"> {
+	): Promise<"same" | "advanced" | "diverged" | "stale"> {
+		// Every assignment below is guarded by this, because each await here can
+		// span a detach, a tree navigation or a session replacement, and writing
+		// this attachment's conclusions onto whatever replaced it is how a session
+		// with no task set ends up latched in someone else's recovery state.
+		const stillMine = () => this.attachment === attachment;
+		if (!stillMine()) return "stale";
 		this.loaded = loaded;
 		const revision = loaded.document.set.revision;
 		// Before anything else: does the store hold history above this document?
@@ -359,17 +371,46 @@ export class TasksController {
 		// called harmless; a human accounts for it once, and that decision is
 		// recorded so the next read does not ask again.
 		const ahead = await historyAheadOf(this.root, attachment.taskSetId, revision);
+		if (!stillMine()) return "stale";
 		if (ahead !== undefined && (attachment.reconciledThrough ?? -1) < ahead) {
+			const hint = await this.snapshotHint(attachment.taskSetId);
+			if (!stillMine()) return "stale";
 			this.recovery = {
 				reason: `this task set has history recorded up to revision ${ahead}, but the document is at revision ${revision}; it may have been restored over work that was already published`,
 				documentRevision: revision,
 				recordedRevision: attachment.revision,
 				historyAhead: ahead,
-				...(await this.snapshotHint(attachment.taskSetId)),
+				...hint,
 			};
 			return "diverged";
 		}
 		if (loaded.digest === attachment.digest) {
+			// The document is exactly what this session last accepted, so nothing has
+			// *changed* — but can the store still account for it? A set whose snapshot
+			// and preparation record were both lost looks perfectly healthy from the
+			// pointer alone, which is how it used to read `ok` to every caller while
+			// refusing every write with advice that could never work. Asking the
+			// question the store asks, here, is what makes the answer survive a turn
+			// refresh and a restart rather than living in one commit's return value.
+			const accounted = await isPublishedRevision(
+				this.root,
+				attachment.taskSetId,
+				revision,
+				loaded.digest,
+			);
+			if (!stillMine()) return "stale";
+			if (!accounted && !this.documentAuthorized(loaded)) {
+				const hint = await this.snapshotHint(attachment.taskSetId);
+				if (!stillMine()) return "stale";
+				this.recovery = {
+					reason: `this package has no record of publishing revision ${revision} of this task set — neither a snapshot nor a preparation record explains what the document contains`,
+					documentRevision: revision,
+					recordedRevision: attachment.revision,
+					unaccountable: true,
+					...hint,
+				};
+				return "diverged";
+			}
 			this.recovery = undefined;
 			return "same";
 		}
@@ -377,10 +418,13 @@ export class TasksController {
 			revision > attachment.revision &&
 			(await isPublishedRevision(this.root, attachment.taskSetId, revision, loaded.digest))
 		) {
+			if (!stillMine()) return "stale";
 			this.recovery = undefined;
 			this.recordAttachment(ctx, loaded);
 			return "advanced";
 		}
+		const hint = await this.snapshotHint(attachment.taskSetId);
+		if (!stillMine()) return "stale";
 		this.recovery = {
 			reason:
 				revision < attachment.revision
@@ -388,7 +432,7 @@ export class TasksController {
 					: "the document was modified outside this package",
 			documentRevision: revision,
 			recordedRevision: attachment.revision,
-			...(await this.snapshotHint(attachment.taskSetId)),
+			...hint,
 		};
 		return "diverged";
 	}
@@ -409,17 +453,30 @@ export class TasksController {
 		);
 		if (this.attachment !== attachment) return;
 		if (result.kind !== "loaded") {
+			// The cached document is now a claim about a file that is gone or
+			// unreadable. Dropping it is what stops `get_tasks` from answering with a
+			// revision, a digest and a task list for something that no longer exists;
+			// the recovery reply needs no cache, and every mutation path is already
+			// gated on `this.recovery`.
+			this.loaded = undefined;
+			const hint = await this.snapshotHint(attachment.taskSetId);
+			// The awaits above can span a detach or a session replacement; without
+			// this the recovery state lands on whatever attachment replaced it, where
+			// it is sticky and blocks a session that has no task set at all.
+			if (this.attachment !== attachment) return;
 			this.recovery = {
 				reason:
 					result.kind === "missing"
 						? "the task document is gone"
 						: `the task document is unreadable (${result.reason})`,
 				recordedRevision: attachment.revision,
-				...(await this.snapshotHint(attachment.taskSetId)),
+				...hint,
 			};
 		} else {
 			const outcome = await this.adopt(ctx, result.loaded, attachment);
+			if (outcome === "stale" || this.attachment !== attachment) return;
 			await this.loadProposals(ctx, attachment.taskSetId, result.loaded, outcome);
+			if (this.attachment !== attachment) return;
 			if (outcome === "advanced") {
 				ctx.ui.notify(
 					`The task set advanced to revision ${result.loaded.document.set.revision} elsewhere; this session is now following it.`,
@@ -429,7 +486,7 @@ export class TasksController {
 		}
 		if (this.recovery && !hadRecovery) {
 			ctx.ui.notify(
-				`The task document changed outside this package (${this.recovery.reason}). Task changes are paused until /tasks recover.`,
+				`${this.recovery.reason}. Task changes are paused until /tasks recover.`,
 				"warning",
 			);
 		}
@@ -465,7 +522,11 @@ export class TasksController {
 		outcome: "same" | "advanced" | "diverged",
 	): Promise<void> {
 		if (outcome === "diverged") {
-			this.pendingProposals = await listPendingProposals(this.root, taskSetId);
+			const pending = await listPendingProposals(this.root, taskSetId);
+			// The read spans an await, so the candidates are only adopted if this is
+			// still the set they belong to.
+			if (this.attachment?.taskSetId !== taskSetId) return;
+			this.pendingProposals = pending;
 			return;
 		}
 		await this.refreshProposals(ctx, taskSetId, loaded.digest);
@@ -514,6 +575,10 @@ export class TasksController {
 				resolutionReason: entry.reason,
 			});
 		}
+		// Retiring candidates on disk is correct whoever this session is now
+		// attached to, but the in-memory list and the notice belong to the set this
+		// ran for; a detach during those writes must not repopulate a review here.
+		if (this.attachment?.taskSetId !== taskSetId) return;
 		if (stale.length > 0 && live.length === 0 && ctx) {
 			ctx.ui.notify(
 				`${stale.length} proposed task revision(s) can no longer be published (${stale[0]?.reason}); they are kept on file and no longer awaiting review.`,
@@ -523,26 +588,81 @@ export class TasksController {
 		this.pendingProposals = live;
 	}
 
+	/**
+	 * Whether the user has explicitly accounted for exactly this document.
+	 *
+	 * Exactly: same set, same revision, same bytes. The previous rule — "this
+	 * attachment has a reconciliation recorded" — made one `/tasks recover →
+	 * attach` a permanent licence to publish on top of anything unexplained for
+	 * the rest of the branch, which is a standing bypass wearing a decision's
+	 * clothes.
+	 */
+	/**
+	 * Turn the store's "I cannot account for this document" outcome into the same
+	 * recovery state every other path uses.
+	 *
+	 * Without this the outcome arrived as a plain conflict, whose advice — read
+	 * again and rebuild the batch — can never succeed, because no amount of
+	 * re-reading produces evidence that is not on disk. `/tasks recover` then said
+	 * there was nothing to recover, and the only way out was abandoning the set.
+	 * The classification in `adopt` is what makes this survive a refresh and a
+	 * restart; this is the write path reaching the same conclusion immediately.
+	 */
+	private async enterUnaccountableRecovery(
+		ctx: ExtensionContext,
+		taskSetId: string,
+		result: { reason: string; revision: number },
+	): Promise<ToolOutcome> {
+		const hint = await this.snapshotHint(taskSetId);
+		this.recovery = {
+			reason: result.reason,
+			documentRevision: result.revision,
+			...(this.attachment ? { recordedRevision: this.attachment.revision } : {}),
+			unaccountable: true,
+			...hint,
+		};
+		this.refreshUi(ctx);
+		return fail(
+			"recovery_required",
+			`${result.reason}. Ask the user to run /tasks recover and choose attach or fork; the task set and its recorded revisions are still on disk. Do not create a replacement set and do not detach.`,
+			{ mutationsBlocked: true, documentRevision: result.revision },
+		);
+	}
+
+	private documentAuthorized(loaded: LoadedDocument | undefined): boolean {
+		const authorized = this.attachment?.authorizedDocument;
+		if (!authorized || !loaded) return false;
+		return (
+			authorized.taskSetId === loaded.document.set.taskSetId &&
+			authorized.revision === loaded.document.set.revision &&
+			authorized.digest === loaded.digest
+		);
+	}
+
 	private recordAttachment(
 		ctx: ExtensionContext | undefined,
 		loaded: LoadedDocument,
-		reconciledThrough?: number,
+		options: { reconciledThrough?: number; authorizedDocument?: TasksAttachment["authorizedDocument"] } = {},
 	): boolean {
 		// A recorded reconciliation is never silently dropped by an ordinary
 		// re-record: once a human has accounted for history above the document, that
 		// stays accounted for until something above it appears.
 		const carried = Math.max(
-			reconciledThrough ?? -1,
+			options.reconciledThrough ?? -1,
 			this.attachment?.taskSetId === loaded.document.set.taskSetId
 				? (this.attachment.reconciledThrough ?? -1)
 				: -1,
 		);
+		// The authorization is *not* carried. It belongs to the document it was
+		// granted for; re-recording means the state moved, and a decision about the
+		// old bytes is not a decision about the new ones. Only recovery grants it.
 		this.attachment = {
 			taskSetId: loaded.document.set.taskSetId,
 			revision: loaded.document.set.revision,
 			digest: loaded.digest,
 			recordedAt: this.now(),
 			...(carried >= 0 ? { reconciledThrough: carried } : {}),
+			...(options.authorizedDocument ? { authorizedDocument: options.authorizedDocument } : {}),
 		};
 		return this.appendStateEntry(
 			ctx,
@@ -688,6 +808,36 @@ export class TasksController {
 				},
 			};
 		}
+		// Readable, but the session cannot write to it. Saying `ok` here and hiding
+		// the conflict in a nested field made the one word the caller keys on the
+		// least accurate part of the reply. The list is real and still worth
+		// returning — what goes away is `updateRequires`, because a batch built from
+		// it would be refused, and offering it invites exactly that.
+		if (this.recovery) {
+			return {
+				payload: {
+					status: "recovery_required",
+					attached: true,
+					...describeSet(this.loaded, this.pendingProposals),
+					mutationsBlocked: true,
+					recovery: this.recovery.reason,
+					...(this.recovery.unaccountable ? { unaccountable: true } : {}),
+					...(this.recovery.snapshotRevision !== undefined
+						? {
+								recoverySnapshotRevision: this.recovery.snapshotRevision,
+								recoverySnapshotCertainty: this.recovery.snapshotCertainty,
+							}
+						: {}),
+					...(this.recovery.historyAhead !== undefined
+						? { historyAhead: this.recovery.historyAhead }
+						: {}),
+					recoveryInstruction:
+						"task changes are refused until the user runs /tasks recover and chooses attach or fork. Do not create a replacement set with init, and do not detach: the task set and its recorded revisions are still on disk.",
+					...this.attachmentWarning,
+				},
+				isError: true,
+			};
+		}
 		return {
 			payload: {
 				status: "ok",
@@ -700,14 +850,6 @@ export class TasksController {
 					expectedRevision: this.loaded.document.set.revision,
 				},
 				...this.attachmentWarning,
-				...(this.recovery
-					? {
-							mutationsBlocked: true,
-							recovery: this.recovery.reason,
-							recoveryInstruction:
-								"task changes are refused until the user runs /tasks recover and chooses how to resolve the conflict",
-						}
-					: {}),
 			},
 		};
 	}
@@ -867,6 +1009,9 @@ export class TasksController {
 		if (result.kind === "cancelled") {
 			return fail("cancelled", `${result.reason}; no task set was created`);
 		}
+		if (result.kind === "unaccountable") {
+			return this.enterUnaccountableRecovery(ctx, taskSetId, result);
+		}
 		if (result.kind !== "committed") {
 			return fail(
 				result.kind === "conflict" ? "conflict" : "write_failed",
@@ -943,12 +1088,15 @@ export class TasksController {
 			expectedDigest: current.digest,
 			now: this.now(),
 			signal: scope.signal,
-			// A document this session explicitly attached through recovery is a
-			// decision already taken; it must not re-block every later write.
-			liveDocumentAuthorized: this.attachment?.reconciledThrough !== undefined,
+			// Scoped to the exact bytes the user accounted for, not to the fact
+			// that they once ran recovery on this set.
+			liveDocumentAuthorized: this.documentAuthorized(current),
 		});
 		if (result.kind === "cancelled") {
 			return fail("cancelled", `${result.reason}; the task set is unchanged`);
+		}
+		if (result.kind === "unaccountable") {
+			return this.enterUnaccountableRecovery(ctx, taskSetId, result);
 		}
 		if (result.kind !== "committed") {
 			return fail(
@@ -1297,12 +1445,15 @@ export class TasksController {
 			expectedDigest: proposal.baseDigest,
 			now: this.now(),
 			signal: scope.signal,
-			liveDocumentAuthorized: this.attachment?.reconciledThrough !== undefined,
+			liveDocumentAuthorized: this.documentAuthorized(this.loaded),
 		});
 		if (result.kind === "cancelled") {
 			return fail("cancelled", `${result.reason}; the proposal is still on file and unapproved`, {
 				proposalId: proposal.proposalId,
 			});
+		}
+		if (result.kind === "unaccountable") {
+			return this.enterUnaccountableRecovery(ctx, persisted.taskSetId, result);
 		}
 		if (result.kind !== "committed") {
 			return fail(
@@ -1479,8 +1630,16 @@ export class TasksController {
 			},
 			expectedDigest: this.loaded.digest,
 			now,
-			liveDocumentAuthorized: this.attachment?.reconciledThrough !== undefined,
+			liveDocumentAuthorized: this.documentAuthorized(this.loaded),
 		});
+		if (result.kind === "unaccountable") {
+			await this.enterUnaccountableRecovery(ctx, this.loaded.document.set.taskSetId, result);
+			ctx.ui.notify(
+				`Unable to archive the task set: ${result.reason}. Run /tasks recover first.`,
+				"error",
+			);
+			return false;
+		}
 		if (result.kind !== "committed") {
 			ctx.ui.notify(`Unable to archive the task set: ${result.reason}`, "error");
 			return false;
@@ -1565,7 +1724,18 @@ export class TasksController {
 		this.loaded = current.loaded;
 		this.recovery = undefined;
 		await this.refreshProposals(ctx, taskSetId, current.loaded.digest);
-		this.recordAttachment(ctx, current.loaded, reconciledThrough);
+		// Pinned to the bytes on screen. It lets this one document be published on
+		// top of, and nothing else: a later loss of history, or any other document,
+		// falls outside it and asks again.
+		this.recordAttachment(ctx, current.loaded, {
+			reconciledThrough,
+			authorizedDocument: {
+				taskSetId,
+				revision: current.loaded.document.set.revision,
+				digest: current.loaded.digest,
+				reservedThrough: reconciledThrough,
+			},
+		});
 		this.refreshUi(ctx);
 		const revision = current.loaded.document.set.revision;
 		ctx.ui.notify(
@@ -1761,7 +1931,12 @@ function formatProposalCard(proposal: TaskProposal): string {
 	const lines = [
 		`Requested: ${proposal.reason}`,
 		"",
-		`Against revision ${proposal.baseRevision}. Accepting publishes revision ${proposal.baseRevision + 1}.`,
+		// Not `baseRevision + 1`: the store allocates past everything ever
+		// reserved, so an interrupted publication leaves a gap and the number this
+		// card promised would not be the one published. An approval surface does
+		// not get to be approximately right — the actual revision is reported back
+		// once it exists.
+		`Against revision ${proposal.baseRevision}. Accepting publishes it as the next accepted revision.`,
 		"",
 		"**Changes**",
 		...(proposal.diff.length > 0

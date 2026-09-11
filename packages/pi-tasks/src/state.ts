@@ -27,8 +27,33 @@ export interface TasksAttachment {
 	 * work that was already published. Without it, "attach the document as it
 	 * stands" would be re-blocked by the same ambiguity on the very next read and
 	 * the session could never make progress again.
+	 *
+	 * Persistent high-water information only. It records what the user was told,
+	 * and it deliberately does *not* carry permission to adopt bytes this package
+	 * cannot account for — that is `authorizedDocument`, which is narrower and
+	 * does not survive the state it was granted for.
 	 */
 	reconciledThrough?: number;
+	/**
+	 * Permission to publish on top of one specific document this package cannot
+	 * otherwise explain.
+	 *
+	 * Granted by `/tasks recover → attach`, and pinned to the exact bytes the
+	 * user was looking at when they granted it: same set, same revision, same
+	 * digest, and the reservation high-water mark at that moment. Anything else —
+	 * a different document, a later revision, history that has since been lost —
+	 * falls outside it and needs its own decision.
+	 *
+	 * It is consumed by the next successful publication, because that produces a
+	 * document this package *can* account for, and an authorization that outlived
+	 * its subject would be a standing bypass rather than a decision.
+	 */
+	authorizedDocument?: {
+		taskSetId: string;
+		revision: number;
+		digest: string;
+		reservedThrough: number;
+	};
 }
 
 type SessionEntry = {
@@ -74,5 +99,34 @@ function parseAttachment(value: unknown): TasksAttachment | undefined {
 		...(Number.isSafeInteger(reconciledThrough) && (reconciledThrough as number) >= 0
 			? { reconciledThrough: reconciledThrough as number }
 			: {}),
+		...(parseAuthorizedDocument(data.authorizedDocument, taskSetId) ?? {}),
+	};
+}
+
+/**
+ * A restored authorization is only honoured when every field is present, well
+ * formed, and names the set it was restored for. A malformed one is dropped
+ * rather than repaired: the cost of losing it is one more recovery decision,
+ * and the cost of accepting a bad one is adopting bytes nobody authorised.
+ */
+function parseAuthorizedDocument(
+	value: unknown,
+	taskSetId: string,
+): { authorizedDocument: NonNullable<TasksAttachment["authorizedDocument"]> } | undefined {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+	const data = value as Record<string, unknown>;
+	if (data.taskSetId !== taskSetId) return undefined;
+	if (!Number.isSafeInteger(data.revision) || (data.revision as number) < 0) return undefined;
+	if (typeof data.digest !== "string" || !/^[0-9a-f]{64}$/u.test(data.digest)) return undefined;
+	if (!Number.isSafeInteger(data.reservedThrough) || (data.reservedThrough as number) < 0) {
+		return undefined;
+	}
+	return {
+		authorizedDocument: {
+			taskSetId,
+			revision: data.revision as number,
+			digest: data.digest,
+			reservedThrough: data.reservedThrough as number,
+		},
 	};
 }

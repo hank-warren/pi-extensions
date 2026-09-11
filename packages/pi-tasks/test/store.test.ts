@@ -315,8 +315,14 @@ test("an unexplained live document is never repaired into history", async (t) =>
 		expectedDigest: loaded.loaded.digest,
 		now: NOW,
 	});
-	assert.equal(refused.kind, "conflict");
-	assert.match(refused.kind === "conflict" ? refused.reason : "", /no record of publishing those bytes/u);
+	// Its own outcome, not a `conflict`: a conflict tells the caller to read
+	// again and rebuild, which can never produce evidence that is not on disk.
+	assert.equal(refused.kind, "unaccountable");
+	assert.match(
+		refused.kind === "unaccountable" ? refused.reason : "",
+		/no record of publishing those bytes/u,
+	);
+	assert.equal(refused.kind === "unaccountable" && refused.revision, 1);
 	assert.equal(existsSync(snapshotPath(root, SET_ID, 1)), false);
 });
 
@@ -343,8 +349,8 @@ test("a snapshot disagreeing with the live document blocks rather than being dis
 		expectedDigest: loaded.loaded.digest,
 		now: NOW,
 	});
-	assert.equal(refused.kind, "conflict");
-	assert.match(refused.kind === "conflict" ? refused.reason : "", /holds different bytes/u);
+	assert.equal(refused.kind, "unaccountable");
+	assert.match(refused.kind === "unaccountable" ? refused.reason : "", /holds different bytes/u);
 	assert.equal(readFileSync(snapshotPath(root, SET_ID, 1), "utf8"), accepted);
 });
 

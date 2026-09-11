@@ -87,6 +87,10 @@ Three layers guard a write: an in-process queue per path, a [`proper-lockfile`](
 
 **That is optimistic conflict detection, not a filesystem compare-and-swap.** A writer that ignores the lock — an editor, another tool — can change the file between the digest check and the rename, and no POSIX filesystem prevents it. What the digest buys is that the next read *notices*, stops mutating, and asks a human, instead of merging silently.
 
+The lock is also a lease, and a lease can be lost. If this process stalls past the stale window — a sleeping laptop, a suspended process, a slow agent dir — a cooperating session may legitimately reclaim the lock while this one still believes it holds it. That is reported through a handler which **records** the loss: the commit then refuses to publish, and a loss noticed after the rename is reported as published-with-history-pending rather than as a change that did not happen. (The library's default handler throws from its refresh timer, which in Pi's interactive mode ends the session; installing one is what stops a stalled session killing the editor.)
+
+**The lease is not fencing.** The check and the write are not one atomic operation, so a lease lost in the instant between them is not caught, and nothing here constrains a writer that never takes the lock at all. It narrows a real crash and a real write-without-ownership window; it is not a distributed lock.
+
 ### Why a numbered snapshot can be trusted
 
 Publication is the rename of `tasks.md`, and nothing else. A revision is prepared first, under `pending-<n>-<id>`, alongside a record of its identity, revision and digest; the rename publishes it; only then are the bytes linked to `revisions/<n>.md`. Because the snapshot is created *after* the rename, a `<n>.md` this package wrote always means "published".
