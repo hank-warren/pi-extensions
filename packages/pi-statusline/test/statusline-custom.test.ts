@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+	type CustomItemState,
 	CustomItemsTracker,
 	DEFAULT_TIMEOUT_MS,
 	FAILURE_GRACE,
@@ -13,6 +14,7 @@ import {
 	sameCustomItems,
 	sanitizeOutput,
 	serializeCustomItems,
+	UNBOUND_ERROR,
 } from "../custom.ts";
 import { renderStatusline, type StatuslineData } from "../index.ts";
 import { buildCustomItemSetupPrompt } from "../custom-setup.ts";
@@ -77,10 +79,25 @@ test("an invalid entry is kept, flagged, and never runs", () => {
 		"nonsense",
 	]);
 	assert.equal(items.length, 4, "every entry survives parsing");
-	assert.equal(items[1]?.error, "missing command");
+	// An entry with no command is not broken, it is unclaimed: an extension may
+	// register that id later in the session, and this entry is what reserves its
+	// position and enabled state until then.
+	assert.equal(items[1]?.error, UNBOUND_ERROR);
+	assert.equal(items[1]?.kind, "extension");
+	assert.equal(items[1]?.blocked, undefined, "an unclaimed slot is not a broken entry");
 	assert.equal(items[2]?.error, "unsupported type: websocket");
 	assert.equal(items[3]?.error, "not an object");
-	for (const item of items.slice(1)) assert.equal(item.enabled, false, "an unusable entry is not run");
+	for (const item of items.slice(2)) {
+		assert.equal(item.enabled, false, "an unusable entry is not run");
+		assert.equal(item.blocked, true, "and cannot be switched on from the menu");
+	}
+});
+
+test("an entry that names both a type and a command it cannot have is refused", () => {
+	const [item] = normalizeCustomItems([{ id: "cpa", type: "extension", command: "date" }]);
+	assert.equal(item?.error, "an extension item must not name a command");
+	assert.equal(item?.blocked, true);
+	assert.equal(item?.enabled, false);
 });
 
 test("a file this version cannot fully read survives a write of an unrelated setting", () => {
@@ -333,32 +350,42 @@ test("the timer only runs when an item asks for one", () => {
 });
 
 test("the submenu explains why an item is not showing", () => {
-	const settings = {
-		...defaultSettings(HOME),
-		customItems: normalizeCustomItems([
-			{ id: "cpa", command: "cpa-quota" },
-			{ id: "off", command: "date", enabled: false },
-			{ id: "broken", command: "" },
-		]),
-	};
-	assert.equal(customItemsSummary(settings), "1/3 on");
-	assert.equal(customItemsSummary(defaultSettings(HOME)), "none configured");
+	const states: CustomItemState[] = [
+		{ id: "quota", enabled: true, kind: "command", value: "quota 22/55", running: false },
+		{ id: "off", enabled: false, kind: "command", running: false },
+		{ id: "broken", enabled: false, kind: "command", error: "not an object", configError: true, blocked: true, running: false },
+		{ id: "pool", enabled: true, kind: "extension", value: "92·40", running: false },
+		{ id: "waiting", enabled: true, kind: "extension", error: UNBOUND_ERROR, configError: true, running: false },
+	];
+	assert.equal(customItemsSummary(states), "3/5 on");
+	assert.equal(customItemsSummary([]), "none configured");
 
-	const rows = customItemRows(settings, [
-		{ id: "cpa", enabled: true, value: "cpa 22/55", running: false },
-		{ id: "off", enabled: false, running: false },
-		{ id: "broken", enabled: false, running: false },
-	]);
+	const rows = customItemRows(states);
 	assert.deepEqual(
 		rows.map((row) => row.description),
-		["cpa 22/55", "disabled", "missing command", "Ask the agent to write one; it gets the contract and the settings path."],
+		[
+			"quota 22/55",
+			"disabled",
+			"not an object",
+			"92·40",
+			UNBOUND_ERROR,
+			"Ask the agent to write one; it gets the contract and the settings path.",
+		],
 	);
 	assert.deepEqual(
 		rows.map((row) => row.label),
-		["on  cpa", "off  off", "off  broken", "Add custom item…"],
+		[
+			"on  quota",
+			"off  off",
+			"off  broken",
+			// The tag is the only thing that says where the value comes from.
+			"on  pool  (extension)",
+			"on  waiting  (extension)",
+			"Add custom item…",
+		],
 	);
-	assert.equal(rows[3]?.value, ADD_CUSTOM_ITEM_VALUE);
-	assert.equal(customItemRows(defaultSettings(HOME)).length, 1, "with no items, adding one is the only row");
+	assert.equal(rows[5]?.value, ADD_CUSTOM_ITEM_VALUE);
+	assert.equal(customItemRows().length, 1, "with no items, adding one is the only row");
 });
 
 test("the setup prompt carries the whole contract, the path, and the request", () => {
