@@ -104,7 +104,9 @@ Requires a Nerd Font new enough to include the codicon brand glyphs (v3.5.0+); o
 
 ## Custom items
 
-Everything above is built in. **Custom items** are the escape hatch: each one runs a shell command, and its output becomes a segment on line 1, after the usage meters and before the worktree line. This is how a personal metric — a self-hosted quota pool, a deploy status, an on-call flag — gets onto the statusline without being packaged for everybody else.
+Everything above is built in. **Custom items** are the escape hatch: each one produces one line, and that line becomes a segment on line 1, after the usage meters and before the worktree line. This is how a personal metric — a self-hosted quota pool, a deploy status, an on-call flag — gets onto the statusline without being packaged for everybody else.
+
+A value comes from one of two places: a **shell command** you configure (below), or a **function another extension registers** ([Providing an item from an extension](#providing-an-item-from-an-extension)). They share one scheduler, one timeout, one failure grace and one row in `/statusline`.
 
 The contract is deliberately [Claude Code's status line](https://docs.claude.com/en/docs/claude-code/statusline) contract: a command, JSON about the session on **stdin**, one line on **stdout**, ANSI colors passed through. A script written for Claude Code runs here mostly unchanged (see [differences](#differences-from-claude-codes-status-line)).
 
@@ -136,11 +138,71 @@ By hand, items live under `customItems` in `~/.pi/agent/statusline-settings.json
 | `refreshInterval` | no | Seconds between forced re-runs, on top of the event-driven ones. Omit for event-driven only. |
 | `timeout` | no | Seconds before the command is killed. Default `5`, capped at `30`. |
 | `enabled` | no | `false` hides the item and stops it running. This is the one field `/statusline` writes. |
-| `type` | no | Accepted for entries pasted from Claude Code, where it is `"command"`. Any other value is preserved but not run. |
+| `type` | no | `"command"` (the default, and what an entry pasted from Claude Code carries) or `"extension"` for an item another extension provides. Any other value is preserved but not run. |
 
 Items render in configuration order, each as its own ` | `-separated segment.
 
 **The file is read when a session starts and whenever `/statusline` opens.** After editing it by hand, open `/statusline` and press Esc to load the change into the running session; nothing watches the file.
+
+### Providing an item from an extension
+
+A command is the right escape hatch for a one-off script, and the wrong shape for anything that wants to be a package: the script has to be on `PATH` on every host, it is updated by whatever put it there rather than by pi, its config lives outside any package, and it costs a process spawn per refresh for a value that could be a function call.
+
+So an extension can provide the value directly. pi-statusline emits one event carrying a `register` callback; nothing here imports a provider, and a provider imports nothing from here — the event name is the whole coupling.
+
+```ts
+export default function myProvider(pi: ExtensionAPI): void {
+  pi.events?.on("pi-statusline:custom-items:request", (payload) => {
+    const register = (payload as { register?: unknown }).register as
+      | ((item: {
+          id: string;
+          run: (payload: Record<string, unknown>, signal: AbortSignal) => Promise<string | null>;
+          refreshInterval?: number;
+          timeoutMs?: number;
+        }) => boolean)
+      | undefined;
+    if (typeof register !== "function") return;
+
+    const accepted = register({
+      id: "quota",
+      refreshInterval: 60,
+      timeoutMs: 5_000,
+      run: async (_session, signal) => {
+        const response = await fetch("http://localhost:9000/quota", { signal });
+        if (!response.ok) throw new Error(`quota feed ${response.status}`);
+        const { remaining } = (await response.json()) as { remaining: number };
+        return remaining > 0 ? `\u001b[32m${remaining}%\u001b[0m` : null;
+      },
+    });
+    // Refused only for an unusable `id` or `run`. Nothing else reports it, so a
+    // provider that drops this sees a segment that simply never appears.
+    if (!accepted) throw new Error("pi-statusline refused the quota item");
+  });
+}
+```
+
+The contract is the command contract, minus the process:
+
+- `payload` is **exactly the JSON a command gets on stdin**, already parsed, and built fresh for each run — a script ported into an extension reads the same fields.
+- The return value is the segment: one line, [sanitised the same way](#what-the-command-should-print) and capped at 120 characters. `null`, `undefined` or `""` hides the item.
+- **Throwing is failing.** The message is what `/statusline` shows, and it counts against the same three-failure grace as a non-zero exit.
+- `signal` aborts at `timeoutMs` (default 5s, capped at 30s). A run that ignores it is not awaited past the deadline; its late value is dropped.
+- `register` is idempotent on `id`: registering again replaces the function and cancels the run in flight, so a provider can re-register whenever its configuration changes.
+- `register` **returns `false`** if the `id` is empty or `run` is not a function. It never throws — a throw here would be reported as *your* extension failing rather than as a registration pi-statusline refused — and a refused item has no row and no error anywhere, so the boolean is the only place a typo is visible.
+
+**The event is emitted when a session starts and again every time `/statusline` opens**, in interactive mode only. A provider therefore does not have to load before pi-statusline — subscribe in your factory and the request will come.
+
+There is no `unregister`. A registration lives as long as **pi-statusline's own** extension instance, not the provider's: re-registering the same `id` replaces it, and everything is discarded when pi-statusline reloads. A provider that is unloaded mid-session without pi-statusline reloading leaves its `run` behind, still being called on the refresh interval — in practice a `/reload` reloads both, so this is a note rather than a caveat.
+
+The settings file still owns **order and enabled**:
+
+| Entry in `statusline-settings.json` | What happens |
+|---|---|
+| none | the item is appended after your own, switched on |
+| `{ "id": "quota", "type": "extension" }` | binds there: your position, your `enabled`, and any `refreshInterval`/`timeout` you name overrides the provider's |
+| an entry with a `command` and the same `id` | **conflict.** Your command keeps running and the row reads `id also provided by an extension — remove one`; an extension never silently takes over a row you wrote |
+
+Switching an extension's item off in `/statusline` writes `{ "id": "quota", "type": "extension", "enabled": false }` to the file — that entry is also how you give it a fixed position among your other items. Rows for these items are tagged `(extension)` in the submenu.
 
 ### When a command runs
 
@@ -186,7 +248,7 @@ The **first line of stdout** becomes the segment. Anything after it is ignored �
 
 Failures never reach the agent — the statusline is best-effort and stays silent. A failing item keeps its last good value for up to three consecutive failures, then drops it. That grace is deliberate in both directions: one blip (a laptop between networks) should not blank a working display, and a value that has quietly gone stale is worse than an empty slot, because the number stays plausible while describing a world that has moved on.
 
-To see what an item is doing, open `/statusline` → **Custom item list**. Each row shows its current value, or why there isn't one: `disabled`, `missing command`, `exit 3: …`, `timed out after 5s`, `empty output`, or `no value yet`. Enter toggles an item on or off; commands themselves are edited in the file.
+To see what an item is doing, open `/statusline` → **Custom item list**. Each row shows its current value, or why there isn't one: `disabled`, `exit 3: …`, `timed out after 5s`, `empty output`, `no value yet`, or — for an entry with no command — `no command; waiting for an extension to register this id`. Enter toggles an item on or off; commands themselves are edited in the file.
 
 ### Keep it fast
 

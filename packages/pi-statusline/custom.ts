@@ -4,12 +4,20 @@ import { platform } from "node:process";
 /**
  * User-defined statusline segments, modelled on Claude Code's `statusLine`.
  *
- * Each item is a shell command that receives a JSON snapshot of the session on
- * stdin and prints one line to stdout. That contract is deliberately the same
- * one Claude Code uses, so an existing statusline script mostly ports over; the
- * differences are that pi renders each item as one *segment* of line 1 rather
- * than owning the whole row, and that the payload's usage numbers are remaining
- * percentages (see `custom-items.md` in the README).
+ * An item's value comes from one of two places. The original is a **shell
+ * command** that receives a JSON snapshot of the session on stdin and prints
+ * one line to stdout — deliberately Claude Code's contract, so an existing
+ * statusline script mostly ports over; the differences are that pi renders each
+ * item as one *segment* of line 1 rather than owning the whole row, and that
+ * the payload's usage numbers are remaining percentages (see the README).
+ *
+ * The second is a **function another extension registers** over `pi.events`,
+ * which gets the same payload as an object and returns the same one line. That
+ * exists because a command forces anything serious onto PATH, into a config
+ * file outside any package, and into a process spawn per refresh, for a value
+ * the host could compute in-process. Both kinds run through one scheduler here:
+ * there is no second code path for turn ends, intervals, overlap, timeouts or
+ * the failure grace.
  */
 
 /** How long a command may run before it is killed, when it names no timeout. */
@@ -31,8 +39,65 @@ export const EVENT_MIN_INTERVAL_MS = 1_000;
  * broken loses it.
  */
 export const FAILURE_GRACE = 3;
-/** Longest rendered value kept from a command, before the line is truncated. */
+/** Longest rendered value kept from an item, before the line is truncated. */
 export const MAX_OUTPUT_WIDTH = 120;
+
+/**
+ * The event pi-statusline emits to collect items from other extensions.
+ *
+ * This name is the entire coupling between the statusline and a provider:
+ * nothing here imports a provider, and a provider imports nothing from here.
+ * Changing the string is a breaking change for every provider in the wild.
+ */
+export const CUSTOM_ITEMS_REQUEST_EVENT = "pi-statusline:custom-items:request";
+
+/**
+ * A registered item's value function.
+ *
+ * `payload` is the object the command path serialises onto stdin, built fresh
+ * for each run. `signal` aborts at the item's timeout; a run that ignores it is
+ * simply not awaited past the deadline. Returning `null`/`undefined`/`""` hides
+ * the item, and throwing is a failure, counted exactly like a non-zero exit.
+ */
+export type CustomItemRun = (
+	payload: Record<string, unknown>,
+	signal: AbortSignal,
+) => string | null | undefined | Promise<string | null | undefined>;
+
+/** What a provider passes to `register`. */
+export interface CustomItemRegistration {
+	/** Stable name, in the same namespace as a command item's `id`. */
+	id: string;
+	run: CustomItemRun;
+	/** Seconds between forced re-runs; the settings entry wins when it names one. */
+	refreshInterval?: number;
+	/** Milliseconds before the run is abandoned; capped at {@link MAX_TIMEOUT_MS}. */
+	timeoutMs?: number;
+}
+
+/** The payload of {@link CUSTOM_ITEMS_REQUEST_EVENT}. */
+export interface CustomItemsRequest {
+	/**
+	 * Returns whether the registration was accepted.
+	 *
+	 * A rejected one is dropped silently *here* on purpose — see
+	 * {@link CustomItemsTracker.register} — so the boolean is the only signal a
+	 * provider gets that its `id` or `run` was unusable. Ignoring it means a typo
+	 * shows up as a segment that never appears, with nothing to read anywhere.
+	 */
+	register(registration: CustomItemRegistration): boolean;
+}
+
+/** Shown for an entry that names no command and has no registration yet. */
+export const UNBOUND_ERROR = "no command; waiting for an extension to register this id";
+/**
+ * Shown when an id is claimed by both a command entry and a registration.
+ *
+ * The command keeps running: the file is the user's, and an extension must not
+ * be able to take over a row somebody wrote by hand. Saying so is the whole
+ * remedy — deleting either side resolves it.
+ */
+export const COLLISION_ERROR = "id also provided by an extension \u2014 remove one";
 
 /**
  * One configured item.
@@ -46,23 +111,45 @@ export const MAX_OUTPUT_WIDTH = 120;
 export interface CustomItem {
 	id: string;
 	enabled: boolean;
-	/** Absent when the entry is not runnable; `error` then says why. */
+	/** Where the value comes from; drives the `(extension)` tag in the submenu. */
+	kind: "command" | "extension";
+	/** Absent for an extension item, or when the entry is not runnable. */
 	command?: string;
+	/** Bound from a registration; absent until a provider claims this id. */
+	run?: CustomItemRun;
 	/** Seconds between forced re-runs. Absent means event-driven only. */
 	refreshInterval?: number;
 	timeoutMs: number;
+	/**
+	 * Whether `timeoutMs` came from the entry's own `timeout` rather than from a
+	 * default. A registration may only supply the timeout the file left unsaid.
+	 */
+	timeoutExplicit?: boolean;
 	/** Why this entry cannot run, shown in the `/statusline` submenu. */
 	error?: string;
-	/** The on-disk entry, preserved for round-tripping. */
-	source: unknown;
+	/**
+	 * Set when the entry can never run as written — not an object, or a `type`
+	 * this version does not implement. The submenu refuses to enable those, and
+	 * only those: an entry still waiting for its provider is perfectly valid.
+	 */
+	blocked?: boolean;
+	/** The on-disk entry, preserved for round-tripping. Absent when synthesised. */
+	source?: unknown;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Positive finite seconds, or undefined for anything unusable. */
-function positiveSeconds(value: unknown): number | undefined {
+/**
+ * A positive finite number, or undefined for anything unusable.
+ *
+ * The same check serves both units: seconds off a settings entry and the
+ * milliseconds a registration names. Callers pass the validated result on
+ * rather than the raw input, so a future normalisation here cannot be
+ * silently bypassed by one of them.
+ */
+function positiveNumber(value: unknown): number | undefined {
 	if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return undefined;
 	return value;
 }
@@ -92,7 +179,15 @@ export function normalizeCustomItems(value: unknown): CustomItem[] {
 		if (!isPlainObject(entry)) {
 			const id = uniqueId(fallbackId, taken);
 			taken.add(id);
-			items.push({ id, enabled: false, timeoutMs: DEFAULT_TIMEOUT_MS, error: "not an object", source: entry });
+			items.push({
+				id,
+				enabled: false,
+				kind: "command",
+				timeoutMs: DEFAULT_TIMEOUT_MS,
+				error: "not an object",
+				blocked: true,
+				source: entry,
+			});
 			return;
 		}
 		const rawId = entry.id;
@@ -100,26 +195,54 @@ export function normalizeCustomItems(value: unknown): CustomItem[] {
 		taken.add(id);
 		// `enabled` is the menu's field; everything else is the user's.
 		const enabled = entry.enabled !== false;
-		const timeoutSeconds = positiveSeconds(entry.timeout);
+		const timeoutSeconds = positiveNumber(entry.timeout);
 		const timeoutMs = Math.min(
 			timeoutSeconds === undefined ? DEFAULT_TIMEOUT_MS : timeoutSeconds * 1000,
 			MAX_TIMEOUT_MS,
 		);
-		const refreshInterval = positiveSeconds(entry.refreshInterval);
-		const base = { id, enabled, timeoutMs, source: entry, ...(refreshInterval ? { refreshInterval } : {}) };
+		const refreshInterval = positiveNumber(entry.refreshInterval);
+		const base = {
+			id,
+			enabled,
+			timeoutMs,
+			source: entry,
+			...(timeoutSeconds === undefined ? {} : { timeoutExplicit: true }),
+			...(refreshInterval ? { refreshInterval } : {}),
+		};
 		// Claude Code's `statusLine` carries `type: "command"`, so a pasted entry
-		// may too. That value is accepted; any other is not a mistake this version
-		// can judge, so the entry is kept and flagged rather than run or dropped.
-		const type = entry.type ?? "command";
-		if (type !== "command") {
-			items.push({ ...base, enabled: false, error: `unsupported type: ${String(type)}` });
+		// may too. `"extension"` is this package's own, and optional: an entry with
+		// no command is an extension slot whether or not it says so. Any other value
+		// is not a mistake this version can judge, so the entry is kept and flagged
+		// rather than run or dropped.
+		const hasCommand = typeof entry.command === "string" && entry.command.trim().length > 0;
+		const type = entry.type ?? (hasCommand ? "command" : "extension");
+		if (type !== "command" && type !== "extension") {
+			items.push({
+				...base,
+				kind: "command",
+				enabled: false,
+				error: `unsupported type: ${String(type)}`,
+				blocked: true,
+			});
 			return;
 		}
-		if (typeof entry.command !== "string" || entry.command.trim().length === 0) {
-			items.push({ ...base, enabled: false, error: "missing command" });
+		if (!hasCommand) {
+			// Not an error yet: a provider may register this id later in the session,
+			// and the entry is what reserves its position and enabled state.
+			items.push({ ...base, kind: "extension", error: UNBOUND_ERROR });
 			return;
 		}
-		items.push({ ...base, command: entry.command });
+		if (type === "extension") {
+			items.push({
+				...base,
+				kind: "command",
+				enabled: false,
+				error: "an extension item must not name a command",
+				blocked: true,
+			});
+			return;
+		}
+		items.push({ ...base, kind: "command", command: entry.command as string });
 	});
 	return items;
 }
@@ -132,7 +255,9 @@ export function normalizeCustomItems(value: unknown): CustomItem[] {
  * as the user wrote it rather than accumulating defaults.
  */
 export function serializeCustomItems(items: readonly CustomItem[]): unknown[] {
-	return items.map((item) => {
+	// A registration with no entry of its own has no on-disk form until the user
+	// toggles it, which is what creates the entry; it must never be written here.
+	return items.filter((item) => item.source !== undefined).map((item) => {
 		if (!isPlainObject(item.source)) return item.source;
 		const entry = { ...item.source };
 		if (item.enabled) delete entry.enabled;
@@ -197,10 +322,20 @@ export function sanitizeOutput(raw: string): string {
 export interface CustomItemState {
 	id: string;
 	enabled: boolean;
-	/** Sanitized first line of stdout; absent when there is nothing to show. */
+	/** Where the value comes from, for the submenu's `(extension)` tag. */
+	kind: "command" | "extension";
+	/** Sanitized first line of output; absent when there is nothing to show. */
 	value?: string;
 	/** Configuration or run failure, whichever applies. */
 	error?: string;
+	/**
+	 * True when `error` describes the entry itself rather than its last run. A
+	 * configuration problem outranks "disabled" in the submenu, because the item
+	 * is off *because* of it; a run failure does not.
+	 */
+	configError?: boolean;
+	/** True when the entry can never run as written, so it must not be enabled. */
+	blocked?: boolean;
 	/** When the value was produced, as epoch ms. */
 	updatedAt?: number;
 	running: boolean;
@@ -212,6 +347,12 @@ export interface CustomItemsTrackerOptions {
 	spawn?: SpawnFn;
 	now?: () => number;
 	onChange?: () => void;
+	/**
+	 * Called after a registration is accepted. The tracker cannot know whether
+	 * the footer is live or whether items are switched on, so the extension does
+	 * the timer and refresh work and this is the notification that it is needed.
+	 */
+	onRegister?: () => void;
 	cwd?: string;
 	schedule?: (callback: () => void, intervalMs: number) => unknown;
 	cancel?: (handle: unknown) => void;
@@ -248,11 +389,17 @@ const TICK_FLOOR_MS = 1_000;
  * lower refresh rate instead of a pile of processes.
  */
 export class CustomItemsTracker {
+	/** Entries exactly as configured on disk. */
+	private configured: CustomItem[] = [];
+	/** Registrations by id, in the order providers claimed them. */
+	private readonly registrations = new Map<string, CustomItemRegistration>();
+	/** The two merged: what actually renders and runs. */
 	private items: CustomItem[] = [];
 	private readonly records = new Map<string, RunRecord>();
 	private readonly spawnFn: SpawnFn;
 	private readonly now: () => number;
 	private readonly onChange?: () => void;
+	private readonly onRegister?: () => void;
 	private readonly schedule: (callback: () => void, intervalMs: number) => unknown;
 	private readonly cancel: (handle: unknown) => void;
 	private cwd: string | undefined;
@@ -264,6 +411,7 @@ export class CustomItemsTracker {
 		this.spawnFn = options.spawn ?? nodeSpawn;
 		this.now = options.now ?? Date.now;
 		this.onChange = options.onChange;
+		this.onRegister = options.onRegister;
 		this.cwd = options.cwd;
 		this.schedule = options.schedule ?? defaultSchedule;
 		this.cancel = options.cancel ?? defaultCancel;
@@ -277,7 +425,83 @@ export class CustomItemsTracker {
 	 * does not blink on every settings save.
 	 */
 	setItems(items: readonly CustomItem[]): void {
-		this.items = [...items];
+		this.configured = [...items];
+		this.recompute();
+	}
+
+	/**
+	 * Adopt an item provided by another extension.
+	 *
+	 * Idempotent on id, and it reports rather than throws: this runs inside a
+	 * provider's event handler, where a throw would surface as *that* extension
+	 * failing rather than as a registration this one refused. The return value is
+	 * how a provider learns its `id` or `run` was unusable, since nothing else
+	 * here can name an item that never got far enough to have a row.
+	 */
+	register(registration: CustomItemRegistration): boolean {
+		const id = typeof registration?.id === "string" ? registration.id.trim() : "";
+		if (id.length === 0 || typeof registration.run !== "function") return false;
+		// A re-registration replaces the function, so whatever the old one is doing
+		// is already obsolete; its record keeps the last good value so the footer
+		// does not blink while the new one produces its first.
+		if (this.registrations.has(id)) this.records.get(id)?.abort?.();
+		const refreshInterval = positiveNumber(registration.refreshInterval);
+		const timeoutMs = positiveNumber(registration.timeoutMs);
+		this.registrations.set(id, {
+			id,
+			run: registration.run,
+			...(refreshInterval === undefined ? {} : { refreshInterval }),
+			...(timeoutMs === undefined ? {} : { timeoutMs: Math.min(timeoutMs, MAX_TIMEOUT_MS) }),
+		});
+		this.recompute();
+		this.onRegister?.();
+		return true;
+	}
+
+	/**
+	 * Merge configured entries with registrations.
+	 *
+	 * The file owns order and enabled; a registration fills in the value function
+	 * and any field the file left unsaid. An id in both a command entry and a
+	 * registration is a conflict the user has to resolve, so it is shown rather
+	 * than decided silently — and the command, being the thing they wrote, wins.
+	 */
+	private recompute(): void {
+		const configuredIds = new Set(this.configured.map((item) => item.id));
+		const items = this.configured.map((item) => {
+			const registration = this.registrations.get(item.id);
+			if (item.blocked === true) return item;
+			if (item.command !== undefined) {
+				return registration === undefined ? item : { ...item, error: COLLISION_ERROR };
+			}
+			if (registration === undefined) return item;
+			const { error: _unbound, ...bound } = item;
+			// The entry's own interval wins; the registration supplies the one it
+			// left unsaid. Parenthesised because `??` binds tighter than `?:` — the
+			// grouping is load-bearing and easy to "fix" wrongly.
+			const refreshInterval = item.refreshInterval ?? registration.refreshInterval;
+			return {
+				...bound,
+				kind: "extension" as const,
+				run: registration.run,
+				...(refreshInterval === undefined ? {} : { refreshInterval }),
+				timeoutMs: item.timeoutExplicit ? item.timeoutMs : (registration.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+			};
+		});
+		for (const [id, registration] of this.registrations) {
+			if (configuredIds.has(id)) continue;
+			// No entry claims this id, so it is appended, switched on, and has no
+			// `source`: nothing is written to the settings file until it is toggled.
+			items.push({
+				id,
+				enabled: true,
+				kind: "extension",
+				run: registration.run,
+				...(registration.refreshInterval ? { refreshInterval: registration.refreshInterval } : {}),
+				timeoutMs: registration.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+			});
+		}
+		this.items = items;
 		const live = new Set(items.map((item) => item.id));
 		for (const [id, record] of this.records) {
 			if (live.has(id)) continue;
@@ -309,9 +533,11 @@ export class CustomItemsTracker {
 			return {
 				id: item.id,
 				enabled: item.enabled,
+				kind: item.kind,
+				...(item.blocked === true ? { blocked: true } : {}),
 				...(record?.value !== undefined ? { value: record.value } : {}),
 				...(item.error !== undefined
-					? { error: item.error }
+					? { error: item.error, configError: true }
 					: record?.error !== undefined
 						? { error: record.error }
 						: {}),
@@ -346,7 +572,13 @@ export class CustomItemsTracker {
 		this.tickHandle = undefined;
 	}
 
-	/** Stop everything and abandon in-flight commands. */
+	/**
+	 * Stop everything and abandon in-flight runs.
+	 *
+	 * Registrations survive: this also fires when the footer is torn down, and a
+	 * provider has no way to hear about that to register again. They die with the
+	 * extension instance instead, which is when the next request event is sent.
+	 */
 	dispose(): void {
 		this.stop();
 		for (const record of this.records.values()) record.abort?.();
@@ -367,7 +599,8 @@ export class CustomItemsTracker {
 	refresh(): void {
 		const now = this.now();
 		for (const item of this.items) {
-			if (!item.enabled || item.command === undefined) continue;
+			if (!item.enabled) continue;
+			if (item.command === undefined && item.run === undefined) continue;
 			const record = this.records.get(item.id);
 			if (record?.running) continue;
 			const minimum =
@@ -388,6 +621,67 @@ export class CustomItemsTracker {
 	}
 
 	private run(item: CustomItem): void {
+		if (item.run !== undefined) {
+			this.runRegistered(item, item.run);
+			return;
+		}
+		this.runCommand(item);
+	}
+
+	/** How long an item may run, rendered the way both paths report a timeout. */
+	private timeoutLabel(item: CustomItem): string {
+		return `timed out after ${Math.round(item.timeoutMs / 100) / 10}s`;
+	}
+
+	/**
+	 * Run a registered function under the command path's guarantees.
+	 *
+	 * The deadline is the tracker's, not the provider's: `signal` asks it to stop
+	 * and the outcome is settled regardless, so a provider that ignores the
+	 * signal costs a leaked promise rather than a stuck segment.
+	 */
+	private runRegistered(item: CustomItem, run: CustomItemRun): void {
+		const record = this.record(item.id);
+		record.lastAttempt = this.now();
+		record.running = true;
+
+		const controller = new AbortController();
+		let settled = false;
+		const finish = (outcome: { value?: string; error?: string }): void => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			record.abort = undefined;
+			this.settle(item, record, outcome);
+		};
+
+		const timer = setTimeout(() => {
+			controller.abort();
+			finish({ error: this.timeoutLabel(item) });
+		}, item.timeoutMs);
+		timer.unref?.();
+
+		record.abort = () => {
+			clearTimeout(timer);
+			settled = true;
+			record.running = false;
+			controller.abort();
+		};
+
+		let result: ReturnType<CustomItemRun>;
+		try {
+			result = run(this.payloadFactory(), controller.signal);
+		} catch (error) {
+			finish({ error: error instanceof Error ? error.message : String(error) });
+			return;
+		}
+		Promise.resolve(result).then(
+			(value) => finish({ value: value === null || value === undefined ? "" : sanitizeOutput(String(value)) }),
+			(error: unknown) => finish({ error: error instanceof Error ? error.message : String(error) }),
+		);
+	}
+
+	private runCommand(item: CustomItem): void {
 		const command = item.command;
 		if (command === undefined) return;
 		const record = this.record(item.id);
@@ -426,7 +720,7 @@ export class CustomItemsTracker {
 			child.kill("SIGTERM");
 			// A command ignoring SIGTERM must not outlive the session either.
 			setTimeout(() => child.kill("SIGKILL"), 500).unref?.();
-			finish({ error: `timed out after ${Math.round(item.timeoutMs / 100) / 10}s` });
+			finish({ error: this.timeoutLabel(item) });
 		}, item.timeoutMs);
 		timer.unref?.();
 

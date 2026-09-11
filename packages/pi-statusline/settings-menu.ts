@@ -10,7 +10,7 @@ import {
 	truncateToWidth,
 } from "@earendil-works/pi-tui";
 import { type BooleanSettingKey, collapseHome, resolveWorktreeRoot, type StatuslineSettings } from "./settings.ts";
-import type { CustomItemState } from "./custom.ts";
+import { type CustomItem, type CustomItemState, DEFAULT_TIMEOUT_MS } from "./custom.ts";
 import { CELEBRATION_STYLE_NAMES, isCelebrationStyleName } from "./celebration-styles.ts";
 import { isThemeName, THEME_NAMES } from "./themes.ts";
 
@@ -62,11 +62,17 @@ export function aliasSummary(settings: StatuslineSettings): string {
 	return `${count} alias${count === 1 ? "" : "es"}`;
 }
 
-/** Row value for the custom-items submenu: how many items are switched on. */
-export function customItemsSummary(settings: StatuslineSettings): string {
-	const total = settings.customItems.length;
+/**
+ * Row value for the custom-items submenu: how many items are switched on.
+ *
+ * Counted from the tracker's states, not from the settings file: an item an
+ * extension provides is as real as one the file names, and it may have no entry
+ * of its own until somebody toggles it.
+ */
+export function customItemsSummary(states: readonly CustomItemState[]): string {
+	const total = states.length;
 	if (total === 0) return "none configured";
-	return `${settings.customItems.filter((item) => item.enabled).length}/${total} on`;
+	return `${states.filter((state) => state.enabled).length}/${total} on`;
 }
 
 /**
@@ -75,12 +81,9 @@ export function customItemsSummary(settings: StatuslineSettings): string {
  * than opening a form: a statusline command is a script plus a JSON entry plus
  * a test run, which is a conversation, not a field.
  */
-export function customItemRows(
-	settings: StatuslineSettings,
-	states: readonly CustomItemState[] = [],
-): SelectItem[] {
+export function customItemRows(states: readonly CustomItemState[] = []): SelectItem[] {
 	return [
-		...customItemStateRows(settings, states),
+		...customItemStateRows(states),
 		{
 			value: ADD_CUSTOM_ITEM_VALUE,
 			label: "Add custom item…",
@@ -89,31 +92,30 @@ export function customItemRows(
 	];
 }
 
-function customItemStateRows(settings: StatuslineSettings, states: readonly CustomItemState[]): SelectItem[] {
-	const byId = new Map(states.map((state) => [state.id, state]));
-	return settings.customItems.map((item) => {
-		const state = byId.get(item.id);
-		// Configuration errors outrank run errors: an item that cannot be parsed
-		// never ran, so a stale run error from a previous config would mislead.
-		const error = item.error ?? state?.error;
-		// A broken entry reads as "disabled" unless its reason wins here: it is off
-		// *because* it cannot run, and "disabled" would suggest the user chose that.
-		const detail = item.error !== undefined
-			? item.error
-			: !item.enabled
+function customItemStateRows(states: readonly CustomItemState[]): SelectItem[] {
+	return states.map((state) => {
+		// A broken or unbound entry reads as "disabled" unless its reason wins
+		// here: it is off *because* of that, and "disabled" would suggest the user
+		// chose it. A run failure is the other way round — an item switched off is
+		// off first, and whatever its last run said is history.
+		const detail = state.configError === true
+			? (state.error as string)
+			: !state.enabled
 				? "disabled"
-				: error !== undefined
-				? error
-				: state?.running === true && state.value === undefined
+				: state.error !== undefined
+				? state.error
+				: state.running && state.value === undefined
 					? "running…"
-					: state?.value !== undefined && state.value.length > 0
+					: state.value !== undefined && state.value.length > 0
 						? state.value
-						: state?.value !== undefined
+						: state.value !== undefined
 							? "empty output"
 							: "no value yet";
 		return {
-			value: item.id,
-			label: `${item.enabled ? toggleValue(true) : toggleValue(false)}  ${item.id}`,
+			value: state.id,
+			// The tag says where the value comes from, which is the one thing a row
+			// cannot otherwise show: an extension item has no command to point at.
+			label: `${toggleValue(state.enabled)}  ${state.id}${state.kind === "extension" ? "  (extension)" : ""}`,
 			description: detail,
 		};
 	});
@@ -130,6 +132,7 @@ export function buildSettingItems(
 	settings: StatuslineSettings,
 	submenus: SettingSubmenus = {},
 	home: string = homedir(),
+	customStates: readonly CustomItemState[] = [],
 ): SettingItem[] {
 	const items: SettingItem[] = [
 		{
@@ -146,8 +149,9 @@ export function buildSettingItems(
 	for (const row of BOOLEAN_ROWS) {
 		// A toggle for a segment with nothing in it is a row that does nothing;
 		// the list row below is where an item gets created, and the toggle
-		// appears once there is something to switch off.
-		if (row.id === "showCustomItems" && settings.customItems.length === 0) continue;
+		// appears once there is something to switch off — including something an
+		// extension provided, which never appears in the settings file.
+		if (row.id === "showCustomItems" && customStates.length === 0) continue;
 		items.push({
 			id: row.id,
 			label: row.label,
@@ -183,8 +187,8 @@ export function buildSettingItems(
 	items.push({
 		id: CUSTOM_ITEMS_ID,
 		label: "Custom item list",
-		description: "Enable or disable configured items; edit commands in statusline-settings.json.",
-		currentValue: customItemsSummary(settings),
+		description: "Enable or disable items, your own and extensions'; edit commands in statusline-settings.json.",
+		currentValue: customItemsSummary(customStates),
 		...(submenus.customItems ? { submenu: submenus.customItems } : {}),
 	});
 
@@ -449,11 +453,15 @@ class CustomItemsSubmenu implements Component {
 		this.list = this.buildList();
 	}
 
+	private states(): readonly CustomItemState[] {
+		return this.host.customItemStates?.() ?? [];
+	}
+
 	private buildList(selectedIndex = 0): SelectList {
-		const rows = customItemRows(this.host.getSettings(), this.host.customItemStates?.() ?? []);
+		const rows = customItemRows(this.states());
 		const list = new SelectList(rows, 10, this.host.selectTheme);
 		list.setSelectedIndex(selectedIndex);
-		list.onCancel = () => this.done(customItemsSummary(this.host.getSettings()));
+		list.onCancel = () => this.done(customItemsSummary(this.states()));
 		list.onSelect = (item) => (item.value === ADD_CUSTOM_ITEM_VALUE ? this.add() : this.toggle(item.value));
 		return list;
 	}
@@ -471,7 +479,7 @@ class CustomItemsSubmenu implements Component {
 				this.prompt = undefined;
 				// Close the whole menu before the message lands: the agent's reply
 				// renders in the transcript, which the menu is drawn over.
-				this.done(customItemsSummary(this.host.getSettings()));
+				this.done(customItemsSummary(this.states()));
 				this.host.requestCustomItem?.(value);
 			},
 			() => {
@@ -485,18 +493,34 @@ class CustomItemsSubmenu implements Component {
 	private toggle(id: string): void {
 		if (id.startsWith("\u0000")) return;
 		const settings = this.host.getSettings();
-		const index = settings.customItems.findIndex((item) => item.id === id);
-		const target = settings.customItems[index];
-		if (!target) return;
-		if (target.error !== undefined && !target.enabled) {
+		const state = this.states().find((candidate) => candidate.id === id);
+		if (!state) return;
+		if (state.blocked === true && !state.enabled) {
 			// Enabling an unparseable entry would only fail again on the next tick.
-			this.host.notify(`${id} cannot run: ${target.error}`);
+			this.host.notify(`${id} cannot run: ${state.error ?? "invalid entry"}`);
 			return;
 		}
+		const index = settings.customItems.findIndex((item) => item.id === id);
+		const target = settings.customItems[index];
 		const customItems = [...settings.customItems];
-		customItems[index] = { ...target, enabled: !target.enabled };
+		if (target) customItems[index] = { ...target, enabled: !target.enabled };
+		else {
+			// An item an extension provided has no entry until it is switched off,
+			// and that entry is also what gives it a position the user controls.
+			const entry: CustomItem = {
+				id,
+				enabled: false,
+				kind: "extension",
+				timeoutMs: DEFAULT_TIMEOUT_MS,
+				source: { id, type: "extension", enabled: false },
+			};
+			customItems.push(entry);
+		}
 		this.host.commit({ ...settings, customItems });
-		this.list = this.buildList(index);
+		// Re-read the states rather than reusing the old index: writing an entry
+		// for a registration can move it out of the appended tail and into order.
+		const selected = this.states().findIndex((candidate) => candidate.id === id);
+		this.list = this.buildList(Math.max(0, selected));
 		this.host.requestRender();
 	}
 

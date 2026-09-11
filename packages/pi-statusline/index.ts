@@ -14,7 +14,12 @@ import {
 } from "./cache-celebration.ts";
 import { CelebrationPreview, trackSelectedLabel } from "./celebration-preview.ts";
 import { DEFAULT_CELEBRATION_STYLE, renderCacheBadge } from "./celebration-styles.ts";
-import { CustomItemsTracker } from "./custom.ts";
+import {
+	CUSTOM_ITEMS_REQUEST_EVENT,
+	type CustomItemRegistration,
+	type CustomItemsRequest,
+	CustomItemsTracker,
+} from "./custom.ts";
 import { buildCustomItemSetupPrompt } from "./custom-setup.ts";
 import { FullRedrawScheduler } from "./redraw.ts";
 import {
@@ -246,7 +251,34 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 	const cacheCelebration = new CacheCelebrationController(() => requestRender?.());
 	let tracker: SessionWorktreeTracker | undefined;
 	const usageTracker = new UsageTracker({ onChange: () => requestRender?.() });
-	const customItems = new CustomItemsTracker({ onChange: () => requestRender?.() });
+	// One request event is answered by every provider at once, so `onRegister`
+	// fires once per item while the work it guards — sizing the timer, refreshing,
+	// redrawing — is per-tracker. Coalescing to a single microtask makes N
+	// providers cost one restart and one render instead of N, and the registrations
+	// are all in place by the time it runs, so the timer is sized once from the
+	// complete set rather than N times from a growing one.
+	let registrationSettlePending = false;
+	const customItems = new CustomItemsTracker({
+		onChange: () => requestRender?.(),
+		// A registration can arrive at any point in the session, including after
+		// the timer was sized from the items that existed without it.
+		onRegister: () => {
+			if (registrationSettlePending) return;
+			registrationSettlePending = true;
+			queueMicrotask(() => {
+				registrationSettlePending = false;
+				if (settings.showCustomItems) {
+					// restartTimer alone is a no-op when no item had asked for a timer
+					// yet, which is exactly the case a late registration creates; start
+					// covers that branch and is idempotent when the timer is already up.
+					customItems.restartTimer();
+					customItems.start();
+					customItems.refresh();
+				}
+				requestRender?.();
+			});
+		},
+	});
 	let cwdGit: GitRepositoryStatus | null = null;
 	let cwdStatusAbort: AbortController | undefined;
 	let cwdStatusInFlight: Promise<void> | undefined;
@@ -258,6 +290,26 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 		operation.catch(() => {
 			// Statusline enrichment is best-effort and must never interrupt the agent.
 		});
+	};
+
+	/**
+	 * Ask every other extension for the items it wants on the statusline.
+	 *
+	 * Sent at session start rather than from this factory, because extensions
+	 * load in sequence: a factory-time emit would only ever reach providers that
+	 * happen to be configured *before* this package. By session start they have
+	 * all run, and the event fires again whenever `/statusline` opens so that a
+	 * provider which starts listening mid-session is still picked up.
+	 *
+	 * Interactive only. Custom items exist to fill footer segments, and a print
+	 * or RPC run has no footer, so asking would buy nothing and cost providers a
+	 * poll loop against a payload this extension never installs.
+	 */
+	const requestCustomItems = (): void => {
+		const request: CustomItemsRequest = {
+			register: (registration: CustomItemRegistration) => customItems.register(registration),
+		};
+		pi.events?.emit(CUSTOM_ITEMS_REQUEST_EVENT, request);
 	};
 
 	const refreshCwdStatus = (ctx: ExtensionContext): Promise<void> => {
@@ -418,6 +470,9 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 			// starts from what is on disk rather than a snapshot that may be hours
 			// old and missing another session's changes.
 			applySettings(ctx, await settingsStore.load(), false);
+			// Same reason the file is re-read: the menu should show what is true now,
+			// including an item from a provider that loaded after the session began.
+			requestCustomItems();
 
 			await ctx.ui.custom<void>((tui, _theme, _keybindings, done) => {
 				const tracked = trackSelectedLabel(getSettingsListTheme());
@@ -450,6 +505,7 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 							customItems: createCustomItemsSubmenu(submenuHost),
 						},
 						home,
+						customItems.states(),
 					),
 					10,
 					settingsTheme,
@@ -557,6 +613,9 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 		});
 
 		resetTracker(ctx);
+		// Last, so a provider that registers synchronously runs against the payload
+		// factory resetTracker just installed rather than an empty one.
+		requestCustomItems();
 	});
 
 	pi.on("tool_call", (event) => {
