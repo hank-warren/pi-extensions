@@ -1,6 +1,6 @@
 {
   "name": "@hank-warren/pi-statusline",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Compact Pi footer statusline with Git/worktree context, token usage, and neon celebrations for exceptional prompt-cache hits.",
   "type": "module",
   "keywords": [

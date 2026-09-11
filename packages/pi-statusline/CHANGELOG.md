@@ -1,5 +1,15 @@
 # @hank-warren/pi-statusline
 
+## 0.10.0
+
+### Minor Changes
+
+- Let other extensions provide custom statusline items as in-process functions through the `pi-statusline:custom-items:request` event, without shell commands or a process spawn on each refresh.
+
+  Registered items receive the same session payload as command items and share their refresh scheduler, timeouts, failure grace period, and output sanitization. Providers can return `null` to hide an item, receive an abort signal on timeout, and replace an existing registration by id.
+
+  The `/statusline` custom item list identifies extension-provided rows and persists their enabled state. Settings can pin their order and override refresh intervals and timeouts; existing command items keep priority when an id collides. Providers are discovered at interactive session start and whenever `/statusline` opens, independently of extension load order.
+
 ## 0.9.0
 
 ### Minor Changes
