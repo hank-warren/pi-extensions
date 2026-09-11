@@ -251,17 +251,32 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 	const cacheCelebration = new CacheCelebrationController(() => requestRender?.());
 	let tracker: SessionWorktreeTracker | undefined;
 	const usageTracker = new UsageTracker({ onChange: () => requestRender?.() });
+	// One request event is answered by every provider at once, so `onRegister`
+	// fires once per item while the work it guards — sizing the timer, refreshing,
+	// redrawing — is per-tracker. Coalescing to a single microtask makes N
+	// providers cost one restart and one render instead of N, and the registrations
+	// are all in place by the time it runs, so the timer is sized once from the
+	// complete set rather than N times from a growing one.
+	let registrationSettlePending = false;
 	const customItems = new CustomItemsTracker({
 		onChange: () => requestRender?.(),
 		// A registration can arrive at any point in the session, including after
 		// the timer was sized from the items that existed without it.
 		onRegister: () => {
-			if (settings.showCustomItems) {
-				customItems.restartTimer();
-				customItems.start();
-				customItems.refresh();
-			}
-			requestRender?.();
+			if (registrationSettlePending) return;
+			registrationSettlePending = true;
+			queueMicrotask(() => {
+				registrationSettlePending = false;
+				if (settings.showCustomItems) {
+					// restartTimer alone is a no-op when no item had asked for a timer
+					// yet, which is exactly the case a late registration creates; start
+					// covers that branch and is idempotent when the timer is already up.
+					customItems.restartTimer();
+					customItems.start();
+					customItems.refresh();
+				}
+				requestRender?.();
+			});
 		},
 	});
 	let cwdGit: GitRepositoryStatus | null = null;

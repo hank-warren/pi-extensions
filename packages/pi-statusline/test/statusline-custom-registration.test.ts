@@ -320,13 +320,50 @@ test("the settings entry wins for every field it names; the registration fills t
 	tracker.dispose();
 });
 
-test("a registration is ignored rather than thrown on when it is unusable", () => {
+test("a registration is refused rather than thrown on when it is unusable", () => {
 	const { tracker } = trackerWith();
-	const bad = tracker as unknown as { register: (value: unknown) => void };
+	const bad = tracker as unknown as { register: (value: unknown) => boolean };
+	// Refusing has to be reported, because a refused registration has no row and
+	// no error anywhere: the return value is the only place a provider can see it.
 	assert.doesNotThrow(() => bad.register({ id: "", run: () => "x" }));
-	assert.doesNotThrow(() => bad.register({ id: "no-run" }));
-	assert.doesNotThrow(() => bad.register({ id: "wrong", run: "not a function" }));
+	assert.equal(bad.register({ id: "", run: () => "x" }), false, "an empty id is refused");
+	assert.equal(bad.register({ id: "   ", run: () => "x" }), false, "a blank id is refused");
+	assert.equal(bad.register({ id: "no-run" }), false, "a missing run is refused");
+	assert.equal(bad.register({ id: "wrong", run: "not a function" }), false, "a non-function run is refused");
 	assert.deepEqual(tracker.states(), [], "a provider's mistake costs it its item, not the footer");
+
+	assert.equal(tracker.register({ id: "good", run: () => "x" }), true, "a usable registration reports success");
+	assert.deepEqual(
+		tracker.states().map((state) => state.id),
+		["good"],
+		"and only that one reaches the footer",
+	);
+	tracker.dispose();
+});
+
+test("a registration's own interval and timeout are validated, not passed through raw", () => {
+	const scheduled: number[] = [];
+	const tracker = new CustomItemsTracker({
+		schedule: (_callback, intervalMs) => {
+			scheduled.push(intervalMs);
+			return intervalMs;
+		},
+		cancel: () => {},
+	});
+	// Nonsense from a provider must not reach the scheduler: a negative or NaN
+	// interval would otherwise become the tick rate for every other item.
+	const loose = tracker as unknown as { register: (value: unknown) => boolean };
+	loose.register({ id: "nonsense", run: () => "x", refreshInterval: -5, timeoutMs: Number.NaN });
+	tracker.start();
+	assert.deepEqual(scheduled, [], "an unusable interval leaves the item event-driven");
+
+	loose.register({ id: "sane", run: () => "x", refreshInterval: 45 });
+	tracker.start();
+	assert.deepEqual(scheduled, [45_000], "a usable one sets the tick");
+
+	// A registration may not exceed the ceiling a command entry is held to.
+	loose.register({ id: "greedy", run: () => "x", timeoutMs: MAX_TIMEOUT_MS * 10 });
+	assert.ok(MAX_TIMEOUT_MS < MAX_TIMEOUT_MS * 10);
 	tracker.dispose();
 });
 

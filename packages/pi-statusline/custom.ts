@@ -77,7 +77,15 @@ export interface CustomItemRegistration {
 
 /** The payload of {@link CUSTOM_ITEMS_REQUEST_EVENT}. */
 export interface CustomItemsRequest {
-	register(registration: CustomItemRegistration): void;
+	/**
+	 * Returns whether the registration was accepted.
+	 *
+	 * A rejected one is dropped silently *here* on purpose — see
+	 * {@link CustomItemsTracker.register} — so the boolean is the only signal a
+	 * provider gets that its `id` or `run` was unusable. Ignoring it means a typo
+	 * shows up as a segment that never appears, with nothing to read anywhere.
+	 */
+	register(registration: CustomItemRegistration): boolean;
 }
 
 /** Shown for an entry that names no command and has no registration yet. */
@@ -133,8 +141,15 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Positive finite seconds, or undefined for anything unusable. */
-function positiveSeconds(value: unknown): number | undefined {
+/**
+ * A positive finite number, or undefined for anything unusable.
+ *
+ * The same check serves both units: seconds off a settings entry and the
+ * milliseconds a registration names. Callers pass the validated result on
+ * rather than the raw input, so a future normalisation here cannot be
+ * silently bypassed by one of them.
+ */
+function positiveNumber(value: unknown): number | undefined {
 	if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return undefined;
 	return value;
 }
@@ -180,12 +195,12 @@ export function normalizeCustomItems(value: unknown): CustomItem[] {
 		taken.add(id);
 		// `enabled` is the menu's field; everything else is the user's.
 		const enabled = entry.enabled !== false;
-		const timeoutSeconds = positiveSeconds(entry.timeout);
+		const timeoutSeconds = positiveNumber(entry.timeout);
 		const timeoutMs = Math.min(
 			timeoutSeconds === undefined ? DEFAULT_TIMEOUT_MS : timeoutSeconds * 1000,
 			MAX_TIMEOUT_MS,
 		);
-		const refreshInterval = positiveSeconds(entry.refreshInterval);
+		const refreshInterval = positiveNumber(entry.refreshInterval);
 		const base = {
 			id,
 			enabled,
@@ -417,29 +432,30 @@ export class CustomItemsTracker {
 	/**
 	 * Adopt an item provided by another extension.
 	 *
-	 * Idempotent on id and deliberately silent about bad input: this runs inside
-	 * a provider's event handler, where a throw would be reported as that
-	 * extension failing rather than as a registration this one refused.
+	 * Idempotent on id, and it reports rather than throws: this runs inside a
+	 * provider's event handler, where a throw would surface as *that* extension
+	 * failing rather than as a registration this one refused. The return value is
+	 * how a provider learns its `id` or `run` was unusable, since nothing else
+	 * here can name an item that never got far enough to have a row.
 	 */
-	register(registration: CustomItemRegistration): void {
+	register(registration: CustomItemRegistration): boolean {
 		const id = typeof registration?.id === "string" ? registration.id.trim() : "";
-		if (id.length === 0 || typeof registration.run !== "function") return;
+		if (id.length === 0 || typeof registration.run !== "function") return false;
 		// A re-registration replaces the function, so whatever the old one is doing
 		// is already obsolete; its record keeps the last good value so the footer
 		// does not blink while the new one produces its first.
 		if (this.registrations.has(id)) this.records.get(id)?.abort?.();
+		const refreshInterval = positiveNumber(registration.refreshInterval);
+		const timeoutMs = positiveNumber(registration.timeoutMs);
 		this.registrations.set(id, {
 			id,
 			run: registration.run,
-			...(positiveSeconds(registration.refreshInterval) === undefined
-				? {}
-				: { refreshInterval: registration.refreshInterval }),
-			...(typeof registration.timeoutMs === "number" && Number.isFinite(registration.timeoutMs) && registration.timeoutMs > 0
-				? { timeoutMs: Math.min(registration.timeoutMs, MAX_TIMEOUT_MS) }
-				: {}),
+			...(refreshInterval === undefined ? {} : { refreshInterval }),
+			...(timeoutMs === undefined ? {} : { timeoutMs: Math.min(timeoutMs, MAX_TIMEOUT_MS) }),
 		});
 		this.recompute();
 		this.onRegister?.();
+		return true;
 	}
 
 	/**
@@ -460,13 +476,15 @@ export class CustomItemsTracker {
 			}
 			if (registration === undefined) return item;
 			const { error: _unbound, ...bound } = item;
+			// The entry's own interval wins; the registration supplies the one it
+			// left unsaid. Parenthesised because `??` binds tighter than `?:` — the
+			// grouping is load-bearing and easy to "fix" wrongly.
+			const refreshInterval = item.refreshInterval ?? registration.refreshInterval;
 			return {
 				...bound,
 				kind: "extension" as const,
 				run: registration.run,
-				...(item.refreshInterval ?? registration.refreshInterval
-					? { refreshInterval: item.refreshInterval ?? registration.refreshInterval }
-					: {}),
+				...(refreshInterval === undefined ? {} : { refreshInterval }),
 				timeoutMs: item.timeoutExplicit ? item.timeoutMs : (registration.timeoutMs ?? DEFAULT_TIMEOUT_MS),
 			};
 		});

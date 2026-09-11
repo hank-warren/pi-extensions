@@ -159,11 +159,11 @@ export default function myProvider(pi: ExtensionAPI): void {
           run: (payload: Record<string, unknown>, signal: AbortSignal) => Promise<string | null>;
           refreshInterval?: number;
           timeoutMs?: number;
-        }) => void)
+        }) => boolean)
       | undefined;
     if (typeof register !== "function") return;
 
-    register({
+    const accepted = register({
       id: "quota",
       refreshInterval: 60,
       timeoutMs: 5_000,
@@ -174,6 +174,9 @@ export default function myProvider(pi: ExtensionAPI): void {
         return remaining > 0 ? `\u001b[32m${remaining}%\u001b[0m` : null;
       },
     });
+    // Refused only for an unusable `id` or `run`. Nothing else reports it, so a
+    // provider that drops this sees a segment that simply never appears.
+    if (!accepted) throw new Error("pi-statusline refused the quota item");
   });
 }
 ```
@@ -185,8 +188,11 @@ The contract is the command contract, minus the process:
 - **Throwing is failing.** The message is what `/statusline` shows, and it counts against the same three-failure grace as a non-zero exit.
 - `signal` aborts at `timeoutMs` (default 5s, capped at 30s). A run that ignores it is not awaited past the deadline; its late value is dropped.
 - `register` is idempotent on `id`: registering again replaces the function and cancels the run in flight, so a provider can re-register whenever its configuration changes.
+- `register` **returns `false`** if the `id` is empty or `run` is not a function. It never throws — a throw here would be reported as *your* extension failing rather than as a registration pi-statusline refused — and a refused item has no row and no error anywhere, so the boolean is the only place a typo is visible.
 
-**The event is emitted when a session starts and again every time `/statusline` opens**, in interactive mode only. A provider therefore does not have to load before pi-statusline — subscribe in your factory and the request will come. (There is no `unregister`: registrations live and die with the session's extension instances.)
+**The event is emitted when a session starts and again every time `/statusline` opens**, in interactive mode only. A provider therefore does not have to load before pi-statusline — subscribe in your factory and the request will come.
+
+There is no `unregister`. A registration lives as long as **pi-statusline's own** extension instance, not the provider's: re-registering the same `id` replaces it, and everything is discarded when pi-statusline reloads. A provider that is unloaded mid-session without pi-statusline reloading leaves its `run` behind, still being called on the refresh interval — in practice a `/reload` reloads both, so this is a note rather than a caveat.
 
 The settings file still owns **order and enabled**:
 
