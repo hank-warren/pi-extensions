@@ -32,11 +32,14 @@ One atomic batch. Every change in it applies, or none does.
 ```jsonc
 {
   "mode": "apply",            // or "propose"
-  "expectedRevision": 7,      // refused if the set has moved on
+  "taskSetId": "…",           // required for an existing set, from get_tasks
+  "expectedRevision": 7,      // required for an existing set, from get_tasks
   "reason": "...",            // required for "propose"
   "changes": [ { "op": "done", "taskId": "t4", "summary": "..." } ]
 }
 ```
+
+Changing an existing set requires both `taskSetId` and `expectedRevision`. `init` needs neither, because it is what allocates them. A batch built against an older revision is **refused, not rebased**: the digest recheck under the lock already prevents a lost update, so this is about intent — a batch composed against revision 3 and quietly applied to revision 4 was never reviewed against the world it landed in.
 
 | op | what it does |
 | --- | --- |
@@ -46,6 +49,14 @@ One atomic batch. Every change in it applies, or none does.
 | `start`, `done`, `block`, `unblock`, `abandon`, `reopen` | Task lifecycle. |
 
 `apply` commits immediately and is what routine progress uses. `propose` saves a candidate, shows the review card, and changes nothing unless the user accepts it.
+
+The card is opened from inside the tool call, so `Esc` closes it: the tool's own cancellation signal is merged with the session and attachment generations, and a decision that arrives after the turn, the session, or the attachment has gone is dropped rather than published. Once a revision has been written it is published — there is no rollback, and a session that moved on in the meantime is told so (`published_but_detached`) instead of being handed someone else's task set.
+
+### One candidate at a time
+
+A corrected proposal **replaces** its predecessor: the replacement is written first, then the old candidate is retired as `superseded` with its content intact. So "request changes → propose again" leaves exactly one thing to decide, `/tasks review` reopens the corrected draft rather than the one that was rejected, and an obsolete candidate never latches "a revision is awaiting review" into every later turn. A candidate whose base the set has moved past is retired the same way — it can never be published again, and the agent is free to propose it afresh against the new revision.
+
+Retired never means deleted. A superseded or cancelled proposal stays on disk, readable and re-proposable, and a card left over from an earlier round is re-checked against the stored record before it can publish anything.
 
 ## What it refuses, and why
 
@@ -60,10 +71,12 @@ One atomic batch. Every change in it applies, or none does.
 
 ```
 ~/.pi/agent/tasks/<task-set-id>/
-  tasks.md              the accepted document
-  revisions/<n>.md      an immutable snapshot of every accepted revision
-  proposals/<id>.json   candidates awaiting review
-  tasks.lock            the cross-process lock
+  tasks.md                 the accepted document
+  revisions/<n>.md         an immutable snapshot of every accepted revision
+  revisions/orphan-*.md    a snapshot an interrupted transaction prepared and
+                           never published — retained, never accepted history
+  proposals/<id>.json      candidates, pending and resolved
+  tasks.lock               the cross-process lock
 ```
 
 `tasks.md` is readable Markdown with `[ ] [/] [!] [x] [-]` status markers and HTML-comment annotations carrying ids and completions. Lines the parser does not recognise are preserved verbatim in place, so a status-only update leaves the rest of the document alone.
@@ -71,6 +84,8 @@ One atomic batch. Every change in it applies, or none does.
 Three layers guard a write: an in-process queue per path, a [`proper-lockfile`](https://www.npmjs.com/package/proper-lockfile) lock around the whole read-validate-write window, and a SHA-256 digest of the bytes the change was computed from, rechecked under the lock immediately before the rename.
 
 **That is optimistic conflict detection, not a filesystem compare-and-swap.** A writer that ignores the lock — an editor, another tool — can change the file between the digest check and the rename, and no POSIX filesystem prevents it. What the digest buys is that the next read *notices*, stops mutating, and asks a human, instead of merging silently. Every accepted revision is still under `revisions/`.
+
+The snapshot lands before the live document is renamed, so a crash between the two leaves a snapshot for a revision the live document never reached. That snapshot was *prepared*, never accepted — accepted history is exactly the revisions the live document has reached — and the next write resolves it rather than wedging: identical bytes are an idempotent resume, anything else is moved aside under an `orphan-` name and reported. Nothing is deleted, no accepted snapshot is ever overwritten, and approval is never inferred from bytes nobody published.
 
 ## The session's side
 
@@ -85,6 +100,13 @@ When the document and the recorded pointer disagree, mutation stops until `/task
 For the human: `show`, `review`, `new`, `archive`, `export <path>`, `recover`. Bare `/tasks` opens the menu. There is deliberately no command that edits tasks — that is `update_tasks`, and a second editing interface is one the model would start recommending.
 
 `archive` refuses while any task is open; it never closes work for you. `export` writes a copy and does not touch the accepted set, and will not overwrite an existing file.
+
+## Known limitations
+
+- **Resolved proposals are never pruned.** The pending scan reads every file under `proposals/`, and it runs on each read, write, and turn boundary. Proportional to how many revisions a set has ever proposed, not to how many are open. An index or a `resolved/` subdirectory would bound it; that is deferred rather than done here, because it is a storage-layout change and this is not the round for one.
+- **The containing directory is not fsynced after the rename.** The document is fsynced before it; recovery covers the remaining window.
+- **No live canary.** Every test here mocks `ExtensionAPI`, so nothing in this package proves what a model *chooses* to call, or how the card renders in a real terminal.
+- A line you type into `tasks.md` by hand is preserved verbatim, but it is never promoted to a task — `/tasks recover → attach` keeps it as a note, not as work.
 
 ## Install
 

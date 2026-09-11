@@ -58,13 +58,18 @@ const UPDATE_TASKS_PARAMS = Type.Object({
 		minItems: 1,
 		description: "The changes to apply as one batch, in order.",
 	}),
+	// Optional in the schema because `init` creates the identity it would name,
+	// and required at runtime for every other batch: see the tool description.
 	taskSetId: Type.Optional(
-		Type.String({ description: "The task set being changed. Omit for the attached one." }),
+		Type.String({
+			description:
+				"Required for every change to an existing task set: the id get_tasks reported. Omit only for init, which allocates it.",
+		}),
 	),
 	expectedRevision: Type.Optional(
 		Type.Integer({
 			description:
-				"The accepted revision this batch was built against, from get_tasks. The call is refused if the set has moved on.",
+				"Required for every change to an existing task set: the accepted revision get_tasks reported. A batch built against an older revision is refused rather than rebased onto the newer one. Omit only for init.",
 		}),
 	),
 	reason: Type.Optional(
@@ -86,7 +91,9 @@ export function registerUpdateTasksTool(pi: ExtensionAPI, controller: TasksContr
 				"Change the phased task set in one atomic batch. Either every change in the batch applies or none does.",
 				'mode "apply" commits ordinary maintenance and progress immediately: starting a task, closing it with a summary, blocking it, adding a task the work turned out to need.',
 				'mode "propose" saves the batch as a candidate revision and shows the user a review card with the computed diff; it changes nothing until the user accepts. Use it when the user asks to change what the work is.',
-				"Every targeted change names an exact id from get_tasks. A new task set is created with a single init change.",
+				"Every targeted change names an exact id from get_tasks.",
+				"Changing an existing set requires both taskSetId and expectedRevision exactly as get_tasks reported them; a batch built against an older revision is refused, not rebased.",
+				"A new task set is created with a single init change, which needs neither.",
 			].join(" "),
 			promptSnippet: UPDATE_TASKS_SNIPPET,
 			promptGuidelines: [...UPDATE_TASKS_GUIDELINES],
@@ -116,7 +123,7 @@ export function registerUpdateTasksTool(pi: ExtensionAPI, controller: TasksContr
 					: input.changes;
 				return { ...input, mode, changes } as UpdateTasksParams;
 			},
-			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 				const changes = normalizeChanges(params.changes);
 				if (!changes.ok) {
 					return toolResult({
@@ -133,6 +140,9 @@ export function registerUpdateTasksTool(pi: ExtensionAPI, controller: TasksContr
 							? { expectedRevision: params.expectedRevision }
 							: {}),
 						...(params.reason !== undefined ? { reason: params.reason } : {}),
+						// Esc must close the review card, so the tool's own abort travels
+						// with the call rather than being dropped at this boundary.
+						...(signal ? { signal } : {}),
 					},
 					ctx,
 				);

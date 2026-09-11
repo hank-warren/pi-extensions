@@ -32,6 +32,12 @@ export interface TasksHarnessOptions {
 	mode?: "tui" | "print" | "json";
 	/** What the human does with each review, in order. Defaults to dismissing. */
 	reviews?: ReviewOutcome[];
+	/**
+	 * Takes precedence over `reviews`, for the cases where *what happens while
+	 * the card is open* is the thing under test: an interrupted turn, a session
+	 * replacement, an answer that arrives too late.
+	 */
+	onReview?: (summary: ReviewRequest, index: number) => ReviewOutcome | Promise<ReviewOutcome>;
 	branch?: unknown[];
 	idle?: boolean;
 	/**
@@ -54,6 +60,9 @@ export interface TasksHarness {
 	cards: Array<{ title: string; body: string }>;
 	sentMessages: Array<{ message: unknown; options?: unknown }>;
 	reviewRequests: ReviewRequest[];
+	reviewSignals: Array<AbortSignal | undefined>;
+	/** The Pi events the extension subscribed to, for the registration surface. */
+	events: Map<string, unknown>;
 	tasksMenuCalls: unknown[];
 	recoveryMenuCalls: unknown[];
 	emit(event: string, payload?: Record<string, unknown>): Promise<unknown[]>;
@@ -95,6 +104,8 @@ export function createTasksHarness(options: TasksHarnessOptions = {}): TasksHarn
 	});
 
 	const reviewRequests: ReviewRequest[] = [];
+	/** The signal each review was opened with, so a test can assert Esc reaches it. */
+	const reviewSignals: Array<AbortSignal | undefined> = [];
 	const tasksMenuCalls: unknown[] = [];
 	const recoveryMenuCalls: unknown[] = [];
 	const reviews = [...(options.reviews ?? [])];
@@ -115,8 +126,14 @@ export function createTasksHarness(options: TasksHarnessOptions = {}): TasksHarn
 			return `00000000-0000-4000-8000-${String(nextId).padStart(12, "0")}`;
 		},
 		loadInteractiveUi: async () => ({
-			showTaskReviewMenu: async (_ctx: unknown, menuOptions: { summary: ReviewRequest }) => {
+			showTaskReviewMenu: async (
+				_ctx: unknown,
+				menuOptions: { summary: ReviewRequest; signal?: AbortSignal },
+			) => {
+				const index = reviewRequests.length;
 				reviewRequests.push(menuOptions.summary);
+				reviewSignals.push(menuOptions.signal);
+				if (options.onReview) return options.onReview(menuOptions.summary, index);
 				return reviews.shift() ?? { kind: "dismissed" as const };
 			},
 			showTasksMenu: async (_ctx: unknown, menuOptions: unknown) => {
@@ -146,6 +163,8 @@ export function createTasksHarness(options: TasksHarnessOptions = {}): TasksHarn
 		cards,
 		sentMessages: mock.sentMessages,
 		reviewRequests,
+		reviewSignals,
+		events: events as unknown as Map<string, unknown>,
 		tasksMenuCalls,
 		recoveryMenuCalls,
 		async emit(event, payload = {}) {
@@ -173,6 +192,7 @@ export async function callTool(
 	harness: TasksHarness,
 	name: string,
 	params: Record<string, unknown>,
+	signal?: AbortSignal,
 ): Promise<{ payload: Record<string, unknown>; isError: boolean }> {
 	const tool = harness.tools.get(name);
 	if (!tool) throw new Error(`tool not registered: ${name}`);
@@ -181,15 +201,37 @@ export async function callTool(
 	const execute = tool.execute as (
 		id: string,
 		params: unknown,
-		signal: undefined,
+		signal: AbortSignal | undefined,
 		onUpdate: undefined,
 		ctx: unknown,
 	) => Promise<{ details?: unknown; isError?: boolean }>;
-	const result = await execute("call-1", prepared, undefined, undefined, harness.ctx);
+	const result = await execute("call-1", prepared, signal, undefined, harness.ctx);
 	return {
 		payload: (result.details ?? {}) as Record<string, unknown>,
 		isError: result.isError === true,
 	};
+}
+
+/**
+ * The identity every existing-set batch must now carry, as a real agent would
+ * have read it out of `get_tasks`.
+ */
+export function currentIdentity(harness: TasksHarness): {
+	taskSetId: string;
+	expectedRevision: number;
+} {
+	const set = harness.controller.attachedSet;
+	if (!set) throw new Error("no task set is attached");
+	return { taskSetId: set.taskSetId, expectedRevision: set.revision };
+}
+
+/** `update_tasks` against the attached set, with the required identity filled in. */
+export async function updateTasks(
+	harness: TasksHarness,
+	params: Record<string, unknown>,
+	signal?: AbortSignal,
+): Promise<{ payload: Record<string, unknown>; isError: boolean }> {
+	return callTool(harness, "update_tasks", { ...currentIdentity(harness), ...params }, signal);
 }
 
 /** A three-phase set, as the model would create one. */

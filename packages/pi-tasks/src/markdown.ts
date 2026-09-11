@@ -85,9 +85,16 @@ interface SetMetadata {
 	removedPhases: RemovedPhase[];
 }
 
+/**
+ * Heading for the lines whose anchor has gone. Emitted only when there are
+ * such lines, so an ordinary document never grows a section it did not have.
+ */
+export const ORPHANED_EXTRAS_HEADING = "<!-- pi-tasks: lines whose task or phase was removed -->";
+
 export function serializeTaskDocument(document: TaskDocument): string {
 	const { set, extras } = document;
 	const byAnchor = groupExtras(extras);
+	const emitted = new Set<string>(["start"]);
 	const lines: string[] = [];
 	lines.push(`# ${set.label ? `Tasks — ${set.label}` : "Tasks"}`);
 	lines.push("");
@@ -97,12 +104,28 @@ export function serializeTaskDocument(document: TaskDocument): string {
 	for (const phase of set.phases) {
 		lines.push("");
 		lines.push(`## ${phase.name} <!-- ${phase.id} -->`);
-		lines.push(...(byAnchor.get(`phase:${phase.id}`) ?? []));
+		const phaseKey = `phase:${phase.id}`;
+		emitted.add(phaseKey);
+		lines.push(...(byAnchor.get(phaseKey) ?? []));
 		if (phase.tasks.length > 0) lines.push("");
 		for (const task of phase.tasks) {
 			lines.push(serializeTaskLine(task));
-			lines.push(...(byAnchor.get(`task:${task.id}`) ?? []));
+			const taskKey = `task:${task.id}`;
+			emitted.add(taskKey);
+			lines.push(...(byAnchor.get(taskKey) ?? []));
 		}
+	}
+
+	// A line the user wrote under a task that has since been removed has no
+	// anchor left to sit beside. Dropping it would be a silent deletion of
+	// something this package never owned, so it is retained at the end instead,
+	// in the order it was read. Re-parsing re-anchors it to the last task, which
+	// makes the placement stable rather than drifting on every write.
+	const orphaned = extras.filter((extra) => !emitted.has(anchorKey(extra.anchor)));
+	if (orphaned.length > 0) {
+		lines.push("");
+		lines.push(ORPHANED_EXTRAS_HEADING);
+		lines.push(...orphaned.map((extra) => extra.text));
 	}
 	return `${lines.join("\n").replace(/\n+$/u, "")}\n`;
 }
@@ -135,11 +158,14 @@ function setMetadata(set: TaskSet): SetMetadata {
 	};
 }
 
+function anchorKey(anchor: ExtraAnchor): string {
+	return anchor.kind === "start" ? "start" : `${anchor.kind}:${anchor.id}`;
+}
+
 function groupExtras(extras: readonly DocumentExtra[]): Map<string, string[]> {
 	const grouped = new Map<string, string[]>();
 	for (const extra of extras) {
-		const key =
-			extra.anchor.kind === "start" ? "start" : `${extra.anchor.kind}:${extra.anchor.id}`;
+		const key = anchorKey(extra.anchor);
 		grouped.set(key, [...(grouped.get(key) ?? []), extra.text]);
 	}
 	return grouped;
@@ -158,6 +184,9 @@ export function parseTaskDocument(text: string): ParseResult {
 
 	for (const rawLine of lines) {
 		const line = rawLine.trimEnd();
+		// Our own marker for retained orphans: structural, so it is regenerated on
+		// each write rather than kept as an extra that would re-emit a second copy.
+		if (line.trim() === ORPHANED_EXTRAS_HEADING) continue;
 		const metadataMatch = METADATA_RE.exec(line.trim());
 		if (metadataMatch) {
 			if (metadata) return { ok: false, error: "document has more than one metadata comment" };

@@ -7,14 +7,22 @@
  * recorded as `reason` and is never the thing the user approves — a summary
  * cannot be wrong about itself, and a diff can.
  *
- * Proposals are durable. Accepting one that no longer matches its base fails
- * and *keeps* the file, so the agent can refresh it instead of losing the work;
- * cancelling resolves it without deleting it, for the same reason.
+ * Proposals are durable, and nothing here ever deletes one. Accepting one that
+ * no longer matches its base fails and *keeps* the file, so the agent can
+ * refresh it instead of losing the work; cancelling and superseding resolve it
+ * in place, for the same reason.
+ *
+ * At most one proposal per task set is `pending`. A corrected proposal replaces
+ * its predecessor by publishing itself first and then retiring the old one as
+ * `superseded`, so a crash between the two leaves two pending records rather
+ * than none — which is recoverable, where a lost replacement would not be.
  */
 
 import { randomUUID } from "node:crypto";
-import { mkdir, readdir, readFile, rm } from "node:fs/promises";
+import { constants } from "node:fs";
+import { mkdir, open, readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { parseTaskDocument } from "./markdown.js";
 import {
 	allTasks,
 	findTask,
@@ -27,7 +35,21 @@ export const PROPOSAL_SCHEMA_VERSION = 1;
 const PROPOSAL_ID_RE = /^[0-9a-f-]{36}$/u;
 const MAX_PROPOSAL_BYTES = 2 * 1024 * 1024;
 
-export type ProposalStatus = "pending" | "accepted" | "cancelled";
+/**
+ * `superseded` is terminal like the other two: the content stays on disk and
+ * stays inspectable, but it can never be published and never drives the review
+ * state. It exists so that a corrected proposal, or an accepted revision that
+ * moved the base, does not leave an obsolete candidate latched as "pending"
+ * forever — which would put a review sentence in every system prompt.
+ */
+export type ProposalStatus = "pending" | "accepted" | "cancelled" | "superseded";
+
+export const PROPOSAL_STATUSES: readonly ProposalStatus[] = [
+	"pending",
+	"accepted",
+	"cancelled",
+	"superseded",
+];
 
 export interface TaskProposal {
 	schemaVersion: typeof PROPOSAL_SCHEMA_VERSION;
@@ -40,6 +62,10 @@ export interface TaskProposal {
 	baseDigest: string;
 	createdAt: string;
 	resolvedAt?: string;
+	/** Which proposal replaced this one, when `status === "superseded"`. */
+	supersededBy?: string;
+	/** Why it was retired, for the user reading a resolved candidate later. */
+	resolutionReason?: string;
 	/** The complete proposed document, ready to publish unchanged. */
 	proposedDocument: string;
 	/** Computed by comparing base and proposed sets by id. Not model-authored. */
@@ -64,19 +90,52 @@ export async function writeProposal(root: string, proposal: TaskProposal): Promi
 	return path;
 }
 
+/**
+ * Read one proposal, bounding the read *before* it allocates.
+ *
+ * A size check after `readFile` is decorative: the bytes are already in memory
+ * by then. The handle is opened `O_NOFOLLOW`, stat-ed for a regular file, and
+ * refused on size before anything is read — the same discipline the task
+ * document gets, for a file in the same user-writable directory.
+ *
+ * Identity is checked on the way out: the record must agree with the filename
+ * it was found under, with the task set that was asked for, and with the task
+ * set its own proposed document claims. A proposal that disagrees with any of
+ * the three could otherwise redirect a publication into another set.
+ */
 export async function readProposal(
 	root: string,
 	taskSetId: string,
 	proposalId: string,
 ): Promise<TaskProposal | undefined> {
 	if (!PROPOSAL_ID_RE.test(proposalId)) return undefined;
+	let raw: string;
 	try {
-		const raw = await readFile(proposalPath(root, taskSetId, proposalId), "utf8");
-		if (Buffer.byteLength(raw, "utf8") > MAX_PROPOSAL_BYTES) return undefined;
-		return parseProposal(JSON.parse(raw));
+		const handle = await open(
+			proposalPath(root, taskSetId, proposalId),
+			constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+		);
+		try {
+			const stats = await handle.stat();
+			if (!stats.isFile() || stats.size > MAX_PROPOSAL_BYTES) return undefined;
+			raw = await handle.readFile({ encoding: "utf8" });
+		} finally {
+			await handle.close().catch(() => undefined);
+		}
 	} catch {
 		return undefined;
 	}
+	let parsed: TaskProposal | undefined;
+	try {
+		parsed = parseProposal(JSON.parse(raw));
+	} catch {
+		return undefined;
+	}
+	if (!parsed) return undefined;
+	if (parsed.proposalId !== proposalId || parsed.taskSetId !== taskSetId) return undefined;
+	const document = parseTaskDocument(parsed.proposedDocument);
+	if (!document.ok || document.document.set.taskSetId !== taskSetId) return undefined;
+	return parsed;
 }
 
 export async function listProposals(root: string, taskSetId: string): Promise<TaskProposal[]> {
@@ -92,9 +151,21 @@ export async function listProposals(root: string, taskSetId: string): Promise<Ta
 		const proposal = await readProposal(root, taskSetId, name.slice(0, -".json".length));
 		if (proposal) proposals.push(proposal);
 	}
-	return proposals.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+	return proposals.sort(
+		(left, right) =>
+			left.createdAt.localeCompare(right.createdAt) ||
+			left.proposalId.localeCompare(right.proposalId),
+	);
 }
 
+/**
+ * Pending candidates, oldest first.
+ *
+ * More than one can only exist after a crash between publishing a replacement
+ * and retiring its predecessor, which the controller converges on read. The
+ * order is total and stable (`createdAt`, then id) so two processes recovering
+ * the same directory pick the same winner.
+ */
 export async function listPendingProposals(
 	root: string,
 	taskSetId: string,
@@ -109,29 +180,24 @@ export async function resolveProposal(
 	proposal: TaskProposal,
 	status: Exclude<ProposalStatus, "pending">,
 	now: string,
+	detail: { supersededBy?: string; resolutionReason?: string } = {},
 ): Promise<TaskProposal> {
-	const resolved: TaskProposal = { ...proposal, status, resolvedAt: now };
+	const resolved: TaskProposal = {
+		...proposal,
+		status,
+		resolvedAt: now,
+		...(detail.supersededBy ? { supersededBy: detail.supersededBy } : {}),
+		...(detail.resolutionReason ? { resolutionReason: detail.resolutionReason } : {}),
+	};
 	await writeProposal(root, resolved);
 	return resolved;
-}
-
-export async function deleteProposal(
-	root: string,
-	taskSetId: string,
-	proposalId: string,
-): Promise<void> {
-	try {
-		await rm(proposalPath(root, taskSetId, proposalId), { force: true });
-	} catch {
-		// A proposal that cannot be removed is clutter, never a failed operation.
-	}
 }
 
 function parseProposal(value: unknown): TaskProposal | undefined {
 	if (!isRecord(value)) return undefined;
 	if (value.schemaVersion !== PROPOSAL_SCHEMA_VERSION) return undefined;
-	const status = value.status;
-	if (status !== "pending" && status !== "accepted" && status !== "cancelled") return undefined;
+	const status = PROPOSAL_STATUSES.find((candidate) => candidate === value.status);
+	if (!status) return undefined;
 	if (typeof value.proposalId !== "string" || !PROPOSAL_ID_RE.test(value.proposalId)) {
 		return undefined;
 	}
@@ -149,6 +215,10 @@ function parseProposal(value: unknown): TaskProposal | undefined {
 		baseDigest: value.baseDigest,
 		createdAt: typeof value.createdAt === "string" ? value.createdAt : "",
 		...(typeof value.resolvedAt === "string" ? { resolvedAt: value.resolvedAt } : {}),
+		...(typeof value.supersededBy === "string" ? { supersededBy: value.supersededBy } : {}),
+		...(typeof value.resolutionReason === "string"
+			? { resolutionReason: value.resolutionReason }
+			: {}),
 		proposedDocument: value.proposedDocument,
 		diff: stringArray(value.diff),
 		applied: stringArray(value.applied),

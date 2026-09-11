@@ -3,10 +3,12 @@
  *
  * Layout, under `<agentDir>/tasks/<taskSetId>/`:
  *
- *   tasks.md            the accepted current document
- *   revisions/<n>.md    the immutable snapshot of every accepted revision
- *   proposals/<id>.json candidate revisions awaiting review
- *   tasks.lock          the cross-process lock directory (proper-lockfile)
+ *   tasks.md              the accepted current document
+ *   revisions/<n>.md      the immutable snapshot of every accepted revision
+ *   revisions/orphan-*.md a snapshot an interrupted transaction prepared and
+ *                         never published — retained, never accepted history
+ *   proposals/<id>.json   candidate revisions awaiting review
+ *   tasks.lock            the cross-process lock directory (proper-lockfile)
  *
  * Three layers of protection, each covering what the others cannot:
  *
@@ -28,7 +30,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { lock } from "proper-lockfile";
@@ -98,8 +100,16 @@ export type LoadResult =
 /**
  * Always reads from disk. Nothing is cached across calls: the point of a file
  * store is that another session — or a person — may have moved it.
+ *
+ * `expectedTaskSetId` is the identity the *caller* asked for. A document whose
+ * metadata names a different set is refused rather than returned: it was read
+ * from one directory and would otherwise be written back to another, which
+ * turns a tampered or mis-copied file into a redirect of every later write.
  */
-export async function loadTaskDocument(path: string): Promise<LoadResult> {
+export async function loadTaskDocument(
+	path: string,
+	expectedTaskSetId?: string,
+): Promise<LoadResult> {
 	let raw: string;
 	try {
 		const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
@@ -124,13 +134,25 @@ export async function loadTaskDocument(path: string): Promise<LoadResult> {
 	}
 	const parsed = parseTaskDocument(raw);
 	if (!parsed.ok) return { kind: "invalid", reason: parsed.error };
+	if (expectedTaskSetId !== undefined && parsed.document.set.taskSetId !== expectedTaskSetId) {
+		return {
+			kind: "invalid",
+			reason: `the document at ${path} claims task set ${parsed.document.set.taskSetId}, but ${expectedTaskSetId} was requested`,
+		};
+	}
 	return {
 		kind: "loaded",
 		loaded: { document: parsed.document, raw, digest: digestOf(raw), path },
 	};
 }
 
-/** The newest accepted snapshot on disk, or undefined when there is none. */
+/**
+ * The newest accepted snapshot on disk, or undefined when there is none.
+ *
+ * Only `<n>.md` counts. An `orphan-` file is a prepared snapshot that was never
+ * published, so offering it as recovered history would be exactly the "infer
+ * approval from orphan bytes" mistake.
+ */
 export async function latestSnapshot(
 	root: string,
 	taskSetId: string,
@@ -174,6 +196,11 @@ export async function matchesOwnSnapshot(
 
 export interface CommitInput {
 	root: string;
+	/**
+	 * The identity the caller is authorised to write. Every path is derived from
+	 * this, and the document must agree with it.
+	 */
+	taskSetId: string;
 	/** The document to write, with its revision *not* yet incremented. */
 	document: TaskDocument;
 	/**
@@ -182,26 +209,57 @@ export interface CommitInput {
 	 */
 	expectedDigest: string | undefined;
 	now: string;
+	/**
+	 * Cancels the commit *before* anything is written. Checked once the lock is
+	 * held and never again: past that point the publication has begun and there
+	 * is no honest way to take it back.
+	 */
+	signal?: AbortSignal;
 }
 
 export type CommitResult =
-	| { kind: "committed"; revision: number; digest: string; raw: string; path: string }
+	| {
+			kind: "committed";
+			revision: number;
+			digest: string;
+			raw: string;
+			path: string;
+			/** Set when an interrupted transaction's prepared snapshot was retained aside. */
+			retainedOrphanSnapshot?: string;
+		}
 	| { kind: "conflict"; reason: string }
+	| { kind: "cancelled"; reason: string }
 	| { kind: "failed"; reason: string };
 
 /**
  * Publish one accepted revision.
  *
  * Ordering is deliberate: the immutable snapshot lands first, then the live
- * document is replaced by an atomic rename. A crash between the two leaves a
- * snapshot for a revision the live document has not reached yet, which recovery
- * can offer; the reverse order would leave an accepted revision with no record.
+ * document is replaced by an atomic rename. The reverse order would leave an
+ * accepted revision with no record of itself.
+ *
+ * That order has one window: a crash, a full disk, or a stolen stale lock
+ * between the two leaves `revisions/<n+1>.md` on disk while `tasks.md` is still
+ * at `n`. Such a snapshot was *prepared*, never accepted — accepted history is
+ * exactly the revisions the live document has reached — and `resolvePrepared`
+ * below is what keeps that window from wedging the set forever. It never reads
+ * approval out of those bytes: it either finds them identical to what this call
+ * is already authorised to publish (a plain idempotent resume) or moves them
+ * aside under an `orphan-` name, so nothing is destroyed and the next write can
+ * make progress.
  */
 export async function commitTaskDocument(input: CommitInput): Promise<CommitResult> {
-	const { root, document, expectedDigest, now } = input;
-	const taskSetId = document.set.taskSetId;
+	const { root, taskSetId, document, expectedDigest, now, signal } = input;
 	if (!isSafeTaskSetId(taskSetId)) {
 		return { kind: "failed", reason: `unsafe task set id: ${taskSetId}` };
+	}
+	// Writes are derived from the identity the caller asked for, never from the
+	// document's own metadata, so a tampered document cannot redirect them.
+	if (document.set.taskSetId !== taskSetId) {
+		return {
+			kind: "failed",
+			reason: `refusing to write a document for ${document.set.taskSetId} into task set ${taskSetId}`,
+		};
 	}
 	const path = taskDocumentPath(root, taskSetId);
 	return serializePath(path, async () => {
@@ -222,7 +280,13 @@ export async function commitTaskDocument(input: CommitInput): Promise<CommitResu
 			};
 		}
 		try {
-			const current = await loadTaskDocument(path);
+			// The one cancellation point. Before this line nothing has been written,
+			// so a turn the user interrupted while queued behind the lock can still
+			// stop cleanly; after it, publication has started.
+			if (signal?.aborted) {
+				return { kind: "cancelled", reason: "the turn was interrupted before anything was written" };
+			}
+			const current = await loadTaskDocument(path, taskSetId);
 			if (expectedDigest === undefined && current.kind !== "missing") {
 				return {
 					kind: "conflict",
@@ -252,21 +316,10 @@ export async function commitTaskDocument(input: CommitInput): Promise<CommitResu
 			if (Buffer.byteLength(raw, "utf8") > MAX_DOCUMENT_BYTES) {
 				return { kind: "failed", reason: `task document exceeds ${MAX_DOCUMENT_BYTES} bytes` };
 			}
-			try {
-				await writeFile(snapshotPath(root, taskSetId, next.set.revision), raw, {
-					encoding: "utf8",
-					flag: "wx",
-					mode: 0o600,
-				});
-			} catch (error: unknown) {
-				if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-					return {
-						kind: "conflict",
-						reason: `revision ${next.set.revision} was already published by another writer`,
-					};
-				}
-				return { kind: "failed", reason: describe(error) };
-			}
+			const liveRevision =
+				current.kind === "loaded" ? current.loaded.document.set.revision : undefined;
+			const prepared = await publishSnapshot(root, taskSetId, next.set.revision, raw, liveRevision);
+			if (prepared.kind !== "ok") return prepared.result;
 			await writeAtomically(path, raw);
 			return {
 				kind: "committed",
@@ -274,6 +327,7 @@ export async function commitTaskDocument(input: CommitInput): Promise<CommitResu
 				digest: digestOf(raw),
 				raw,
 				path,
+				...(prepared.retainedOrphan ? { retainedOrphanSnapshot: prepared.retainedOrphan } : {}),
 			};
 		} catch (error: unknown) {
 			return { kind: "failed", reason: describe(error) };
@@ -281,6 +335,68 @@ export async function commitTaskDocument(input: CommitInput): Promise<CommitResu
 			await release?.().catch(() => undefined);
 		}
 	});
+}
+
+/**
+ * Write the revision's immutable snapshot, resolving the prepared-but-never-
+ * published snapshot an interrupted transaction can leave behind.
+ *
+ * `wx` is what makes this safe: the only way to reach the EEXIST branch is that
+ * a file for this revision already exists. Three cases, and only one of them
+ * touches anything:
+ *
+ *   - the revision is at or below the live document's revision: it is accepted
+ *     history, and nothing here may disturb it. Refuse.
+ *   - the bytes are identical to what this call is already publishing: a resume
+ *     of our own interrupted transaction. Continue to the rename; no approval is
+ *     being inferred, because the caller authorised exactly these bytes.
+ *   - anything else: a prepared snapshot for a revision the live document never
+ *     reached, so it was never accepted. Move it aside under an `orphan-` name
+ *     — retained, never deleted — and publish ours.
+ */
+async function publishSnapshot(
+	root: string,
+	taskSetId: string,
+	revision: number,
+	raw: string,
+	liveRevision: number | undefined,
+): Promise<{ kind: "ok"; retainedOrphan?: string } | { kind: "stop"; result: CommitResult }> {
+	const target = snapshotPath(root, taskSetId, revision);
+	try {
+		await writeFile(target, raw, { encoding: "utf8", flag: "wx", mode: 0o600 });
+		return { kind: "ok" };
+	} catch (error: unknown) {
+		if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+			return { kind: "stop", result: { kind: "failed", reason: describe(error) } };
+		}
+	}
+	if (liveRevision !== undefined && revision <= liveRevision) {
+		return {
+			kind: "stop",
+			result: {
+				kind: "conflict",
+				reason: `revision ${revision} is already accepted history for ${taskSetId}`,
+			},
+		};
+	}
+	let existing: string;
+	try {
+		existing = await readFile(target, "utf8");
+	} catch (error: unknown) {
+		return { kind: "stop", result: { kind: "failed", reason: describe(error) } };
+	}
+	if (existing === raw) return { kind: "ok" };
+	const orphan = join(
+		revisionsDirectory(root, taskSetId),
+		`orphan-${revision}.${Date.now()}.${randomUUID()}.md`,
+	);
+	try {
+		await rename(target, orphan);
+		await writeFile(target, raw, { encoding: "utf8", flag: "wx", mode: 0o600 });
+	} catch (error: unknown) {
+		return { kind: "stop", result: { kind: "failed", reason: describe(error) } };
+	}
+	return { kind: "ok", retainedOrphan: orphan };
 }
 
 /**
@@ -306,26 +422,6 @@ export async function writeAtomically(path: string, contents: string): Promise<v
 	}
 }
 
-/** Every managed task set on disk, newest document first. */
-export async function listTaskSets(
-	root: string,
-): Promise<Array<{ taskSetId: string; path: string; updatedAt: number }>> {
-	let names: string[];
-	try {
-		names = await readdir(root);
-	} catch {
-		return [];
-	}
-	const found: Array<{ taskSetId: string; path: string; updatedAt: number }> = [];
-	for (const name of names) {
-		if (!isSafeTaskSetId(name)) continue;
-		const path = join(root, name, DOCUMENT_NAME);
-		const stats = await stat(path).catch(() => undefined);
-		if (!stats?.isFile()) continue;
-		found.push({ taskSetId: name, path, updatedAt: stats.mtimeMs });
-	}
-	return found.sort((left, right) => right.updatedAt - left.updatedAt);
-}
 
 const pathQueues = new Map<string, Promise<unknown>>();
 

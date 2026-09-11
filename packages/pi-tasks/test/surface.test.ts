@@ -82,6 +82,26 @@ test("every change op is reachable from the schema", (t) => {
 	]);
 });
 
+test("the contract for changing an existing set is stated where the model reads it", (t) => {
+	const harness = createTasksHarness();
+	t.after(harness.cleanup);
+	const tool = harness.tools.get("update_tasks");
+	assert.ok(tool);
+	// The schema cannot mark these required, because init legitimately omits both
+	// — so the description and the guidance are where the rule has to live, and
+	// the runtime is what enforces it (see contract.test.ts).
+	assert.match(String(tool.description), /requires both taskSetId and expectedRevision/u);
+	assert.match(String(tool.description), /refused, not rebased/u);
+	const guidelines = (tool.promptGuidelines as string[]).join("\n");
+	assert.match(guidelines, /pass taskSetId and expectedRevision/u);
+	const schema = tool.parameters as { properties: Record<string, { description?: string }> };
+	assert.match(String(schema.properties.taskSetId?.description), /Required for every change/u);
+	assert.match(
+		String(schema.properties.expectedRevision?.description),
+		/Required for every change/u,
+	);
+});
+
 test("the guidance sends structural change to the tool, never to a file or a command", (t) => {
 	const harness = createTasksHarness();
 	t.after(harness.cleanup);
@@ -119,6 +139,18 @@ test("update_tasks trims the whitespace models put on enum values", async (t) =>
 	});
 	assert.equal(result.isError, false, JSON.stringify(result.payload));
 	assert.equal(result.payload.status, "applied");
+});
+
+test("every registered handler is one the smoke test expects", (t) => {
+	const harness = createTasksHarness();
+	t.after(harness.cleanup);
+	// Kept in step with EXPECTED_SURFACES in scripts/smoke-load.mjs, which
+	// compares exact sets: session_tree is here because /tree moves the branch
+	// without starting a session.
+	assert.deepEqual(
+		[...harness.events.keys()].sort(),
+		["before_agent_start", "session_shutdown", "session_start", "session_tree"],
+	);
 });
 
 test("the card renderer is registered and survives data it did not write", (t) => {

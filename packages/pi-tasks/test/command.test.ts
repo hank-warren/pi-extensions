@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { completeTasksArguments, parseTasksCommand } from "../src/command.js";
 import { listProposals } from "../src/proposals.js";
-import { callTool, createTasksHarness, SEED_INIT } from "./support/harness.js";
+import { callTool, createTasksHarness, SEED_INIT, updateTasks } from "./support/harness.js";
 
 const FIRST_SET = "00000000-0000-4000-8000-000000000001";
 
@@ -70,7 +70,7 @@ test("/tasks with an unknown subcommand says what there is, and changes nothing"
 test("/tasks review reopens a pending proposal and can accept it", async (t) => {
 	const harness = await seeded({ reviews: [{ kind: "dismissed" }, { kind: "accepted" }] });
 	t.after(harness.cleanup);
-	const proposed = await callTool(harness, "update_tasks", {
+	const proposed = await updateTasks(harness, {
 		mode: "propose",
 		reason: "drop the cutover phase",
 		changes: [{ op: "remove_task", taskId: "t4" }],
@@ -90,7 +90,7 @@ test("feedback given from /tasks review reaches the agent, because no tool call 
 		reviews: [{ kind: "dismissed" }, { kind: "changes_requested", feedback: "keep phase 3" }],
 	});
 	t.after(harness.cleanup);
-	await callTool(harness, "update_tasks", {
+	await updateTasks(harness, {
 		mode: "propose",
 		reason: "drop the cutover phase",
 		changes: [{ op: "remove_task", taskId: "t4" }],

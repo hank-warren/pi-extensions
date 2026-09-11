@@ -18,7 +18,7 @@ export const UPDATE_TASKS_TOOL_NAME = "update_tasks";
 export const GET_TASKS_SNIPPET = "Read the attached phased task set, its ids and revision";
 
 export const GET_TASKS_GUIDELINES = [
-	`Call ${GET_TASKS_TOOL_NAME} before ${UPDATE_TASKS_TOOL_NAME} whenever you do not already hold the current task ids and revision: every targeted change needs exact ids, and a stale revision is refused.`,
+	`Call ${GET_TASKS_TOOL_NAME} before ${UPDATE_TASKS_TOOL_NAME} whenever you do not already hold the current task ids and revision: every change to an existing set must pass the taskSetId and expectedRevision it reported, and a stale revision is refused rather than rebased.`,
 ];
 
 export const UPDATE_TASKS_SNIPPET =
@@ -28,7 +28,7 @@ export const UPDATE_TASKS_GUIDELINES = [
 	`Use ${UPDATE_TASKS_TOOL_NAME} to change the task set. It is the task-editing interface: never tell the user to edit the task file, and never use edit or write on it.`,
 	`Report progress with ${UPDATE_TASKS_TOOL_NAME} mode "apply" as you work — start a task before you begin it, and close it with done and a summary of what you actually did.`,
 	`When the user asks to change what the work is — adding, dropping, resequencing, rewording, or reopening tasks — call ${UPDATE_TASKS_TOOL_NAME} once with mode "propose", a reason in the user's own terms, and the complete set of changes. That renders the review card the user decides on; do not apply scope changes as a series of separate calls.`,
-	`In ${UPDATE_TASKS_TOOL_NAME}, identify every task and phase by its exact id. Never infer a task from its wording, and never reuse an id you were not given.`,
+	`In ${UPDATE_TASKS_TOOL_NAME}, identify every task and phase by its exact id, and pass taskSetId and expectedRevision exactly as ${GET_TASKS_TOOL_NAME} reported them. Never infer a task from its wording, and never reuse an id you were not given.`,
 ];
 
 /**

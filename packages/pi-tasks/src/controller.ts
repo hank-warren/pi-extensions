@@ -49,6 +49,7 @@ import {
 	listPendingProposals,
 	newProposalId,
 	type ProposalStatus,
+	readProposal,
 	resolveProposal,
 	type TaskProposal,
 	writeProposal,
@@ -97,11 +98,28 @@ export interface UpdateTasksInput {
 	mode: "apply" | "propose";
 	reason?: string;
 	changes: TaskChange[];
+	/** The tool call's own signal, so an interrupted turn stops the review. */
+	signal?: AbortSignal;
 }
 
 export interface ToolOutcome {
 	payload: Record<string, unknown>;
 	isError?: boolean;
+}
+
+/**
+ * The window one tool call is allowed to act in.
+ *
+ * `signal` is the tool's own abort merged with the session/attachment guard, so
+ * `Esc` closes a review card exactly as a session replacement does. `isCurrent`
+ * is the cheap check to repeat after every await: a menu that was opened
+ * against one attachment must not write to the one that replaced it.
+ */
+interface OperationScope {
+	readonly signal: AbortSignal;
+	isCurrent(): boolean;
+	/** True when nothing may act any more: aborted, or a newer thing owns the state. */
+	isStale(): boolean;
 }
 
 export class TasksController {
@@ -113,6 +131,17 @@ export class TasksController {
 	private pendingProposals: TaskProposal[] = [];
 	private recovery: RecoveryState | undefined;
 	private interactiveUiPromise: Promise<InteractiveUi> | undefined;
+	/**
+	 * Serializes publish-then-retire so two proposals racing in one session
+	 * cannot interleave and leave both pending, or retire the wrong one.
+	 */
+	private proposalTransition: Promise<unknown> = Promise.resolve();
+	/**
+	 * Set when a durable attachment write failed. It is reported on the next tool
+	 * result rather than swallowed: the document on disk moved on and the
+	 * session's own pointer did not, and nobody should have to guess that.
+	 */
+	private attachmentWriteFailure: string | undefined;
 
 	constructor(pi: ExtensionAPI, dependencies: TasksControllerDependencies = {}) {
 		this.pi = pi;
@@ -129,6 +158,19 @@ export class TasksController {
 
 	private allocateTaskSetId(): string {
 		return this.dependencies.newTaskSetId?.() ?? newTaskSetId();
+	}
+
+	/** Captures the guard generations and merges the caller's abort into them. */
+	private operationScope(toolSignal?: AbortSignal): OperationScope {
+		const scope = this.guard.capture();
+		const signal = toolSignal
+			? AbortSignal.any([scope.signal, toolSignal])
+			: scope.signal;
+		return {
+			signal,
+			isCurrent: scope.isCurrent,
+			isStale: () => signal.aborted || !scope.isCurrent(),
+		};
 	}
 
 	/** The current view of the world, for the widget, the footer, and menus. */
@@ -258,9 +300,9 @@ export class TasksController {
 			return;
 		}
 
-		await this.refreshProposals(attachment.taskSetId);
+		const outcome = await this.adopt(ctx, result.loaded, attachment);
 		if (!scope.isCurrent()) return;
-		const outcome = await this.adopt(result.loaded, attachment);
+		await this.loadProposals(ctx, attachment.taskSetId, result.loaded, outcome);
 		if (!scope.isCurrent()) return;
 		if (outcome === "advanced") {
 			ctx.ui.notify(
@@ -291,6 +333,7 @@ export class TasksController {
 	 * top of it.
 	 */
 	private async adopt(
+		ctx: ExtensionContext,
 		loaded: LoadedDocument,
 		attachment: TasksAttachment,
 	): Promise<"same" | "advanced" | "diverged"> {
@@ -305,7 +348,7 @@ export class TasksController {
 			(await matchesOwnSnapshot(this.root, attachment.taskSetId, revision, loaded.digest))
 		) {
 			this.recovery = undefined;
-			this.recordAttachment(loaded);
+			this.recordAttachment(ctx, loaded);
 			return "advanced";
 		}
 		this.recovery = {
@@ -330,7 +373,10 @@ export class TasksController {
 		const attachment = this.attachment;
 		if (!attachment) return;
 		const hadRecovery = this.recovery !== undefined;
-		const result = await loadTaskDocument(taskDocumentPath(this.root, attachment.taskSetId));
+		const result = await loadTaskDocument(
+			taskDocumentPath(this.root, attachment.taskSetId),
+			attachment.taskSetId,
+		);
 		if (this.attachment !== attachment) return;
 		if (result.kind !== "loaded") {
 			this.recovery = {
@@ -342,8 +388,8 @@ export class TasksController {
 				...(await this.snapshotHint(attachment.taskSetId)),
 			};
 		} else {
-			const outcome = await this.adopt(result.loaded, attachment);
-			await this.refreshProposals(attachment.taskSetId);
+			const outcome = await this.adopt(ctx, result.loaded, attachment);
+			await this.loadProposals(ctx, attachment.taskSetId, result.loaded, outcome);
 			if (outcome === "advanced") {
 				ctx.ui.notify(
 					`The task set advanced to revision ${result.loaded.document.set.revision} elsewhere; this session is now following it.`,
@@ -367,27 +413,143 @@ export class TasksController {
 		return snapshot ? { snapshotRevision: snapshot.revision, snapshotPath: snapshot.path } : {};
 	}
 
-	private async refreshProposals(taskSetId: string): Promise<void> {
-		this.pendingProposals = await listPendingProposals(this.root, taskSetId);
+	/**
+	 * Load the candidates after a classification, converging only when the
+	 * document is one this session can account for. While a conflict is
+	 * unresolved, recovery is what decides which document is real — and that is
+	 * what decides which candidates are still viable — so nothing is retired on
+	 * the strength of bytes nobody has accepted.
+	 */
+	private async loadProposals(
+		ctx: ExtensionContext | undefined,
+		taskSetId: string,
+		loaded: LoadedDocument,
+		outcome: "same" | "advanced" | "diverged",
+	): Promise<void> {
+		if (outcome === "diverged") {
+			this.pendingProposals = await listPendingProposals(this.root, taskSetId);
+			return;
+		}
+		await this.refreshProposals(ctx, taskSetId, loaded.digest);
 	}
 
-	private recordAttachment(loaded: LoadedDocument): void {
+	/**
+	 * Load the pending candidates, and converge on the invariant that there is at
+	 * most one.
+	 *
+	 * Two things can break it, and both are retired here rather than left to
+	 * latch the review state on forever:
+	 *
+	 *   - a crash between publishing a replacement and retiring its predecessor,
+	 *     which leaves two pending records. The newest wins — the ordering is
+	 *     total, so every process recovering this directory picks the same one —
+	 *     and the rest become `superseded` with their content intact.
+	 *   - a candidate whose base the accepted document has moved past. It can
+	 *     never be published again, so leaving it pending would put "a revision is
+	 *     awaiting review" in every system prompt with no way to clear it but
+	 *     Cancel. It is retired as `superseded`, stays readable on disk, and the
+	 *     agent is free to propose the same change against the new base.
+	 */
+	private async refreshProposals(
+		ctx: ExtensionContext | undefined,
+		taskSetId: string,
+		currentDigest: string | undefined,
+	): Promise<void> {
+		const pending = await listPendingProposals(this.root, taskSetId);
+		const live: TaskProposal[] = [];
+		const stale: Array<{ proposal: TaskProposal; reason: string }> = [];
+		const newest = pending.at(-1);
+		for (const proposal of pending) {
+			if (proposal !== newest) {
+				stale.push({ proposal, reason: "a corrected proposal replaced it" });
+				continue;
+			}
+			if (currentDigest !== undefined && proposal.baseDigest !== currentDigest) {
+				stale.push({ proposal, reason: "the task set moved past the revision it was built on" });
+				continue;
+			}
+			live.push(proposal);
+		}
+		for (const entry of stale) {
+			await resolveProposal(this.root, entry.proposal, "superseded", this.now(), {
+				...(newest && entry.proposal !== newest ? { supersededBy: newest.proposalId } : {}),
+				resolutionReason: entry.reason,
+			});
+		}
+		if (stale.length > 0 && live.length === 0 && ctx) {
+			ctx.ui.notify(
+				`${stale.length} proposed task revision(s) can no longer be published (${stale[0]?.reason}); they are kept on file and no longer awaiting review.`,
+				"info",
+			);
+		}
+		this.pendingProposals = live;
+	}
+
+	private recordAttachment(ctx: ExtensionContext | undefined, loaded: LoadedDocument): boolean {
 		this.attachment = {
 			taskSetId: loaded.document.set.taskSetId,
 			revision: loaded.document.set.revision,
 			digest: loaded.digest,
 			recordedAt: this.now(),
 		};
-		this.pi.appendEntry<TasksAttachment>(TASKS_STATE_ENTRY_TYPE, this.attachment);
+		return this.appendStateEntry(
+			ctx,
+			this.attachment,
+			`The task set is at revision ${this.attachment.revision}, but this session could not record that pointer`,
+		);
 	}
 
-	private recordDetached(): void {
+	private recordDetached(ctx: ExtensionContext | undefined): boolean {
 		this.attachment = undefined;
 		this.loaded = undefined;
 		this.pendingProposals = [];
 		this.recovery = undefined;
 		this.guard.nextAttachment();
-		this.pi.appendEntry(TASKS_STATE_ENTRY_TYPE, { detached: true, recordedAt: this.now() });
+		return this.appendStateEntry(
+			ctx,
+			{ detached: true, recordedAt: this.now() },
+			"This session detached from its task set, but could not record that",
+		);
+	}
+
+	/**
+	 * The durable half of an attachment change.
+	 *
+	 * A failure here is not cosmetic and is not swallowed: the document on disk
+	 * has moved and the session's record of it has not, so a later restart will
+	 * restore the older pointer, see a document it cannot explain, and stop for
+	 * recovery. Saying so now turns that into something the user was warned about
+	 * rather than something that happens to them. It is still not fatal — the
+	 * accepted revision is on disk either way — so the operation continues and the
+	 * warning rides out on the tool result.
+	 */
+	private appendStateEntry(
+		ctx: ExtensionContext | undefined,
+		data: unknown,
+		lead: string,
+	): boolean {
+		try {
+			this.pi.appendEntry(TASKS_STATE_ENTRY_TYPE, data);
+			this.attachmentWriteFailure = undefined;
+			return true;
+		} catch (error: unknown) {
+			const detail = error instanceof Error ? error.message : String(error);
+			this.attachmentWriteFailure = `${lead}: ${detail}`;
+			ctx?.ui.notify(
+				`${lead}: ${detail}. The document on disk is correct; if this session later reports an unexplained change, run /tasks recover and attach the current document.`,
+				"error",
+			);
+			return false;
+		}
+	}
+
+	/** Folded into every tool result, so a failed pointer write is never silent. */
+	private get attachmentWarning(): Record<string, unknown> {
+		return this.attachmentWriteFailure
+			? {
+					attachmentWarning: `${this.attachmentWriteFailure}. The revision on disk is correct, but this session's pointer is behind it; /tasks recover can re-attach.`,
+				}
+			: {};
 	}
 
 	refreshUi(ctx: ExtensionContext): void {
@@ -405,7 +567,7 @@ export class TasksController {
 			if (this.attachment && taskSetId === this.attachment.taskSetId) {
 				return this.describeAttached();
 			}
-			const result = await loadTaskDocument(taskDocumentPath(this.root, taskSetId));
+			const result = await loadTaskDocument(taskDocumentPath(this.root, taskSetId), taskSetId);
 			if (result.kind !== "loaded") {
 				return {
 					payload: {
@@ -448,6 +610,13 @@ export class TasksController {
 				status: "ok",
 				attached: true,
 				...describeSet(this.loaded, this.pendingProposals),
+				// Named so the next update_tasks can quote them back: both are
+				// required for an existing set, and this is where they come from.
+				updateRequires: {
+					taskSetId: this.loaded.document.set.taskSetId,
+					expectedRevision: this.loaded.document.set.revision,
+				},
+				...this.attachmentWarning,
 				...(this.recovery
 					? {
 							mutationsBlocked: true,
@@ -475,11 +644,21 @@ export class TasksController {
 		if (input.mode !== "apply" && input.mode !== "propose") {
 			return fail("invalid_input", 'mode must be "apply" or "propose"');
 		}
+		const scope = this.operationScope(input.signal);
+		if (scope.signal.aborted) {
+			return fail(
+				"cancelled",
+				"the turn was interrupted before the task set was touched; nothing was changed",
+			);
+		}
 		const isInit = input.changes.some((change) => change.op === "init");
-		if (isInit) return this.initialize(input, ctx);
+		if (isInit) return this.initialize(input, scope, ctx);
 		// Re-read before deciding anything: the document this batch will be built on
 		// is the one on disk right now, not the one this session last saw.
 		await this.refreshFromDisk(ctx);
+		if (scope.isStale()) {
+			return fail("cancelled", "the turn was interrupted; the task set was not changed");
+		}
 		if (this.recovery) {
 			return fail(
 				"recovery_required",
@@ -492,10 +671,29 @@ export class TasksController {
 				"no task set is attached to this session. Create one with a single init change first.",
 			);
 		}
-		if (input.taskSetId !== undefined && input.taskSetId !== this.attachment.taskSetId) {
+		// Identity and expected revision are required for an existing set, not
+		// optional. They are how the batch says which world it was built in; without
+		// them the digest check would still prevent a lost update, but a batch
+		// composed against revision 3 would be quietly rebased onto revision 4 and
+		// the agent would never learn that its picture was out of date.
+		if (input.taskSetId === undefined) {
+			return fail(
+				"missing_identity",
+				`taskSetId is required for an existing task set. Call get_tasks and pass ${this.attachment.taskSetId} with the revision it reports.`,
+				{ taskSetId: this.attachment.taskSetId },
+			);
+		}
+		if (input.taskSetId !== this.attachment.taskSetId) {
 			return fail(
 				"wrong_task_set",
 				`this session is attached to ${this.attachment.taskSetId}; update_tasks never changes a task set it is not attached to`,
+			);
+		}
+		if (input.expectedRevision === undefined) {
+			return fail(
+				"missing_expected_revision",
+				"expectedRevision is required for an existing task set. Call get_tasks and pass the revision it reports, so a batch built against an older picture is refused instead of rebased.",
+				{ currentRevision: this.loaded?.document.set.revision },
 			);
 		}
 
@@ -513,7 +711,7 @@ export class TasksController {
 				`task set ${set.taskSetId} was archived on ${set.archivedAt} and no longer accepts changes. The user can start a new one with /tasks new.`,
 			);
 		}
-		if (input.expectedRevision !== undefined && input.expectedRevision !== set.revision) {
+		if (input.expectedRevision !== set.revision) {
 			return fail(
 				"stale_revision",
 				`expectedRevision ${input.expectedRevision} does not match the accepted revision ${set.revision}. Call get_tasks and rebuild the batch against the current ids.`,
@@ -532,12 +730,16 @@ export class TasksController {
 			extras: current.document.extras,
 		};
 		if (input.mode === "propose") {
-			return this.proposeRevision(input, current, nextDocument, applied.result.applied, ctx);
+			return this.proposeRevision(input, current, nextDocument, applied.result.applied, scope, ctx);
 		}
-		return this.applyRevision(current, nextDocument, applied.result, input.changes, ctx);
+		return this.applyRevision(current, nextDocument, applied.result, input.changes, scope, ctx);
 	}
 
-	private async initialize(input: UpdateTasksInput, ctx: ExtensionContext): Promise<ToolOutcome> {
+	private async initialize(
+		input: UpdateTasksInput,
+		scope: OperationScope,
+		ctx: ExtensionContext,
+	): Promise<ToolOutcome> {
 		if (input.changes.length > 1) {
 			return fail("invalid_change", "init must be the only change in a batch");
 		}
@@ -564,10 +766,15 @@ export class TasksController {
 
 		const result = await commitTaskDocument({
 			root: this.root,
+			taskSetId,
 			document: { set: applied.result.set, extras: [] },
 			expectedDigest: undefined,
 			now,
+			signal: scope.signal,
 		});
+		if (result.kind === "cancelled") {
+			return fail("cancelled", `${result.reason}; no task set was created`);
+		}
 		if (result.kind !== "committed") {
 			return fail(
 				result.kind === "conflict" ? "conflict" : "write_failed",
@@ -576,16 +783,33 @@ export class TasksController {
 		}
 		const parsed = parseTaskDocument(result.raw);
 		if (!parsed.ok) return fail("write_failed", `the new task set did not round-trip: ${parsed.error}`);
-		this.guard.nextAttachment();
-		this.loaded = {
+		const loaded = {
 			document: parsed.document,
 			raw: result.raw,
 			digest: result.digest,
 			path: result.path,
 		};
+		// The publication boundary: the set exists on disk from here on, whatever
+		// this session does next. If the session moved on while the write was in
+		// flight, the only honest move is to leave it alone rather than attach a new
+		// session to a set it never asked for.
+		if (scope.isStale()) {
+			return {
+				payload: {
+					status: "published_but_detached",
+					taskSetId,
+					revision: result.revision,
+					path: result.path,
+					message:
+						"the task set was created on disk, but this session moved on before it could attach. It was not attached; /tasks recover or a fresh init can pick it up.",
+				},
+			};
+		}
+		this.guard.nextAttachment();
+		this.loaded = loaded;
 		this.pendingProposals = [];
 		this.recovery = undefined;
-		this.recordAttachment(this.loaded);
+		this.recordAttachment(ctx, this.loaded);
 		this.refreshUi(ctx);
 		showTasksCard(
 			this.pi,
@@ -602,6 +826,10 @@ export class TasksController {
 				phases: applied.result.allocatedPhases,
 				tasks: applied.result.allocatedTasks,
 				applied: applied.result.applied,
+				...this.attachmentWarning,
+				...(result.retainedOrphanSnapshot
+					? { retainedOrphanSnapshot: result.retainedOrphanSnapshot }
+					: {}),
 			},
 		};
 	}
@@ -611,14 +839,21 @@ export class TasksController {
 		next: TaskDocument,
 		applied: ApplyResult,
 		changes: readonly TaskChange[],
+		scope: OperationScope,
 		ctx: ExtensionContext,
 	): Promise<ToolOutcome> {
+		const taskSetId = current.document.set.taskSetId;
 		const result = await commitTaskDocument({
 			root: this.root,
+			taskSetId,
 			document: next,
 			expectedDigest: current.digest,
 			now: this.now(),
+			signal: scope.signal,
 		});
+		if (result.kind === "cancelled") {
+			return fail("cancelled", `${result.reason}; the task set is unchanged`);
+		}
 		if (result.kind !== "committed") {
 			return fail(
 				result.kind === "conflict" ? "conflict" : "write_failed",
@@ -627,25 +862,45 @@ export class TasksController {
 		}
 		const parsed = parseTaskDocument(result.raw);
 		if (!parsed.ok) return fail("write_failed", `the committed document did not round-trip: ${parsed.error}`);
+		const counts = countTasks(parsed.document.set);
+		// Past this point the revision is published. A session that moved on while
+		// the write was in flight does not get to pretend otherwise, and must not
+		// write this set's pointer into whatever it is attached to now.
+		if (scope.isStale()) {
+			return {
+				payload: {
+					status: "published_but_detached",
+					taskSetId,
+					revision: result.revision,
+					applied: applied.applied,
+					message:
+						"the revision was published before the turn was interrupted, and cannot be taken back. This session did not record it; /tasks recover re-attaches.",
+				},
+			};
+		}
 		this.loaded = {
 			document: parsed.document,
 			raw: result.raw,
 			digest: result.digest,
 			path: result.path,
 		};
-		this.recordAttachment(this.loaded);
+		this.recordAttachment(ctx, this.loaded);
+		await this.refreshProposals(ctx, taskSetId, result.digest);
 		this.refreshUi(ctx);
-		const counts = countTasks(parsed.document.set);
 		return {
 			payload: {
 				status: "applied",
-				taskSetId: parsed.document.set.taskSetId,
+				taskSetId,
 				revision: result.revision,
 				progressOnly: isProgressOnlyBatch(changes),
 				phases: applied.allocatedPhases,
 				tasks: applied.allocatedTasks,
 				applied: applied.applied,
 				counts: { total: counts.total, open: counts.open, completed: counts.completed },
+				...this.attachmentWarning,
+				...(result.retainedOrphanSnapshot
+					? { retainedOrphanSnapshot: result.retainedOrphanSnapshot }
+					: {}),
 			},
 		};
 	}
@@ -663,6 +918,7 @@ export class TasksController {
 		current: LoadedDocument,
 		next: TaskDocument,
 		appliedLines: string[],
+		scope: OperationScope,
 		ctx: ExtensionContext,
 	): Promise<ToolOutcome> {
 		const reason = validateSummary(input.reason, "reason");
@@ -673,37 +929,88 @@ export class TasksController {
 			);
 		}
 		const now = this.now();
-		const proposedDocument = serializeTaskDocument(next);
+		const taskSetId = current.document.set.taskSetId;
 		const proposal: TaskProposal = {
 			schemaVersion: 1,
 			proposalId: newProposalId(),
-			taskSetId: current.document.set.taskSetId,
+			taskSetId,
 			status: "pending",
 			reason: reason.value,
 			baseRevision: current.document.set.revision,
 			baseDigest: current.digest,
 			createdAt: now,
-			proposedDocument,
+			proposedDocument: serializeTaskDocument(next),
 			diff: diffTaskSets(current.document.set, next.set),
 			applied: appliedLines,
 		};
-		await writeProposal(this.root, proposal);
-		this.pendingProposals = [...this.pendingProposals, proposal];
+		await this.publishReplacement(proposal);
+		if (scope.isStale()) {
+			// The candidate is on disk and inspectable; nothing was accepted.
+			return {
+				payload: {
+					status: "pending_review",
+					proposalId: proposal.proposalId,
+					baseRevision: proposal.baseRevision,
+					message:
+						"the turn was interrupted before the review could be shown. The proposal is saved and waiting; /tasks review reopens it. It is not approved.",
+				},
+			};
+		}
 		this.refreshUi(ctx);
 		showTasksCard(this.pi, ctx, "Proposed task revision", formatProposalCard(proposal));
 
-		const outcome = await this.presentReview(proposal, ctx);
-		return this.reportReviewOutcome(proposal, outcome, ctx);
+		const outcome = await this.presentReview(proposal, ctx, scope);
+		return this.reportReviewOutcome(proposal, outcome, scope, ctx);
 	}
 
-	/** Opens the review menu for a pending proposal. Safe to call again later. */
-	async presentReview(proposal: TaskProposal, ctx: ExtensionContext): Promise<ReviewOutcome> {
+	/**
+	 * Publish a replacement candidate, then retire whatever it replaces.
+	 *
+	 * That order is the recoverable one. If this is interrupted after the write
+	 * and before the retirement, the directory holds two pending candidates and
+	 * `refreshProposals` converges on the newer one; the reverse order could
+	 * retire the only candidate and then fail to write its replacement, leaving
+	 * the user with nothing to review and no record of why. Serialized so two
+	 * proposals in one session cannot interleave their transitions.
+	 */
+	private async publishReplacement(proposal: TaskProposal): Promise<void> {
+		const transition = this.proposalTransition.then(async () => {
+			await writeProposal(this.root, proposal);
+			const superseded = await listPendingProposals(this.root, proposal.taskSetId);
+			for (const prior of superseded) {
+				if (prior.proposalId === proposal.proposalId) continue;
+				await resolveProposal(this.root, prior, "superseded", this.now(), {
+					supersededBy: proposal.proposalId,
+					resolutionReason: "a corrected proposal replaced it",
+				});
+			}
+			this.pendingProposals = [proposal];
+		});
+		this.proposalTransition = transition.then(
+			() => undefined,
+			() => undefined,
+		);
+		await transition;
+	}
+
+	/**
+	 * Opens the review menu for a pending proposal. Safe to call again later.
+	 *
+	 * The signal handed to the menu is the tool's own abort merged with the
+	 * session and attachment generations, so `Esc` tears the card down exactly as
+	 * a session replacement does. Without that merge the card would keep owning
+	 * the input after the turn it belongs to has gone.
+	 */
+	async presentReview(
+		proposal: TaskProposal,
+		ctx: ExtensionContext,
+		scope: OperationScope = this.operationScope(),
+	): Promise<ReviewOutcome> {
 		if (!ctx.hasUI) return { kind: "unavailable" };
-		const scope = this.guard.capture();
-		if (!scope.isCurrent() || scope.signal.aborted) return { kind: "dismissed" };
+		if (scope.isStale()) return { kind: "dismissed" };
 		const ui = await this.interactiveUi();
-		if (!scope.isCurrent() || scope.signal.aborted) return { kind: "dismissed" };
-		return ui.showTaskReviewMenu(ctx, {
+		if (scope.isStale()) return { kind: "dismissed" };
+		const outcome = await ui.showTaskReviewMenu(ctx, {
 			summary: {
 				reason: proposal.reason,
 				baseRevision: proposal.baseRevision,
@@ -713,14 +1020,20 @@ export class TasksController {
 			signal: scope.signal,
 			isCurrent: scope.isCurrent,
 		});
+		// A decision that arrives after the turn or the attachment it belongs to is
+		// gone is not a decision. Dropping it here is what stops a late "Accept"
+		// from publishing into a session that has moved on.
+		if (scope.isStale() && outcome.kind !== "unavailable") return { kind: "dismissed" };
+		return outcome;
 	}
 
 	private async reportReviewOutcome(
 		proposal: TaskProposal,
 		outcome: ReviewOutcome,
+		scope: OperationScope,
 		ctx: ExtensionContext,
 	): Promise<ToolOutcome> {
-		if (outcome.kind === "accepted") return this.acceptProposal(proposal, ctx);
+		if (outcome.kind === "accepted") return this.acceptProposal(proposal, ctx, scope);
 		if (outcome.kind === "changes_requested") {
 			this.refreshUi(ctx);
 			return {
@@ -730,12 +1043,12 @@ export class TasksController {
 					baseRevision: proposal.baseRevision,
 					feedback: outcome.feedback,
 					instruction:
-						'Revise the proposal: call update_tasks again with mode "propose" and the complete corrected set of changes against this base revision.',
+						'Revise the proposal: call update_tasks again with mode "propose" and the complete corrected set of changes against this base revision. The new proposal replaces this one, which is retired and kept on file.',
 				},
 			};
 		}
 		if (outcome.kind === "cancelled") {
-			await this.resolve(proposal, "cancelled");
+			await this.resolve(proposal, "cancelled", { resolutionReason: "the user cancelled it" });
 			this.refreshUi(ctx);
 			return {
 				payload: {
@@ -769,8 +1082,56 @@ export class TasksController {
 	 * would silently discard whatever landed in between — often the progress the
 	 * user made while reading the proposal.
 	 */
-	async acceptProposal(proposal: TaskProposal, ctx: ExtensionContext): Promise<ToolOutcome> {
-		const current = await loadTaskDocument(taskDocumentPath(this.root, proposal.taskSetId));
+	async acceptProposal(
+		proposal: TaskProposal,
+		ctx: ExtensionContext,
+		scope: OperationScope = this.operationScope(),
+	): Promise<ToolOutcome> {
+		if (scope.isStale()) {
+			return fail(
+				"cancelled",
+				"the turn was interrupted before the proposal could be published; it is still on file and unapproved",
+				{ proposalId: proposal.proposalId },
+			);
+		}
+		// The card in hand may be older than the directory. Identity and status are
+		// re-read from disk before anything is published, so a card left over from a
+		// superseded round, a cancelled one, or one already accepted cannot publish
+		// a second time.
+		const persisted = await readProposal(this.root, proposal.taskSetId, proposal.proposalId);
+		if (!persisted) {
+			return fail(
+				"invalid_proposal",
+				"the proposal could not be re-read from disk, so it was not published. Call get_tasks and propose again.",
+				{ proposalId: proposal.proposalId },
+			);
+		}
+		if (persisted.status !== "pending") {
+			return fail(
+				"stale_proposal",
+				`this proposal is ${persisted.status}${persisted.resolutionReason ? ` (${persisted.resolutionReason})` : ""}, so it was not published. Its content is kept on file: call get_tasks and propose again against the current revision.`,
+				{
+					proposalId: proposal.proposalId,
+					persistedStatus: persisted.status,
+					...(persisted.supersededBy ? { supersededBy: persisted.supersededBy } : {}),
+				},
+			);
+		}
+		if (
+			persisted.baseDigest !== proposal.baseDigest ||
+			persisted.baseRevision !== proposal.baseRevision ||
+			persisted.proposedDocument !== proposal.proposedDocument
+		) {
+			return fail(
+				"stale_proposal",
+				"the stored proposal no longer matches the one under review, so it was not published. Call get_tasks and propose again.",
+				{ proposalId: proposal.proposalId },
+			);
+		}
+		const current = await loadTaskDocument(
+			taskDocumentPath(this.root, persisted.taskSetId),
+			persisted.taskSetId,
+		);
 		if (current.kind !== "loaded") {
 			return fail(
 				"recovery_required",
@@ -790,16 +1151,24 @@ export class TasksController {
 				},
 			);
 		}
-		const parsed = parseTaskDocument(proposal.proposedDocument);
+		const parsed = parseTaskDocument(persisted.proposedDocument);
 		if (!parsed.ok) {
 			return fail("invalid_proposal", `the stored proposal is unreadable: ${parsed.error}`);
 		}
 		const result = await commitTaskDocument({
 			root: this.root,
+			// The validated identity, never the proposed document's own claim.
+			taskSetId: persisted.taskSetId,
 			document: parsed.document,
 			expectedDigest: proposal.baseDigest,
 			now: this.now(),
+			signal: scope.signal,
 		});
+		if (result.kind === "cancelled") {
+			return fail("cancelled", `${result.reason}; the proposal is still on file and unapproved`, {
+				proposalId: proposal.proposalId,
+			});
+		}
 		if (result.kind !== "committed") {
 			return fail(
 				result.kind === "conflict" ? "stale_proposal" : "write_failed",
@@ -811,14 +1180,29 @@ export class TasksController {
 		if (!committed.ok) {
 			return fail("write_failed", `the committed document did not round-trip: ${committed.error}`);
 		}
+		// Published. The proposal is retired against the revision it produced even
+		// if this session has moved on, because the file on disk says it happened.
+		await this.resolve(proposal, "accepted", { resolutionReason: `published as revision ${result.revision}` });
+		if (scope.isStale()) {
+			return {
+				payload: {
+					status: "published_but_detached",
+					proposalId: proposal.proposalId,
+					taskSetId: persisted.taskSetId,
+					revision: result.revision,
+					message:
+						"the revision was published before the turn was interrupted, and cannot be taken back. This session did not record it; /tasks recover re-attaches.",
+				},
+			};
+		}
 		this.loaded = {
 			document: committed.document,
 			raw: result.raw,
 			digest: result.digest,
 			path: result.path,
 		};
-		await this.resolve(proposal, "accepted");
-		this.recordAttachment(this.loaded);
+		this.recordAttachment(ctx, this.loaded);
+		await this.refreshProposals(ctx, persisted.taskSetId, result.digest);
 		this.refreshUi(ctx);
 		showTasksCard(
 			this.pi,
@@ -830,15 +1214,23 @@ export class TasksController {
 			payload: {
 				status: "accepted",
 				proposalId: proposal.proposalId,
-				taskSetId: proposal.taskSetId,
+				taskSetId: persisted.taskSetId,
 				revision: result.revision,
 				applied: proposal.applied,
+				...this.attachmentWarning,
+				...(result.retainedOrphanSnapshot
+					? { retainedOrphanSnapshot: result.retainedOrphanSnapshot }
+					: {}),
 			},
 		};
 	}
 
-	private async resolve(proposal: TaskProposal, status: Exclude<ProposalStatus, "pending">) {
-		await resolveProposal(this.root, proposal, status, this.now());
+	private async resolve(
+		proposal: TaskProposal,
+		status: Exclude<ProposalStatus, "pending">,
+		detail: { supersededBy?: string; resolutionReason?: string } = {},
+	) {
+		await resolveProposal(this.root, proposal, status, this.now(), detail);
 		this.pendingProposals = this.pendingProposals.filter(
 			(candidate) => candidate.proposalId !== proposal.proposalId,
 		);
@@ -862,13 +1254,17 @@ export class TasksController {
 	}
 
 	async reviewPending(ctx: ExtensionContext): Promise<void> {
-		const proposal = this.pendingProposals[0];
+		// Newest, not oldest: after a corrected proposal the older candidate is the
+		// one the user rejected, and reopening it would offer exactly the content
+		// they asked to change. `refreshProposals` normally leaves only one.
+		const proposal = this.pendingProposals.at(-1);
 		if (!proposal) {
 			ctx.ui.notify("No proposed task revision is waiting for review.", "info");
 			return;
 		}
-		const outcome = await this.presentReview(proposal, ctx);
-		const result = await this.reportReviewOutcome(proposal, outcome, ctx);
+		const scope = this.operationScope();
+		const outcome = await this.presentReview(proposal, ctx, scope);
+		const result = await this.reportReviewOutcome(proposal, outcome, scope, ctx);
 		const status = result.payload.status;
 		if (status === "accepted") {
 			ctx.ui.notify(`Task revision ${result.payload.revision} accepted.`, "info");
@@ -900,7 +1296,7 @@ export class TasksController {
 			return;
 		}
 		const previous = this.attachment.taskSetId;
-		this.recordDetached();
+		this.recordDetached(ctx);
 		this.refreshUi(ctx);
 		ctx.ui.notify(
 			`Detached from task set ${previous}, which is preserved on disk. Ask for the new task list and the agent will create it.`,
@@ -930,6 +1326,7 @@ export class TasksController {
 		const now = this.now();
 		const result = await commitTaskDocument({
 			root: this.root,
+			taskSetId: this.loaded.document.set.taskSetId,
 			document: {
 				set: { ...this.loaded.document.set, archivedAt: now },
 				extras: this.loaded.document.extras,
@@ -942,7 +1339,7 @@ export class TasksController {
 			return false;
 		}
 		const path = result.path;
-		this.recordDetached();
+		this.recordDetached(ctx);
 		this.refreshUi(ctx);
 		ctx.ui.notify(`Task set archived at revision ${result.revision}. It remains at ${path}.`, "info");
 		return true;
@@ -989,7 +1386,7 @@ export class TasksController {
 			ctx.ui.notify("There is no task set to recover.", "warning");
 			return;
 		}
-		const current = await loadTaskDocument(taskDocumentPath(this.root, taskSetId));
+		const current = await loadTaskDocument(taskDocumentPath(this.root, taskSetId), taskSetId);
 		if (current.kind !== "loaded") {
 			ctx.ui.notify(
 				current.kind === "missing"
@@ -1001,8 +1398,8 @@ export class TasksController {
 		}
 		this.loaded = current.loaded;
 		this.recovery = undefined;
-		await this.refreshProposals(taskSetId);
-		this.recordAttachment(current.loaded);
+		await this.refreshProposals(ctx, taskSetId, current.loaded.digest);
+		this.recordAttachment(ctx, current.loaded);
 		this.refreshUi(ctx);
 		ctx.ui.notify(
 			`Attached to the task document as it stands, at revision ${current.loaded.document.set.revision}.`,
@@ -1039,8 +1436,15 @@ export class TasksController {
 			label: `${label ? `${label} ` : ""}(recovered)`.slice(0, MAX_LABEL_LENGTH),
 		};
 		delete forked.archivedAt;
+		// A binding names the plan revision a *specific* task set was reviewed
+		// against. This is a new set with a new id that no plan ever bound, so
+		// carrying the claim across would let the fork answer for work it was never
+		// part of. The fork is standalone; re-binding is a decision for whoever owns
+		// the plan.
+		delete forked.binding;
 		const result = await commitTaskDocument({
 			root: this.root,
+			taskSetId: forked.taskSetId,
 			document: { set: forked, extras: snapshot.loaded.document.extras },
 			expectedDigest: undefined,
 			now,
@@ -1063,7 +1467,7 @@ export class TasksController {
 		};
 		this.pendingProposals = [];
 		this.recovery = undefined;
-		this.recordAttachment(this.loaded);
+		this.recordAttachment(ctx, this.loaded);
 		this.refreshUi(ctx);
 		ctx.ui.notify(
 			`Forked the recorded snapshot into task set ${forked.taskSetId}. The previous document is untouched.`,
@@ -1072,7 +1476,7 @@ export class TasksController {
 	}
 
 	async recoverDetach(ctx: ExtensionContext): Promise<void> {
-		this.recordDetached();
+		this.recordDetached(ctx);
 		this.refreshUi(ctx);
 		ctx.ui.notify("This session no longer tracks a task set. Nothing was deleted.", "info");
 	}

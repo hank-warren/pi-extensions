@@ -10,7 +10,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { applyTaskChanges } from "../src/changes.js";
-import { parseTaskDocument, serializeTaskDocument, type TaskDocument } from "../src/markdown.js";
+import {
+	ORPHANED_EXTRAS_HEADING,
+	parseTaskDocument,
+	serializeTaskDocument,
+	type TaskDocument,
+} from "../src/markdown.js";
 import { createTaskSet, type TaskSet } from "../src/model.js";
 
 const NOW = "2026-01-01T00:00:00.000Z";
@@ -36,6 +41,12 @@ function seed(): TaskSet {
 
 function roundTrip(document: TaskDocument): TaskDocument {
 	const parsed = parseTaskDocument(serializeTaskDocument(document));
+	assert.ok(parsed.ok, parsed.ok ? "" : parsed.error);
+	return parsed.document;
+}
+
+function parseOrThrow(text: string): TaskDocument {
+	const parsed = parseTaskDocument(text);
 	assert.ok(parsed.ok, parsed.ok ? "" : parsed.error);
 	return parsed.document;
 }
@@ -112,6 +123,55 @@ test("unrecognised lines are preserved in place across a status-only update", ()
 	assert.match(after, /> Context the user wrote by hand\./u);
 	assert.match(after, /Notes about the schema phase\./u);
 	assert.match(after, /<!-- a stray comment -->/u);
+});
+
+test("a note whose task is removed is retained, not silently deleted", () => {
+	const document: TaskDocument = {
+		set: seed(),
+		extras: [
+			{ anchor: { kind: "task", id: "t1" }, text: "> why this one matters" },
+			{ anchor: { kind: "task", id: "t3" }, text: "> and this one" },
+		],
+	};
+	const removed = applyTaskChanges(document.set, [{ op: "remove_task", taskId: "t1" }], {
+		now: NOW,
+		hasExistingSet: true,
+	});
+	assert.ok(removed.ok);
+	const text = serializeTaskDocument({ set: removed.result.set, extras: document.extras });
+	assert.match(text, /> why this one matters/u);
+	assert.match(text, /> and this one/u);
+	assert.equal(text.includes(ORPHANED_EXTRAS_HEADING), true);
+
+	// It comes back as an ordinary preserved line anchored to the last live task,
+	// so the placement settles instead of drifting, and the marker is structural
+	// rather than an extra that would re-emit a second copy on every write.
+	const parsed = parseTaskDocument(text);
+	assert.ok(parsed.ok);
+	assert.equal(parsed.document.extras.filter((extra) => extra.text.startsWith(">")).length, 2);
+	const again = serializeTaskDocument(parsed.document);
+	assert.match(again, /> why this one matters/u);
+	assert.match(again, /> and this one/u);
+	assert.equal(again.includes(ORPHANED_EXTRAS_HEADING), false);
+	assert.equal(again, serializeTaskDocument(parseOrThrow(again)));
+});
+
+test("notes under a removed phase are retained too", () => {
+	const document: TaskDocument = {
+		set: seed(),
+		extras: [{ anchor: { kind: "phase", id: "p2" }, text: "Cutover runbook lives in ops/." }],
+	};
+	const emptied = applyTaskChanges(
+		document.set,
+		[
+			{ op: "remove_task", taskId: "t3" },
+			{ op: "remove_phase", phaseId: "p2" },
+		],
+		{ now: NOW, hasExistingSet: true },
+	);
+	assert.ok(emptied.ok);
+	const text = serializeTaskDocument({ set: emptied.result.set, extras: document.extras });
+	assert.match(text, /Cutover runbook lives in ops\/\./u);
 });
 
 test("a document with no metadata comment is not a task document", () => {

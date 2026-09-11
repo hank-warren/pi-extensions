@@ -12,7 +12,13 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { listProposals } from "../src/proposals.js";
 import { loadTaskDocument, taskDocumentPath } from "../src/store.js";
-import { callTool, createTasksHarness, SEED_INIT, type TasksHarness } from "./support/harness.js";
+import {
+	callTool,
+	createTasksHarness,
+	SEED_INIT,
+	type TasksHarness,
+	updateTasks,
+} from "./support/harness.js";
 
 const FIRST_SET = "00000000-0000-4000-8000-000000000001";
 
@@ -76,7 +82,7 @@ test("init creates the set, attaches the session, and reports the allocated ids"
 test("the turn pointer names the file and the counts, and nothing else", async (t) => {
 	const harness = await seeded();
 	t.after(harness.cleanup);
-	await callTool(harness, "update_tasks", {
+	await updateTasks(harness, {
 		mode: "apply",
 		changes: [{ op: "start", taskId: "t1" }],
 	});
@@ -92,7 +98,7 @@ test("the turn pointer names the file and the counts, and nothing else", async (
 test("progress applies immediately and bumps the revision", async (t) => {
 	const harness = await seeded();
 	t.after(harness.cleanup);
-	const result = await callTool(harness, "update_tasks", {
+	const result = await updateTasks(harness, {
 		mode: "apply",
 		expectedRevision: 1,
 		changes: [
@@ -110,11 +116,11 @@ test("progress applies immediately and bumps the revision", async (t) => {
 test("a stale expectedRevision is refused with the current one", async (t) => {
 	const harness = await seeded();
 	t.after(harness.cleanup);
-	await callTool(harness, "update_tasks", {
+	await updateTasks(harness, {
 		mode: "apply",
 		changes: [{ op: "start", taskId: "t1" }],
 	});
-	const stale = await callTool(harness, "update_tasks", {
+	const stale = await updateTasks(harness, {
 		mode: "apply",
 		expectedRevision: 1,
 		changes: [{ op: "done", taskId: "t1", summary: "s" }],
@@ -137,12 +143,12 @@ test("init refuses to replace an attached set", async (t) => {
 test("an accepted proposal publishes the next revision and keeps closed work", async (t) => {
 	const harness = await seeded({ reviews: [{ kind: "accepted" }] });
 	t.after(harness.cleanup);
-	await callTool(harness, "update_tasks", {
+	await updateTasks(harness, {
 		mode: "apply",
 		changes: [{ op: "done", taskId: "t3", summary: "rows copied" }],
 	});
 
-	const result = await callTool(harness, "update_tasks", {
+	const result = await updateTasks(harness, {
 		mode: "propose",
 		reason: "drop the cutover phase; it moves to next quarter",
 		changes: [
@@ -166,7 +172,7 @@ test("an accepted proposal publishes the next revision and keeps closed work", a
 test("the review card carries a diff this package computed, matched by id", async (t) => {
 	const harness = await seeded({ reviews: [{ kind: "cancelled" }] });
 	t.after(harness.cleanup);
-	await callTool(harness, "update_tasks", {
+	await updateTasks(harness, {
 		mode: "propose",
 		reason: "reword the first task and add a rollback step",
 		changes: [
@@ -190,7 +196,7 @@ test("cancelling leaves the accepted set alone and keeps the proposal on file", 
 	const harness = await seeded({ reviews: [{ kind: "cancelled" }] });
 	t.after(harness.cleanup);
 	const before = documentText(harness);
-	const result = await callTool(harness, "update_tasks", {
+	const result = await updateTasks(harness, {
 		mode: "propose",
 		reason: "drop everything",
 		changes: [{ op: "remove_task", taskId: "t4" }],
@@ -210,7 +216,7 @@ test("requesting changes returns the feedback with the base, and keeps the propo
 		reviews: [{ kind: "changes_requested", feedback: "keep the migration work" }],
 	});
 	t.after(harness.cleanup);
-	const result = await callTool(harness, "update_tasks", {
+	const result = await updateTasks(harness, {
 		mode: "propose",
 		reason: "start over",
 		changes: [{ op: "remove_task", taskId: "t3" }],
@@ -230,7 +236,7 @@ test("a headless session gets pending_review, never a fabricated approval", asyn
 	const harness = await seeded({ mode: "print", reviews: [{ kind: "accepted" }] });
 	t.after(harness.cleanup);
 	const before = documentText(harness);
-	const result = await callTool(harness, "update_tasks", {
+	const result = await updateTasks(harness, {
 		mode: "propose",
 		reason: "drop the cutover phase",
 		changes: [{ op: "remove_task", taskId: "t4" }],
@@ -246,36 +252,45 @@ test("a proposal whose base moved during review is refused and kept, not publish
 	const harness = await seeded();
 	t.after(harness.cleanup);
 	// The human takes their time; progress lands while the card is still open.
-	const proposal = await callTool(harness, "update_tasks", {
+	const proposal = await updateTasks(harness, {
 		mode: "propose",
 		reason: "drop the cutover phase",
 		changes: [{ op: "remove_task", taskId: "t4" }],
 	});
 	assert.equal(proposal.payload.status, "pending_review");
 
-	await callTool(harness, "update_tasks", {
+	await updateTasks(harness, {
 		mode: "apply",
 		changes: [{ op: "start", taskId: "t1" }],
 	});
 
-	const pending = (await listProposals(harness.root, FIRST_SET))[0];
-	assert.ok(pending);
-	const accepted = await harness.controller.acceptProposal(pending, harness.ctx);
+	// It can never be published again, so it stops counting as awaiting review
+	// rather than latching "a revision is waiting" into every later turn.
+	const retired = (await listProposals(harness.root, FIRST_SET))[0];
+	assert.ok(retired);
+	assert.equal(retired.status, "superseded");
+	assert.match(String(retired.resolutionReason), /moved past the revision it was built on/u);
+	assert.deepEqual(harness.controller.pending, []);
+	assert.equal((await harness.systemPromptAddition())?.includes("awaiting"), false);
+
+	// And the card that is still in the user's hands cannot publish it.
+	const accepted = await harness.controller.acceptProposal(retired, harness.ctx);
 	assert.equal(accepted.isError, true);
 	assert.equal(accepted.payload.status, "stale_proposal");
-	assert.equal(accepted.payload.currentRevision, 2);
+	assert.equal(accepted.payload.persistedStatus, "superseded");
 	assert.match(documentText(harness), /- \[ \] flip the flag/u);
-	assert.deepEqual(
-		(await listProposals(harness.root, FIRST_SET)).map((entry) => entry.status),
-		["pending"],
-	);
+
+	// The content is retained, so the agent can re-propose it against the new base.
+	const kept = (await listProposals(harness.root, FIRST_SET))[0];
+	assert.equal(kept?.proposedDocument, retired.proposedDocument);
+	assert.equal(kept?.reason, "drop the cutover phase");
 });
 
 test("a pending proposal survives a restart and is still waiting, not applied", async (t) => {
 	const harness = await seeded({ reviews: [{ kind: "dismissed" }, { kind: "accepted" }] });
 	t.after(harness.cleanup);
 	const before = documentText(harness);
-	await callTool(harness, "update_tasks", {
+	await updateTasks(harness, {
 		mode: "propose",
 		reason: "drop the cutover phase",
 		changes: [{ op: "remove_task", taskId: "t4" }],
@@ -316,7 +331,7 @@ test("reading another managed set is read-only and does not switch the attachmen
 	const attached = await callTool(harness, "get_tasks", {});
 	assert.equal(attached.payload.taskSetId, second);
 
-	const wrong = await callTool(harness, "update_tasks", {
+	const wrong = await updateTasks(harness, {
 		mode: "apply",
 		taskSetId: FIRST_SET,
 		changes: [{ op: "start", taskId: "t1" }],
@@ -328,7 +343,7 @@ test("reading another managed set is read-only and does not switch the attachmen
 test("a restarted session re-attaches from its own branch", async (t) => {
 	const harness = await seeded();
 	t.after(harness.cleanup);
-	await callTool(harness, "update_tasks", {
+	await updateTasks(harness, {
 		mode: "apply",
 		changes: [{ op: "start", taskId: "t1" }],
 	});
@@ -356,7 +371,7 @@ test("a revision another session published is followed, not treated as a conflic
 	t.after(harness.cleanup);
 	const other = createTasksHarness({ root: harness.root, branch: harness.branch });
 	await other.emit("session_start", { reason: "startup" });
-	await callTool(other, "update_tasks", {
+	await updateTasks(other, {
 		mode: "apply",
 		changes: [{ op: "start", taskId: "t1" }],
 	});
@@ -379,7 +394,7 @@ test("a document edited outside the package stops mutation until recovery", asyn
 	await harness.emit("session_start", { reason: "startup" });
 	assert.match(harness.controller.recoveryState?.reason ?? "", /modified outside this package/u);
 
-	const refused = await callTool(harness, "update_tasks", {
+	const refused = await updateTasks(harness, {
 		mode: "apply",
 		changes: [{ op: "start", taskId: "t1" }],
 	});
@@ -390,7 +405,7 @@ test("a document edited outside the package stops mutation until recovery", asyn
 
 	await harness.controller.recoverAttachCurrent(harness.ctx);
 	assert.equal(harness.controller.recoveryState, undefined);
-	const applied = await callTool(harness, "update_tasks", {
+	const applied = await updateTasks(harness, {
 		mode: "apply",
 		changes: [{ op: "start", taskId: "t1" }],
 	});
@@ -406,7 +421,7 @@ test("an edit made mid-session is caught before the next write builds on it", as
 	const tampered = readFileSync(path, "utf8").replace("flip the flag", "flip the switch");
 	writeFileSync(path, tampered);
 
-	const refused = await callTool(harness, "update_tasks", {
+	const refused = await updateTasks(harness, {
 		mode: "apply",
 		changes: [{ op: "start", taskId: "t1" }],
 	});
@@ -449,7 +464,7 @@ test("archive refuses while work is open, then files the set and detaches", asyn
 	assert.equal(await harness.controller.archive(harness.ctx), false);
 	assert.ok(harness.notifications.some((entry) => /still open/u.test(entry.message)));
 
-	await callTool(harness, "update_tasks", {
+	await updateTasks(harness, {
 		mode: "apply",
 		changes: [
 			{ op: "done", taskId: "t1", summary: "done" },
@@ -507,7 +522,7 @@ test("a branch behind the document follows it rather than rewinding the file", a
 	const harness = await seeded();
 	t.after(harness.cleanup);
 	const behind = [...harness.branch];
-	await callTool(harness, "update_tasks", {
+	await updateTasks(harness, {
 		mode: "apply",
 		changes: [{ op: "done", taskId: "t1", summary: "added it" }],
 	});
@@ -537,7 +552,7 @@ test("export writes a copy and changes nothing", async (t) => {
 test("a set archived by another session refuses further changes here", async (t) => {
 	const harness = await seeded();
 	t.after(harness.cleanup);
-	await callTool(harness, "update_tasks", {
+	await updateTasks(harness, {
 		mode: "apply",
 		changes: [
 			{ op: "done", taskId: "t1", summary: "d" },
@@ -551,7 +566,7 @@ test("a set archived by another session refuses further changes here", async (t)
 	await other.emit("session_start", { reason: "startup" });
 	assert.equal(await harness.controller.archive(harness.ctx), true);
 
-	const refused = await callTool(other, "update_tasks", {
+	const refused = await updateTasks(other, {
 		mode: "apply",
 		changes: [{ op: "reopen", taskId: "t1" }],
 	});
