@@ -932,10 +932,11 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		const planPath = state.planPath;
 		if (managedPlanningActive() && planPath) {
 			const hadRevision = state.revision !== undefined;
-			await revisions.pauseManagedPlan(
+			const paused = await revisions.pauseManagedPlan(
 				ctx,
 				"the user stopped revising from /plan exit",
 			);
+			if (!paused) return;
 			ctx.ui.notify(
 				`${hadRevision ? "Plan revision abandoned. " : ""}The agreed plan at ${planPath} (spec revision ${
 					state.specRevision ?? 0

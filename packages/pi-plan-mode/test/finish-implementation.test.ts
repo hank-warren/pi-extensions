@@ -56,12 +56,15 @@ async function withLink<T>(replacement: typeof fs.promises.link, run: () => Prom
 /** A `link` that waits for `release()` before doing the real thing. */
 function heldLink() {
 	let release!: () => void;
+	let arrive!: () => void;
 	const gate = new Promise<void>((resolve) => (release = resolve));
+	const entered = new Promise<void>((resolve) => (arrive = resolve));
 	const link: typeof fs.promises.link = async (source, target) => {
+		arrive();
 		await gate;
 		return realLink(source, target);
 	};
-	return { link, release };
+	return { link, release, entered };
 }
 
 function tool(mock: Mock, name: string) {
@@ -151,12 +154,15 @@ test("plan_implemented superseded by a session replacement reports it instead of
 		const held = heldLink();
 		await withLink(held.link, async () => {
 			const done = tool(mock, "plan_implemented")("c", {}, undefined, undefined, context.ctx);
-			await new Promise((resolve) => setImmediate(resolve));
+			// Observe the expected rejection immediately and switch only once the
+			// archive is actually pending, not after an arbitrary event-loop tick.
+			const rejected = assert.rejects(done, /superseded/);
+			await held.entered;
 			const replacement = createMockContext({ hasUI: true, mode: "tui" });
 			await mock.events.get("session_start")?.[0]?.({ reason: "new" }, replacement.ctx);
 			const entriesAtReplace = mock.entries.length;
 			held.release();
-			await assert.rejects(done as Promise<unknown>, /superseded/);
+			await rejected;
 			assert.deepEqual(mock.entries.slice(entriesAtReplace), []);
 		});
 	});

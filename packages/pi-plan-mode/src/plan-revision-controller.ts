@@ -601,16 +601,17 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 		reason = "the revision it belonged to was superseded",
 	): Promise<void> {
 		if (!planId) return;
+		const scope = operationScope();
 		// Discovered rather than read from `open.proposalId`, so a candidate written by
 		// an interrupted turn is actually retired instead of staying pending forever
 		// against a transaction the user has just cancelled.
 		const proposal = await discoverOpenCandidate(planId, open);
-		if (!proposal || proposal.status !== "pending") return;
+		if (scope.isStale() || !proposal || proposal.status !== "pending") return;
 		await resolvePlanProposal(root(), proposal, "superseded", now(), {
 			...(supersededBy ? { supersededBy } : {}),
 			resolutionReason: reason,
 		});
-		if (pendingProposal?.proposalId === proposal.proposalId) pendingProposal = undefined;
+		if (!scope.isStale() && pendingProposal?.proposalId === proposal.proposalId) pendingProposal = undefined;
 	}
 
 /**
@@ -626,7 +627,6 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 		const open = state.revision;
 		if (!open) return;
 		await supersedeOpenProposal(state.planId, open, undefined, reason);
-		pendingProposal = undefined;
 	}
 
 	/**
@@ -644,11 +644,18 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 	 * plan's own `approvedDigest` is deliberately untouched, because pausing is not a
 	 * statement about which bytes were approved.
 	 */
-	async function pauseManagedPlan(ctx: ExtensionContext, reason: string): Promise<void> {
+	async function pauseManagedPlan(ctx: ExtensionContext, reason: string): Promise<boolean> {
+		const scope = operationScope();
 		const state = options.getState();
 		if (state.revision) await retireOpenRevision(reason);
 		const current = options.getState();
-		if (!current.planPath || !current.planId) return;
+		// Retirement may outlive a branch switch. Only the initiating attachment
+		// may be paused; never clear a replacement transaction or announce success.
+		if (
+			scope.isStale() || !current.planPath || !current.planId ||
+			current.planPath !== state.planPath || current.planId !== state.planId ||
+			current.revision !== state.revision
+		) return false;
 		options.nextWorkflow();
 		options.setState(ctx, {
 			schemaVersion: 2,
@@ -657,6 +664,7 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 			revision: undefined,
 		});
 		pendingProposal = undefined;
+		return true;
 	}
 
 	/**
@@ -1055,13 +1063,11 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 		// Re-read rather than closing over the restored copy: the branches above may
 		// have invalidated the transaction this would otherwise re-arm a card for.
 		const open = options.getState().revision;
-		pendingProposal = open
+		const discovered = open
 			? await discoverOpenCandidate(options.getState().planId, open)
 			: undefined;
-		if (!scope.isCurrent()) {
-			pendingProposal = undefined;
-			return;
-		}
+		if (!scope.isCurrent()) return;
+		pendingProposal = discovered;
 		if (pendingProposal) {
 			ctx.ui.notify(
 				"A proposed plan revision is still waiting for review. Run /plan to accept it, ask for changes, or cancel it.",
@@ -1080,7 +1086,9 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 			ctx.ui.notify("No plan revision is in progress.", "info");
 			return;
 		}
+		const scope = operationScope();
 		const candidate = await discoverOpenCandidate(state.planId, open);
+		if (scope.isStale()) return;
 		if (!candidate || candidate.status !== "pending") {
 			ctx.ui.notify(
 				"No proposed plan revision is waiting for review. The agent is still working on it.",
@@ -1088,7 +1096,6 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 			);
 			return;
 		}
-		const scope = operationScope();
 		const reading = await read(state);
 		if (scope.isStale()) return;
 		const summary = summaryFromProposal(candidate, reading.unaccounted);
@@ -1100,14 +1107,14 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 		// the way on instead of implying one will appear.
 		if (status === "accepted") {
 			ctx.ui.notify(
-				`Plan revision ${result.payload.revision} accepted. Run /plan to implement, export, or discard it.`,
+				`Plan revision ${result.payload.revision} accepted. Run /plan to implement, export, or leave it paused.`,
 				"info",
 			);
 			return;
 		}
 		if (status === "cancelled") {
 			ctx.ui.notify(
-				"Plan revision cancelled. The approved plan is unchanged; run /plan to implement, export, or clear it.",
+				"Plan revision cancelled. The approved plan is unchanged; run /plan to implement, export, or leave it paused.",
 				"info",
 			);
 			return;
@@ -1145,7 +1152,7 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 		}
 		closeTransaction(ctx, state, plan, "Approved Plan (revision cancelled)");
 		ctx.ui.notify(
-			"Plan revision cancelled. The approved plan is unchanged; run /plan to implement, export, or clear it.",
+			"Plan revision cancelled. The approved plan is unchanged; run /plan to implement, export, or leave it paused.",
 			"info",
 		);
 	}

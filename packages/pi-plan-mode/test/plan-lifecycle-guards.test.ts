@@ -364,6 +364,64 @@ for (const scenario of MANAGED_EXIT_CASES) {
 	}
 }
 
+test("an old managed exit cannot change the branch selected during proposal retirement", async (t) => {
+	let armed = false;
+	let switched: Promise<unknown> | undefined;
+	let approvedBranch: unknown[] = [];
+	const harness = createRevisionHarness({
+		onTimestamp() {
+			if (!armed) return;
+			armed = false;
+			// resolvePlanProposal receives this timestamp before its awaited write.
+			harness.viewBranch(approvedBranch);
+			switched = harness.emit("session_tree");
+		},
+	});
+	t.after(harness.cleanup);
+	await implementPlan(harness);
+	approvedBranch = [...harness.branch];
+	await beginRevision(harness, 1);
+	await proposeRevision(harness);
+	const noticesBeforeExit = harness.notifications.length;
+	armed = true;
+	await runPlanCommand(harness, "exit");
+	assert.ok(switched, "the switch must happen inside retirement");
+	await switched;
+	// Read through production behavior, not harness.state(): restoring a branch
+	// need not append an entry, so the last appended state can belong to the old one.
+	assert.equal(await toolCall(harness, "edit"), undefined, "the selected approved branch still implements");
+	assert.equal(
+		harness.notifications.slice(noticesBeforeExit).some(({ message }) => /stays attached and paused/u.test(message)),
+		false,
+		"a superseded exit must not announce a decision on the selected branch",
+	);
+});
+
+for (const action of ["accept", "cancel-review", "cancel-menu"] as const) {
+	test(`recovery ${action} names only available managed-plan actions`, async (t) => {
+		const harness = createRevisionHarness({ reviews: [
+			{ kind: "dismissed" },
+			{ kind: action === "accept" ? "accepted" : "cancelled" },
+		] });
+		t.after(harness.cleanup);
+		await implementPlan(harness);
+		await beginRevision(harness, 1);
+		await proposeRevision(harness);
+		await runPlanCommand(harness, "");
+		const menu = harness.planMenuCalls.at(-1)!;
+		const callback = menu[action === "cancel-menu" ? "cancelRevision" : "reviewRevision"] as () => Promise<void>;
+		await callback();
+		const message = harness.notifications.at(-1)!.message;
+		assert.match(message, /implement, export, or leave it paused/u);
+		assert.doesNotMatch(message, /discard|clear/u);
+		await runPlanCommand(harness, "");
+		const ready = harness.planMenuCalls.at(-1)!;
+		assert.equal(typeof ready.implementHere, "function");
+		assert.equal(typeof ready.exportPlan, "function");
+		assert.equal(typeof ready.stay, "function");
+	});
+}
+
 test("exit while implementing still clears the active plan", async (t) => {
 	// The long-standing explicit clear, untouched by the managed-planning rule: this
 	// state is implementing, not planning, and clearing is what exit has always meant
