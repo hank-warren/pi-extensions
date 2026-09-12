@@ -6,6 +6,41 @@ Status: **draft / not yet implemented**
 Owner: Hank
 Replaces (on the host): `@juicesharp/rpiv-ask-user-question`
 
+## Current amendment: whole rounds, text and review
+
+This amendment supersedes the historical four-question cap and cancellation
+collapse below. The [package README](../../packages/pi-ask-user-question/README.md)
+is the current API/key reference.
+
+- `questions` is non-empty with **no question-count cap**. Per-question choice
+  counts and header bounds are unchanged. Tabs are created lazily, the strip
+  follows the current question, and a scrollable overview supports paging and
+  arbitrary question-number jumps. Eight visible overview rows are a viewport,
+  not a round limit.
+- Optional question `mode` is `"choice"` (also the default when omitted) or
+  `"text"`. Text mode excludes `options` and `multiSelect`; validation rejects
+  mixed modes even when those fields are empty or false. Pi's native single-line
+  Input supplies cursor editing, Unicode/grapheme handling and undo. Pasted line
+  breaks/tabs normalize to spaces and control bytes are stripped. Enter commits
+  non-empty trimmed text; Esc discards the edit to the overview, then Esc cancels.
+- Optional root `reviewBeforeSubmit: true` opens review after all questions are
+  answered and requires Enter on a separate Submit round row. Answers, notes and
+  multi-select parts can be inspected and revisited. Default false retains
+  auto-submit. Review edits replace answers by index, never append duplicates.
+- Empty declines and successful envelopes are unchanged. Partial cancellations
+  include committed answers and enumerate unanswered questions in model-facing
+  text, explicitly stating that cancellation/abort is **not approval to act**.
+  Cancelling a fully answered review still means the round was not submitted.
+- Results retain the existing answer shape; native text is `answer: string`,
+  `custom: true`, with no synthetic selected option. Prompt events append only
+  optional `mode: "text"`, while preserving required `options` as `[]`. Choice
+  event payloads are unchanged. Auto Permissions already excludes all cancelled
+  outcomes from confirmed user-answer evidence and accepts string text answers;
+  its projection needs no new shape or policy.
+- Headless stripping, custom-UI unavailability, abort cleanup and blocked events
+  remain intact. Interview strategy and decision-tree reasoning remain skill
+  policy, outside the tool.
+
 ## 1. Why
 
 `@juicesharp/rpiv-ask-user-question` (2.6.0) is ~4,800 LOC across 39 TypeScript

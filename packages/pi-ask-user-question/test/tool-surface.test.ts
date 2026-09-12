@@ -219,3 +219,39 @@ test("outside herdr, no herdr signal is emitted", async () => {
 	// The package's own event still fires either way.
 	assert.equal(h.emitted.filter((e) => e.channel === "hank:ask-user:blocked").length, 2);
 });
+
+test("prompt event preserves choice payloads and emits empty options plus optional mode for text", async () => {
+	const h = harness();
+	await h.execute("call", { reviewBeforeSubmit: true, questions: [...params.questions, { mode: "text", header: "Why", question: "Why?" }] }, undefined, undefined, h.ctx);
+	assert.deepEqual(h.emitted.find((e) => e.channel === "hank:ask-user:prompt")?.payload, {
+		questions: [params.questions[0], { question: "Why?", header: "Why", mode: "text", options: [] }],
+	});
+});
+
+test("UI errors still clear blocked state", async () => {
+	const h = harness();
+	await assert.rejects(h.execute("call", params, undefined, undefined, {
+		hasUI: true, ui: { custom: () => { throw new Error("UI failed"); } },
+	}), /UI failed/);
+	assert.deepEqual(h.emitted.filter((e) => e.channel === "hank:ask-user:blocked").map((e) => e.payload), [{ active: true }, { active: false }]);
+});
+
+test("signal abort preserves committed text in model content and identifies gaps", async () => {
+	const h = harness();
+	const controller = new AbortController();
+	const round = { reviewBeforeSubmit: true, questions: [{ mode: "text", header: "Text", question: "Explain?" }, ...params.questions] };
+	const result = await h.execute("call", round, controller.signal, undefined, {
+		hasUI: true,
+		ui: { custom: (factory: (...args: unknown[]) => { handleInput(key: string): void }) => new Promise((resolve) => {
+			const dialog = factory({ requestRender() {} }, { fg: (_c: string, text: string) => text }, {}, resolve);
+			dialog.handleInput("committed text");
+			dialog.handleInput("\r");
+			controller.abort();
+		}) },
+	});
+	assert.equal(result.details.cancelled, true);
+	assert.match(result.content[0].text, /committed text/);
+	assert.match(result.content[0].text, /Unanswered questions: 2\. "Which database\?"/);
+	assert.match(result.content[0].text, /not approval to act/);
+	assert.deepEqual(h.emitted.filter((e) => e.channel === "hank:ask-user:blocked").map((e) => e.payload), [{ active: true }, { active: false }]);
+});

@@ -35,6 +35,8 @@ export interface AskUserPromptQuestion {
 	 * append-only, new fields optional).
 	 */
 	multiSelect?: boolean;
+	/** Text questions have no choices; options remains an array (empty). */
+	mode?: "text";
 	options: ReadonlyArray<AskUserPromptOption>;
 }
 

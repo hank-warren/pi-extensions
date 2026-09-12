@@ -44,6 +44,14 @@ export class QuestionnaireSession {
 		this.answers = new Array(params.questions.length).fill(undefined);
 	}
 
+	get reviewBeforeSubmit(): boolean {
+		return this.params.reviewBeforeSubmit === true;
+	}
+
+	questionAt(index: number) {
+		return this.params.questions[index];
+	}
+
 	get questionIndex(): number {
 		return this.index;
 	}
@@ -107,8 +115,8 @@ export class QuestionnaireSession {
 	 */
 	rows(): SelectableRow[] {
 		const question = this.current;
-		if (!question) return [];
-		const rows: SelectableRow[] = question.options.map((option) => ({
+		if (!question || question.mode === "text") return [];
+		const rows: SelectableRow[] = question.options!.map((option) => ({
 			value: option.label,
 			label: option.label,
 			description: option.description,
@@ -163,7 +171,7 @@ export class QuestionnaireSession {
 		// A custom typed answer never carries a preview; only a chosen option can.
 		const preview = opts.custom
 			? undefined
-			: question.options.find((option) => option.label === answer)?.preview;
+			: question.options?.find((option) => option.label === answer)?.preview;
 		this.answers[this.index] = {
 			questionIndex: this.index,
 			question: question.question,

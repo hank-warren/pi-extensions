@@ -53,8 +53,8 @@ const QUESTION_TOOL_PROFILES: Record<string, QuestionToolProfile> = {
 	[ASK_USER_QUESTION_TOOL]: {
 		name: ASK_USER_QUESTION_TOOL,
 		bounds:
-			"Ask 1-4 concise questions with 2-4 meaningful options each, or 2-6 options when the question sets multiSelect.",
-		decline: `If ${ASK_USER_QUESTION_TOOL} reports that the user declined to answer`,
+			"Group related concise questions into a round, following the question tool's current schema. For choice questions, use 2-4 meaningful options each, or 2-6 options when the question sets multiSelect.",
+		decline: `If ${ASK_USER_QUESTION_TOOL} reports that the user declined to answer or cancelled the round (partial answers are not approval to act)`,
 	},
 };
 

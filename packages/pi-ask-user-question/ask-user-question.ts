@@ -50,7 +50,10 @@ Set \`multiSelect: true\` on a question when several answers can hold at once �
 Usage notes:
 - The user can pick an option with the number keys, type a custom answer via the automatically appended "Type something." row, attach a note to their choice by pressing n, or press Esc to decline. Do NOT author "Other" or "Type something." labels yourself — reserved labels are rejected at runtime.
 - If you recommend a specific option, make it the first option and add "(Recommended)" at the end of the label.
-- Ask 1-4 questions per call, each with 2-4 options (2-6 when \`multiSelect\` is true). Multiple questions render as tabs the user cycles with Tab; every question must be answered before the call returns. Group questions that belong to one decision rather than asking them in separate calls, but do not pad a single decision into several questions.`;
+- Ask a whole question round in one call; there is no question-count cap. Choice questions have 2-4 options (2-6 when \`multiSelect\` is true). The user can cycle questions or use the overview to jump to any question.
+- For open-ended questions, set \`mode: "text"\` and omit \`options\` and \`multiSelect\`. Text answers are trimmed, single-line free text; pasted line breaks become spaces. Choice and text questions can share a round.
+- Set \`reviewBeforeSubmit: true\` to let the user inspect and edit answers before explicitly submitting. Otherwise, the last answer auto-submits as before.
+- Cancellation preserves committed answers and identifies unanswered questions. A cancelled round is not approval to act, even if every question was answered; do not infer missing answers. Interview strategy and decision-tree reasoning belong to the caller, not this tool.`;
 
 function emitPrompt(pi: ExtensionAPI, params: AskUserParams): void {
 	const payload: AskUserPromptEventPayload = {
@@ -59,7 +62,8 @@ function emitPrompt(pi: ExtensionAPI, params: AskUserParams): void {
 			header: q.header,
 			// Emitted only when true — append-only payload policy (events.ts).
 			...(q.multiSelect ? { multiSelect: true } : {}),
-			options: q.options.map((o) => ({ label: o.label, description: o.description })),
+			...(q.mode === "text" ? { mode: "text" as const } : {}),
+			options: (q.options ?? []).map((o) => ({ label: o.label, description: o.description })),
 		})),
 	};
 	pi.events.emit(ASK_USER_PROMPT_EVENT, payload);
@@ -115,9 +119,9 @@ export function registerTool(pi: ExtensionAPI): void {
 			let dialog: QuestionnaireDialog | undefined;
 			const cancel = () => dialog?.cancel();
 			signal?.addEventListener("abort", cancel, { once: true });
-			emitPrompt(pi, typed);
-			emitBlocked(pi, true);
 			try {
+				emitPrompt(pi, typed);
+				emitBlocked(pi, true);
 				// NOT an overlay. An overlay is composited over the bottom rows of the
 				// viewport, so the transcript underneath it is unreachable: the user is
 				// already scrolled to the bottom and there is nothing left to scroll.
