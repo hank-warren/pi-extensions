@@ -13,9 +13,51 @@ const IMPLEMENTATION_CONTEXT_LINES = [
 	"Or just type feedback to revise — the next completed plan supersedes this one.",
 ] as const;
 
+/**
+ * The same three lines for a plan that already has managed history.
+ *
+ * The third line is the one that has to change: for an agreed plan the next
+ * `plan_mode_complete` is *refused*, and a change becomes a reviewed revision the
+ * user accepts or cancels. Telling them feedback silently supersedes the plan
+ * would describe the flow this layer replaced.
+ */
+const MANAGED_CONTEXT_LINES = [
+	"Implement here keeps this planning conversation.",
+	"Start fresh opens a new session that reads the same plan file.",
+	"Or ask for a change — it becomes a revision you accept or cancel; this plan stays until then.",
+] as const;
+
+/**
+ * What the exit slot does, which is not the same thing for every plan.
+ *
+ * For an unmanaged draft it discards the file, and the label says so. For a plan
+ * that has been agreed it is non-destructive: the plan stays attached and paused,
+ * so a label promising to discard it would be false about the action the user is
+ * picking. Built here so the main menu and the post-accept ready card cannot
+ * drift apart.
+ */
+function exitItem(managedPlan: boolean, hasReadyPlan: boolean) {
+	if (managedPlan) {
+		return {
+			id: "exit",
+			label: "Leave the plan paused and attached",
+			description: "Stops revising. Nothing is discarded and nothing is implemented.",
+			action: "exit" as const,
+		};
+	}
+	return hasReadyPlan
+		? { id: "exit", label: "Discard plan and exit", action: "exit" as const }
+		: { id: "exit", label: "Exit Plan mode", action: "exit" as const };
+}
+
 interface PlanMenuOptions extends MenuLifecycle {
 	statusText: string;
 	hasReadyPlan: boolean;
+	/**
+	 * The plan has managed history, so it is an agreed plan rather than a draft.
+	 * Changes the exit item's label and action description, and the context lines.
+	 */
+	managedPlan: boolean;
 	/** A revision transaction is open, so the approved plan is being changed. */
 	hasOpenRevision: boolean;
 	/** A proposed revision is waiting for a decision. */
@@ -79,7 +121,9 @@ export async function showPlanModeMenu(ctx: ExtensionContext, options: PlanMenuO
 				lines: [
 					options.statusText,
 					...(options.hasReadyPlan && !options.hasOpenRevision
-						? [...IMPLEMENTATION_CONTEXT_LINES]
+						? options.managedPlan
+							? [...MANAGED_CONTEXT_LINES]
+							: [...IMPLEMENTATION_CONTEXT_LINES]
 						: []),
 					...(options.planPathLine && (options.hasReadyPlan || options.hasOpenRevision)
 						? [options.planPathLine]
@@ -89,7 +133,11 @@ export async function showPlanModeMenu(ctx: ExtensionContext, options: PlanMenuO
 					? revisionItems
 					: options.hasReadyPlan
 					? [
-							{ id: "show", label: "Show latest proposed plan", action: "show" },
+							{
+								id: "show",
+								label: options.managedPlan ? "Show the agreed plan" : "Show latest proposed plan",
+								action: "show",
+							},
 							{
 								id: "implement-here",
 								label: "Implement here",
@@ -105,12 +153,12 @@ export async function showPlanModeMenu(ctx: ExtensionContext, options: PlanMenuO
 							},
 							{ id: "export", label: "Export plan…", to: "export" },
 							{ id: "stay", label: "Stay in Plan mode", action: "stay" },
-							{ id: "exit", label: "Discard plan and exit", action: "exit" },
+							exitItem(options.managedPlan, true),
 						]
 					: [
 							{ id: "finalize", label: "Request final plan", action: "finalize" },
 							{ id: "stay", label: "Stay in Plan mode", action: "stay" },
-							{ id: "exit", label: "Exit Plan mode", action: "exit" },
+							exitItem(options.managedPlan, false),
 						],
 				hint: "close",
 			}),
@@ -162,6 +210,14 @@ export async function showPlanModeMenu(ctx: ExtensionContext, options: PlanMenuO
 
 interface ReadyPlanMenuOptions extends MenuLifecycle {
 	planPathLine?: string;
+	/**
+	 * The plan has managed history. This card is armed for an accepted *revision* as
+	 * well as for a first draft, so its title, its context lines and its exit item
+	 * all have to stop calling an agreed plan a proposal.
+	 */
+	managedPlan?: boolean;
+	/** The accepted spec revision, for a managed plan's title. */
+	specRevision?: number;
 	getExportDestination: PlanExportDestinationProvider;
 	implementHere(): void | Promise<void>;
 	implementFresh(signal: AbortSignal): void | Promise<void>;
@@ -178,9 +234,11 @@ export async function showReadyPlanMenu(ctx: ExtensionContext, options: ReadyPla
 		screens: {
 			ready: () => ({
 				kind: "actions",
-				title: "Proposed plan ready. What next?",
+				title: options.managedPlan
+					? `Plan at spec revision ${options.specRevision ?? 0} is current. What next?`
+					: "Proposed plan ready. What next?",
 				lines: [
-					...IMPLEMENTATION_CONTEXT_LINES,
+					...(options.managedPlan ? MANAGED_CONTEXT_LINES : IMPLEMENTATION_CONTEXT_LINES),
 					...(options.planPathLine ? [options.planPathLine] : []),
 				],
 				items: [
@@ -199,7 +257,7 @@ export async function showReadyPlanMenu(ctx: ExtensionContext, options: ReadyPla
 					},
 					{ id: "export", label: "Export plan…", to: "export" },
 					{ id: "stay", label: "Stay in Plan mode", action: "stay" },
-					{ id: "exit", label: "Discard plan and exit", action: "exit" },
+					exitItem(options.managedPlan === true, true),
 				],
 				hint: "close",
 			}),

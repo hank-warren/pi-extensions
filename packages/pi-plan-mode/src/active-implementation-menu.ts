@@ -7,10 +7,19 @@ interface ActiveImplementationMenuOptions {
 	planPathLine?: string;
 	/**
 	 * Set when this session cannot verify that the plan on disk is the plan the
-	 * user approved. It adds the one control that resolves that, and says on the
-	 * completion items why they will refuse until it is used.
+	 * user approved. It says on the completion items why they will refuse.
 	 */
 	approvalNotice?: string;
+	/**
+	 * Whether "Confirm the plan file" can do anything here.
+	 *
+	 * Separate from `approvalNotice` because one unverified state cannot be
+	 * confirmed: a file that cannot be read has no bytes to record, so confirming it
+	 * fails with "could not be read". Offering the item there is an invitation to an
+	 * error, and the route that does work — restoring the file, or clearing the plan
+	 * — is named in `statusText` instead.
+	 */
+	canConfirm?: boolean;
 	getExportDestination: PlanExportDestinationProvider;
 	signal: AbortSignal;
 	isCurrent(): boolean;
@@ -30,6 +39,7 @@ export async function showActiveImplementationMenu(
 	type Screen = "active" | "export";
 	type Action = "show" | "export" | "settings" | "confirm" | "done" | "start-new" | "clear";
 	const unverified = options.approvalNotice !== undefined;
+	const offerConfirm = unverified && options.canConfirm === true;
 	const menu = defineMenu<undefined, Screen, Action, ExtensionContext>({
 		start: "active",
 		screens: {
@@ -39,7 +49,7 @@ export async function showActiveImplementationMenu(
 				lines: [options.statusText, ...(options.planPathLine ? [options.planPathLine] : [])],
 				items: [
 					{ id: "show", label: "Show active implementation plan", action: "show" },
-					...(unverified
+					...(offerConfirm
 						? [
 								{
 									id: "confirm",

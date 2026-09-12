@@ -431,7 +431,7 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 					revisionId: open.revisionId,
 					baseRevision: open.baseRevision,
 					message:
-						"The proposed plan is byte-identical to the plan on disk, so nothing was changed and the revision is closed. The existing approval still stands.",
+						"The proposed plan has no textual change against the plan on disk, so nothing was changed and the revision is closed. The existing approval still stands.",
 				},
 			};
 		}
@@ -547,6 +547,52 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 		await transition;
 	}
 
+	/**
+	 * The candidate that belongs to the open transaction, however it was found.
+	 *
+	 * `revision.proposalId` is the fast path, and it is not the only one: `propose`
+	 * writes the candidate to disk *before* it writes the id into session state, so a
+	 * turn interrupted between those two steps leaves a real, reviewable candidate
+	 * that the transaction does not name. Falling back to the pending candidate found
+	 * on disk is what makes that interruption recoverable instead of a file nothing
+	 * can reach.
+	 *
+	 * Identity is checked on every path, not just the fast one: the candidate must
+	 * belong to this plan, to this transaction, and to the same base revision and
+	 * digest. Without that, a candidate left pending by an earlier transaction — or by
+	 * another session — could be attached to a revision it was never computed for,
+	 * and accepted against the wrong base.
+	 */
+	async function discoverOpenCandidate(
+		planId: string | undefined,
+		open: PlanRevisionTransaction,
+	): Promise<PlanProposal | undefined> {
+		if (!planId) return undefined;
+		const belongs = (candidate: PlanProposal) =>
+			candidate.planId === planId &&
+			candidate.revisionId === open.revisionId &&
+			candidate.baseRevision === open.baseRevision &&
+			candidate.baseDigest === open.baseDigest;
+		// Memory first, and that order is load-bearing. The candidate this session
+		// wrote is the one the user is being shown, so `acceptProposal`'s comparison
+		// against the stored record stays a real check: a proposal file that changed
+		// after it was written is refused rather than published. Reading from disk first
+		// would compare the record with itself and always agree.
+		if (pendingProposal && pendingProposal.status === "pending" && belongs(pendingProposal)) {
+			return pendingProposal;
+		}
+		if (open.proposalId) {
+			const named = await readPlanProposal(root(), planId, open.proposalId);
+			if (named && belongs(named)) return named;
+		}
+		// Nothing in memory and no id in state: the interrupted case. Sweep the
+		// directory for a pending candidate that belongs to this transaction.
+		const pending = await listPendingPlanProposals(root(), planId);
+		// Newest wins: after a corrected proposal the older candidate is the one the
+		// user asked to change.
+		return pending.filter(belongs).at(-1);
+	}
+
 	/** Retire the candidate of a transaction that is being replaced or closed. */
 	async function supersedeOpenProposal(
 		planId: string | undefined,
@@ -554,8 +600,11 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 		supersededBy?: string,
 		reason = "the revision it belonged to was superseded",
 	): Promise<void> {
-		if (!planId || !open.proposalId) return;
-		const proposal = await readPlanProposal(root(), planId, open.proposalId);
+		if (!planId) return;
+		// Discovered rather than read from `open.proposalId`, so a candidate written by
+		// an interrupted turn is actually retired instead of staying pending forever
+		// against a transaction the user has just cancelled.
+		const proposal = await discoverOpenCandidate(planId, open);
 		if (!proposal || proposal.status !== "pending") return;
 		await resolvePlanProposal(root(), proposal, "superseded", now(), {
 			...(supersededBy ? { supersededBy } : {}),
@@ -577,6 +626,36 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 		const open = state.revision;
 		if (!open) return;
 		await supersedeOpenProposal(state.planId, open, undefined, reason);
+		pendingProposal = undefined;
+	}
+
+	/**
+	 * Leave an agreed managed plan attached and paused, whatever it was doing.
+	 *
+	 * This is what `/plan exit` means once a plan has managed history. It is not an
+	 * exit: an agreed plan is not a draft to throw away, and the two states a
+	 * resolved revision leaves behind (`enabled` with or without `awaitingAction`)
+	 * are exactly where the old code treated it as one and deleted the file.
+	 *
+	 * So any open transaction is retired through the existing primitive, its baseline
+	 * and history are kept, and the session lands back on the managed ready decision
+	 * — the same state an accepted revision leaves, where `/plan` offers the
+	 * implementation choices. Nothing is deleted and nothing is implemented; the
+	 * plan's own `approvedDigest` is deliberately untouched, because pausing is not a
+	 * statement about which bytes were approved.
+	 */
+	async function pauseManagedPlan(ctx: ExtensionContext, reason: string): Promise<void> {
+		const state = options.getState();
+		if (state.revision) await retireOpenRevision(reason);
+		const current = options.getState();
+		if (!current.planPath || !current.planId) return;
+		options.nextWorkflow();
+		options.setState(ctx, {
+			schemaVersion: 2,
+			enabled: true,
+			awaitingAction: true,
+			revision: undefined,
+		});
 		pendingProposal = undefined;
 	}
 
@@ -973,14 +1052,16 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 				);
 			}
 		}
-		const pending = await listPendingPlanProposals(root(), state.planId);
-		if (!scope.isCurrent()) return;
 		// Re-read rather than closing over the restored copy: the branches above may
 		// have invalidated the transaction this would otherwise re-arm a card for.
 		const open = options.getState().revision;
 		pendingProposal = open
-			? pending.find((candidate) => candidate.revisionId === open.revisionId)
+			? await discoverOpenCandidate(options.getState().planId, open)
 			: undefined;
+		if (!scope.isCurrent()) {
+			pendingProposal = undefined;
+			return;
+		}
 		if (pendingProposal) {
 			ctx.ui.notify(
 				"A proposed plan revision is still waiting for review. Run /plan to accept it, ask for changes, or cancel it.",
@@ -999,12 +1080,7 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 			ctx.ui.notify("No plan revision is in progress.", "info");
 			return;
 		}
-		const candidate =
-			pendingProposal?.revisionId === open.revisionId
-				? pendingProposal
-				: open.proposalId
-					? await readPlanProposal(root(), state.planId, open.proposalId)
-					: undefined;
+		const candidate = await discoverOpenCandidate(state.planId, open);
 		if (!candidate || candidate.status !== "pending") {
 			ctx.ui.notify(
 				"No proposed plan revision is waiting for review. The agent is still working on it.",
@@ -1109,14 +1185,35 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 		reviewPendingRevision,
 		cancelRevision,
 		retireOpenRevision,
+		pauseManagedPlan,
 		confirmCurrentPlan,
 		/** Dropped when a session starts or the plan is cleared. */
 		reset() {
 			pendingProposal = undefined;
 		},
+		/**
+		 * Whether `/plan` has a candidate it can actually open.
+		 *
+		 * The menu must not key this off `revision.proposalId` alone. An interrupted
+		 * `propose` writes the candidate before that id reaches session state, and the
+		 * result of reading state only is a menu that says "Nothing has been proposed
+		 * yet" about a candidate both the reconcile notice and the tool result promise is
+		 * waiting — with Cancel short-circuiting too. This answers from the same
+		 * discovery the review and cancel paths use, so the three cannot disagree.
+		 */
 		hasPendingProposal(): boolean {
-			const open = options.getState().revision;
-			return open !== undefined && (pendingProposal?.revisionId === open.revisionId || open.proposalId !== undefined);
+			const state = options.getState();
+			const open = state.revision;
+			if (!open || !state.planId) return false;
+			if (open.proposalId !== undefined) return true;
+			return (
+				pendingProposal !== undefined &&
+				pendingProposal.status === "pending" &&
+				pendingProposal.planId === state.planId &&
+				pendingProposal.revisionId === open.revisionId &&
+				pendingProposal.baseRevision === open.baseRevision &&
+				pendingProposal.baseDigest === open.baseDigest
+			);
 		},
 		approvalNotice(approval: PlanApproval): string | undefined {
 			return approvalNotice(approval);

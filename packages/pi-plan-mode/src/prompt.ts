@@ -278,6 +278,13 @@ export function buildActivePlanPointer(
 		revision?: number;
 		/** Set when approval is unknown or no longer covers the file on disk. */
 		approvalNotice?: string;
+		/**
+		 * How a person can get back to a known-approved plan *in this session's mode*,
+		 * from `approvalRecoveryInstruction`. Passed in rather than written here so the
+		 * model, the menu and every refusal quote one sentence, and so a headless run
+		 * is never sent at the interactive menu.
+		 */
+		recoveryInstruction?: string;
 	} = {},
 ) {
 	const revision = detail.revision ?? 0;
@@ -287,7 +294,9 @@ export function buildActivePlanPointer(
 	];
 	if (detail.approvalNotice) {
 		lines.push(
-			`${detail.approvalNotice} Do not mark the plan implemented in this state: either revise it with ${UPDATE_PLAN_TOOL_NAME}, or tell the user they can run /plan and choose "Confirm the plan file".`,
+			detail.recoveryInstruction
+				? `${detail.approvalNotice} Do not mark the plan implemented in this state, and do not treat it as approved on your own — ${detail.recoveryInstruction}`
+				: `${detail.approvalNotice} Do not mark the plan implemented in this state, and do not treat it as approved on your own.`,
 		);
 	}
 	return lines.join("\n");

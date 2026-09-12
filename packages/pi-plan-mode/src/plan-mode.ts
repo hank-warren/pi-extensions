@@ -34,7 +34,10 @@ import {
 } from "./plan-file.js";
 import { createPlanActionController } from "./plan-action-controller.js";
 import {
+	approvalRecoveryInstruction,
+	canConfirmPlanFile,
 	completionRefusal,
+	type PlanApproval,
 	evaluatePlanApproval,
 	managedCompletionRefusal,
 	mutationRefusal,
@@ -199,6 +202,14 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 	 * turn boundary, and deliberately not persisted: it is a reading, not a fact.
 	 */
 	let viewDetail: PlanModeViewDetail = {};
+	/**
+	 * The approval the visible state was derived from.
+	 *
+	 * The notice alone cannot answer "is there anything the user can do about it":
+	 * a missing file and a stale digest both produce a notice, and only one of them
+	 * can be confirmed. The menu keys its Confirm item on this.
+	 */
+	let viewApproval: PlanApproval = { kind: "none" };
 	const persistState = () => pi.appendEntry<PlanModeState>(STATE_ENTRY_TYPE, state);
 
 	/**
@@ -284,7 +295,10 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		getState: () => state,
 		captureLifecycle: () => lifecycle.capture(),
 		statusText: planStatusText,
-		hasPendingRevision: () => state.revision?.proposalId !== undefined,
+		// Asks the controller, not state: a candidate written by an interrupted turn
+		// exists on disk before its id reaches the session entry, and the menu item has
+		// to offer the review that `reviewPendingRevision` can in fact open.
+		hasPendingRevision: () => revisions.hasPendingProposal(),
 		reviewRevision: (ctx) => revisions.reviewPendingRevision(ctx),
 		cancelRevision: (ctx) => revisions.cancelRevision(ctx),
 		planPathLine: () => (state.planPath ? `Plan file: ${state.planPath}` : undefined),
@@ -580,7 +594,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		pendingReadyNonce = undefined;
 		latestCommandContext = undefined;
 		settings = {};
-		viewDetail = {};
+		clearApprovalView();
 		revisions.reset();
 		sessionPlanPath = resolveSessionPlanPath(ctx);
 		restoreState(ctx);
@@ -631,7 +645,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		const scope = lifecycle.capture();
 		const previousPlanPath = state.planPath;
 		pendingReadyNonce = undefined;
-		viewDetail = {};
+		clearApprovalView();
 		revisions.reset();
 		currentHasUI = ctx.hasUI;
 		restoreState(ctx);
@@ -705,17 +719,25 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		}
 		if (!state.planPath) return;
 		const reading = await revisions.read(state);
-		const refusal = mutationRefusal(event.toolName, reading.approval);
+		const refusal = mutationRefusal(event.toolName, reading.approval, guidanceMode(ctx));
 		if (!refusal) return;
 		// The widget and the next prompt should agree with the refusal the model just
 		// received, so the reading is published rather than discarded.
-		const notice = revisions.approvalNotice(reading.approval);
-		if (notice !== viewDetail.approvalNotice) {
-			viewDetail = notice ? { approvalNotice: notice } : {};
-			updateUi(ctx);
-		}
+		if (publishApproval(reading.approval, guidanceMode(ctx))) updateUi(ctx);
 		return { block: true, reason: refusal };
 	});
+
+	/**
+	 * Which recovery routes exist in the session being spoken to.
+	 *
+	 * `/plan` with no arguments throws in print and JSON modes, and an unrecognised
+	 * argument is forwarded to the model as a planning prompt — so "run /plan and
+	 * choose …" is worse than useless there. Everything that offers a way back to an
+	 * approved plan asks this first.
+	 */
+	function guidanceMode(ctx: ExtensionContext) {
+		return { interactive: ctx.hasUI };
+	}
 
 	/**
 	 * Everything the first prompt of a turn needs settled before Pi snapshots
@@ -774,11 +796,8 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		// and hook order between the two packages is not ours to depend on.
 		const questionTool = ctx.hasUI ? preferredQuestionTool(pi) : null;
 		const reading = state.planPath ? await revisions.read(state) : undefined;
-		const notice = reading ? revisions.approvalNotice(reading.approval) : undefined;
-		if (notice !== viewDetail.approvalNotice) {
-			viewDetail = notice ? { approvalNotice: notice } : {};
-			updateUi(ctx);
-		}
+		if (publishApproval(reading?.approval ?? { kind: "none" }, guidanceMode(ctx))) updateUi(ctx);
+		const notice = viewDetail.approvalNotice;
 		const revision = state.revision;
 		if (state.enabled) {
 			// Three states, three endings, and the prompt has to name the one that will
@@ -810,10 +829,14 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		// Pointer, not payload: an active plan costs a couple of lines of context no
 		// matter how large the plan is, and survives compaction for free.
 		if (state.planPath) {
+			const recoveryInstruction = reading
+				? approvalRecoveryInstruction(reading.approval, guidanceMode(ctx))
+				: undefined;
 			return {
 				systemPrompt: `${event.systemPrompt}\n\n${buildActivePlanPointer(state.planPath, {
 					revision: reading?.revision ?? state.specRevision ?? 0,
 					...(notice ? { approvalNotice: notice } : {}),
+					...(recoveryInstruction ? { recoveryInstruction } : {}),
 				})}`,
 			};
 		}
@@ -858,36 +881,66 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		lifecycle.nextWorkflow();
 		const planPath = state.planPath;
 		pendingReadyNonce = undefined;
-		viewDetail = {};
+		clearApprovalView();
 		revisions.reset();
 		setState(ctx, { ...clearedManagedState(), enabled: false, planPath: undefined, awaitingAction: false });
 		if (planPath && !options.keepPlanFile) await deletePlanFile(planPath);
 	}
 
 	/**
+	 * Is this an agreed plan being planned over, rather than a draft?
+	 *
+	 * The discriminator is **managed identity**, not approval. `approvedDigest` is
+	 * cleared by accepting a revision — deliberately, because the new text is current
+	 * but not yet approved — so keying off it would call the plan a draft in exactly
+	 * the state a revision has just been accepted in. `planId` is assigned the first
+	 * time something managed happens to a plan and survives every revision outcome,
+	 * which is what "this is not a first draft" actually means.
+	 *
+	 * Scoped to `enabled`, because `!enabled && planPath` is *implementing*, and that
+	 * state already has an explicit clear with long-standing behaviour.
+	 */
+	function managedPlanningActive(): boolean {
+		return state.enabled && state.planId !== undefined && state.planPath !== undefined;
+	}
+
+	/**
 	 * `/plan exit` and `/plan off`, which mean different things in each state.
 	 *
-	 * The case worth spelling out is exit *during a revision*. Opening a revision
-	 * turns Plan mode back on, so the plain reading of "Plan mode is on and a plan
-	 * file exists" is "a proposed draft is being discarded" — and it is not: the file
-	 * holds the plan the user already agreed to. Deleting it would throw away the
-	 * approved baseline to abandon a revision of it, and say so in the wrong words.
+	 * The case worth spelling out is exit over an **agreed managed plan**, in any of
+	 * the three states a revision leaves behind: open, accepted, cancelled. Opening a
+	 * revision turns Plan mode back on and resolving one leaves it on, so the plain
+	 * reading of "Plan mode is on and a plan file exists" is "a proposed draft is
+	 * being discarded" — and it is not. The file holds the plan the user agreed to,
+	 * and deleting it to abandon a revision of it, or to stop talking about it, throws
+	 * away the baseline and says so in the wrong words.
 	 *
-	 * So exit during a revision keeps the live file and the retained candidate,
-	 * retires the transaction, and leaves nothing implementing: execution stays
-	 * paused until the user picks the plan back up. `/plan exit` again, or "Clear
-	 * active implementation plan", is still how the file is deleted.
+	 * So exit over a managed plan is **not destructive and not an exit**: any open
+	 * transaction is retired through the existing primitive, the live file, identity
+	 * and history are kept, and the plan stays attached and paused at the managed
+	 * ready decision. The notification names only routes that exist from there — the
+	 * implementation actions and export that `/plan` actually offers. It deliberately
+	 * does not offer a clear: no explicit clear action is reachable from managed
+	 * planning (the clear lives on the active-implementation menu), and inventing a
+	 * command or deleting silently are both worse than saying less.
+	 *
+	 * Two long-standing behaviours are untouched: exit while *implementing* still
+	 * clears the active plan, and exit over an unmanaged first draft still discards
+	 * it.
 	 */
 	async function exitPlanModeCommand(ctx: ExtensionContext) {
 		const planPath = state.planPath;
-		if (state.revision && planPath) {
-			// The candidate is retired through the same primitive the review card's
-			// Cancel uses, so there is one way a transaction ends.
-			await revisions.retireOpenRevision("the user exited Plan mode during the revision");
-			await exitAndNotify(
+		if (managedPlanningActive() && planPath) {
+			const hadRevision = state.revision !== undefined;
+			await revisions.pauseManagedPlan(
 				ctx,
-				`Plan revision abandoned and Plan mode disabled. The agreed plan was kept at ${planPath}; nothing is implementing it. Run /plan to pick it up, or /plan exit again to delete it.`,
-				{ keepPlanFile: true },
+				"the user stopped revising from /plan exit",
+			);
+			ctx.ui.notify(
+				`${hadRevision ? "Plan revision abandoned. " : ""}The agreed plan at ${planPath} (spec revision ${
+					state.specRevision ?? 0
+				}) stays attached and paused; nothing was discarded and nothing is being implemented. Run /plan to implement it here, start a fresh implementation session, or export it.`,
+				"info",
 			);
 			return;
 		}
@@ -935,13 +988,9 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		// this the user hears "No plan is being implemented" about a plan that is.
 		if (state.revision) return REVISION_IN_PROGRESS_REFUSAL;
 		const reading = await revisions.read(state);
-		const refusal = completionRefusal(reading.approval);
+		const refusal = completionRefusal(reading.approval, guidanceMode(ctx));
 		if (!refusal) return undefined;
-		const notice = revisions.approvalNotice(reading.approval);
-		if (notice !== viewDetail.approvalNotice) {
-			viewDetail = notice ? { approvalNotice: notice } : {};
-			updateUi(ctx);
-		}
+		if (publishApproval(reading.approval, guidanceMode(ctx))) updateUi(ctx);
 		return refusal;
 	}
 
@@ -971,7 +1020,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		pendingReadyNonce = undefined;
 		const archivePath = planPath ? await archivePlanFile(planPath) : undefined;
 		if (!scope.isCurrent()) return { kind: "stale" };
-		viewDetail = {};
+		clearApprovalView();
 		revisions.reset();
 		setState(ctx, {
 			...clearedManagedState(),
@@ -1200,7 +1249,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		lifecycle.nextWorkflow();
 		const previousState = state;
 		pendingReadyNonce = undefined;
-		viewDetail = {};
+		clearApprovalView();
 		setState(ctx, { enabled: false, awaitingAction: false, planPath, revision: undefined });
 		// The same transition that rewrites the system prompt stages the tool.
 		activateImplementedTool(currentHasUI);
@@ -1242,6 +1291,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 			statusText: planStatusText(),
 			...(state.planPath ? { planPathLine: `Plan file: ${state.planPath}` } : {}),
 			...(viewDetail.approvalNotice ? { approvalNotice: viewDetail.approvalNotice } : {}),
+			canConfirm: canConfirmPlanFile(viewApproval),
 			getExportDestination: () => planExports.getDestination(ctx),
 			signal: menu.signal,
 			isCurrent: menu.isCurrent,
@@ -1327,7 +1377,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 			awaitingAction: false,
 			...(archivePath ? { archivePath } : {}),
 		};
-		viewDetail = {};
+		clearApprovalView();
 		revisions.reset();
 		persistState();
 		ctx.ui.notify(
@@ -1346,15 +1396,47 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 	 * scope check is the usual one: a read that finishes after the session moved on
 	 * must not write its conclusion onto whatever replaced it.
 	 */
-	async function refreshViewDetail(scope: { isCurrent(): boolean }): Promise<void> {
+	async function refreshViewDetail(
+		scope: { isCurrent(): boolean },
+		mode: { interactive: boolean } = { interactive: currentHasUI },
+	): Promise<void> {
 		if (!state.planPath) {
-			viewDetail = {};
+			clearApprovalView();
 			return;
 		}
 		const reading = await revisions.read(state);
 		if (!scope.isCurrent()) return;
-		const notice = revisions.approvalNotice(reading.approval);
-		viewDetail = notice ? { approvalNotice: notice } : {};
+		publishApproval(reading.approval, mode);
+	}
+
+	/**
+	 * Record a fresh approval reading, and refresh the UI only when what the user
+	 * would see has changed.
+	 *
+	 * Every surface that reads the plan file goes through here — the turn boundary,
+	 * the mutation guard, the completion gate, the `/plan` menu — so the footer, the
+	 * status sentence, the menu's available items and the refusal the model just
+	 * received cannot describe different readings of the same file. Returns whether
+	 * the visible notice moved, for the callers that own the `updateUi` call.
+	 */
+	/** Forget the current reading, for every path that stops tracking a plan. */
+	function clearApprovalView(): void {
+		viewApproval = { kind: "none" };
+		viewDetail = {};
+	}
+
+	function publishApproval(
+		approval: PlanApproval,
+		mode: { interactive: boolean } = { interactive: currentHasUI },
+	): boolean {
+		viewApproval = approval;
+		const notice = revisions.approvalNotice(approval);
+		const instruction = approvalRecoveryInstruction(approval, mode);
+		const changed = notice !== viewDetail.approvalNotice;
+		viewDetail = notice
+			? { approvalNotice: notice, ...(instruction ? { recoveryInstruction: instruction } : {}) }
+			: {};
+		return changed;
 	}
 
 	function updateUi(ctx: ExtensionContext) {

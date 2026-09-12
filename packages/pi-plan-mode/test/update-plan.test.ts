@@ -355,7 +355,9 @@ test("proposing shows the computed diff and the review decides, in the same call
 	assert.equal(state.enabled, true);
 	assert.equal(state.awaitingAction, true);
 	assert.match(String(result.payload.message), /not yet approved for implementation/u);
-	assert.equal(harness.statuses.get("plan-mode"), "◆ plan · ready → /plan");
+	// The accepted revision is the agreed plan at revision 2, not a proposal, and
+	// not yet approved for implementation.
+	assert.equal(harness.statuses.get("plan-mode"), "◆ plan · agreed r2 → /plan");
 	assert.ok(harness.cards.some((entry) => entry.title === "Plan revision 2"));
 });
 
@@ -727,4 +729,133 @@ test("a restart restores the open revision and finds its waiting candidate", asy
 		harness.notifications.some((entry) => /still waiting for review/u.test(entry.message)),
 		harness.notifications.map((entry) => entry.message).join(" | "),
 	);
+});
+
+test("a candidate written by an interrupted turn is reviewable and cancellable after a restart", async (t) => {
+	// The boundary: `propose` stamps the candidate, writes it to disk, and only then
+	// records its id in session state. A turn interrupted in between leaves a real,
+	// reviewable candidate that the transaction does not name — and the tool result
+	// and the restart notice both promise `/plan` can reopen it.
+	//
+	// Keying the menu off `revision.proposalId` made that promise false: the review
+	// item rendered disabled ("Nothing has been proposed yet") and Cancel
+	// short-circuited, so the candidate stayed pending with no way to act on it.
+	const controller = new AbortController();
+	let interrupt = false;
+	const harness = createRevisionHarness({
+		reviews: [{ kind: "dismissed" }, { kind: "cancelled" }],
+		onTimestamp: () => {
+			// The clock tick that stamps the candidate, immediately before it is written.
+			if (interrupt) {
+				interrupt = false;
+				controller.abort();
+			}
+		},
+	});
+	t.after(harness.cleanup);
+	await implementPlan(harness);
+	const started = await begin(harness, { expectedRevision: 1 });
+	const planId = String(stateOf(harness).planId);
+
+	interrupt = true;
+	const result = await propose(harness, {}, controller.signal);
+
+	// Saved and waiting, with nothing approved and the id absent from state.
+	assert.equal(result.payload.status, "pending_review");
+	assert.match(String(result.payload.message), /\/plan reopens it/u);
+	assert.equal(stateOf(harness).revision?.proposalId, undefined, "the id never reached state");
+	const written = await listPendingPlanProposals(planRevisionsRoot(), planId);
+	assert.equal(written.length, 1, "the candidate is on disk");
+	assert.equal(written[0]?.revisionId, started.payload.revisionId);
+	const candidateId = written[0]?.proposalId;
+
+	// Restart. The transaction restores from the branch; the candidate has to be
+	// rediscovered from disk, because nothing in state names it.
+	await harness.emit("session_start", { reason: "resume" });
+	assert.equal(stateOf(harness).revision?.revisionId, started.payload.revisionId);
+	assert.ok(
+		harness.notifications.some((entry) => /still waiting for review/u.test(entry.message)),
+		harness.notifications.map((entry) => entry.message).join(" | "),
+	);
+
+	// `/plan` offers the review, and it opens the candidate that was written.
+	await runPlanCommand(harness, "");
+	const menu = harness.planMenuCalls.at(-1) as {
+		hasPendingRevision?: boolean;
+		reviewRevision?: () => Promise<void>;
+	};
+	assert.equal(menu.hasPendingRevision, true, "the menu must offer the waiting review");
+	await menu.reviewRevision?.();
+	assert.equal(harness.reviewRequests.length, 1, "the card opened");
+	assert.equal(harness.reviewRequests[0]?.instructions, INSTRUCTIONS);
+	assert.equal(harness.reviewRequests[0]?.proposedPlan, `${REVISED_PLAN}\n`);
+
+	// Dismissing it is not an approval: the plan on disk is untouched.
+	assert.equal(await readPlanFile(planPath(harness)), `${FIRST_PLAN}\n`);
+	assert.equal(stateOf(harness).specRevision, 1);
+	assert.equal(stateOf(harness).approvedDigest, digestOf(`${FIRST_PLAN}\n`));
+
+	// And Cancel actually retires the discovered candidate rather than silently
+	// doing nothing, which is what left it pending until the next propose swept it.
+	await runPlanCommand(harness, "");
+	const reopened = harness.planMenuCalls.at(-1) as { cancelRevision?: () => Promise<void> };
+	await reopened.cancelRevision?.();
+	const after = await listPlanProposals(planRevisionsRoot(), planId);
+	assert.equal(after.length, 1);
+	assert.equal(after[0]?.proposalId, candidateId);
+	assert.notEqual(after[0]?.status, "pending", "the candidate is retired");
+	assert.ok(after[0]?.proposedPlan.length, "its content is kept");
+	assert.equal(stateOf(harness).revision, undefined);
+	assert.equal(await readPlanFile(planPath(harness)), `${FIRST_PLAN}\n`);
+});
+
+test("a candidate from an unrelated transaction is never attached to this one", async (t) => {
+	// Discovery matches plan, transaction and base identity. Without that, a
+	// candidate left pending by an earlier revision could be reopened against a
+	// transaction it was never computed for, and accepted against the wrong base.
+	const harness = createRevisionHarness({ reviews: [{ kind: "dismissed" }] });
+	t.after(harness.cleanup);
+	await implementPlan(harness);
+	await begin(harness, { expectedRevision: 1 });
+	const stranded = await propose(harness);
+	assert.equal(stranded.payload.status, "pending_review");
+	const planId = String(stateOf(harness).planId);
+
+	// A second transaction over the same bytes: a different revisionId, and the
+	// earlier candidate is still pending on disk.
+	harness.viewBranch([]);
+	await harness.emit("session_tree", { newLeafId: "other", oldLeafId: "first" });
+	harness.viewBranch(undefined);
+	await harness.emit("session_start", { reason: "resume" });
+	const pending = await listPendingPlanProposals(planRevisionsRoot(), planId);
+	assert.equal(pending.length, 1, "the earlier candidate is still on file");
+
+	// Forge a transaction id that no candidate belongs to, as a restored entry would
+	// if the candidate had been swept by another session.
+	harness.branch.push({
+		type: "custom",
+		customType: "plan-mode-state",
+		data: {
+			...(stateOf(harness) as Record<string, unknown>),
+			revision: {
+				revisionId: "00000000-0000-4000-8000-0000000000ff",
+				baseRevision: 1,
+				baseDigest: digestOf(`${FIRST_PLAN}\n`),
+				instructions: "something else",
+				startedAt: "2026-01-01T00:00:00.000Z",
+			},
+		},
+	});
+	await harness.emit("session_start", { reason: "resume" });
+
+	await runPlanCommand(harness, "");
+	const menu = harness.planMenuCalls.at(-1) as {
+		hasPendingRevision?: boolean;
+		reviewRevision?: () => Promise<void>;
+	};
+	assert.notEqual(menu.hasPendingRevision, true, "another transaction's candidate is not ours");
+	const before = harness.reviewRequests.length;
+	await menu.reviewRevision?.();
+	assert.equal(harness.reviewRequests.length, before, "nothing was opened");
+	assert.match(harness.notifications.at(-1)?.message ?? "", /No proposed plan revision is waiting/u);
 });

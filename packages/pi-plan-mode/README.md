@@ -103,7 +103,15 @@ Closing the card without choosing is not a decision: the candidate waits, implem
 
 Accepting makes the revision **current but not yet approved**: the same "what next?" menu a completed plan opens appears, and choosing to implement is what approves those exact bytes. Cancelling leaves execution paused the same way, so nothing silently resumes against a plan you were in the middle of changing.
 
-While a revision is open, everything that would claim the plan is finished refuses and says why: `plan_implemented`, `/plan done`, and the menu's completion items. `/plan exit` during a revision abandons the revision but **keeps the agreed plan file** — it is not the discarded draft that exit normally means — retires the candidate, and leaves nothing implementing until you pick the plan back up. `/plan implement` refuses rather than approving bytes you are still changing.
+While a revision is open, everything that would claim the plan is finished refuses and says why: `plan_implemented`, `/plan done`, and the menu's completion items. `/plan implement` refuses too, rather than approving bytes you are still changing.
+
+### An agreed plan is never discarded by accident
+
+Once a plan has been revised or approved it has managed history, and from then on `/plan exit` — and the matching menu item — **stop being destructive**. Any open revision is retired, the plan file, its identity and its history are kept, and the plan stays attached and paused in Plan mode at the same decision an accepted revision leaves: implement it here, start a fresh implementation session, or export it. Nothing is deleted and nothing is implemented.
+
+That applies in every state a revision leaves behind — open, accepted, cancelled — and a turn later, because those states look identical to a first draft from the outside and used to be treated as one. The menu says what the action does rather than offering “Discard plan and exit” for it.
+
+Two long-standing behaviours are unchanged: `/plan exit` while a plan is being **implemented** still clears the active plan, and `/plan exit` over an unmanaged **first draft** still discards it.
 
 ### Revision history
 
@@ -120,7 +128,7 @@ plans/.revisions/<plan-id>/
 
 A plan gains a history the first time something managed happens to it — a revision, or an approval — never in bulk at session start, and **from the bytes the file actually holds**: no trailing newline is added and no line ending is rewritten, because a digest over anything else would report a change nobody made. (Candidates the agent authors get the trailing newline on their way in; every comparison against live or accepted content is raw-byte.) Nothing here is ever overwritten: revision numbers are allocated past everything ever reserved, so gaps are normal and a number is never reused. Clearing a plan from a session clears the session's pointer, not the record.
 
-Publication order is: prepare the candidate bytes and a record of what they are, replace the plan file, then write the snapshot and the manifest. A crash between the second and third steps is repaired at the next session start — but only on evidence that this package published exactly those bytes *and has not finished doing so*: the record must name a revision above the one the manifest holds and not already be in its history. Without that, a plan revised and then rolled back would let the old revision's record explain any later reappearance of its bytes, and an outside edit would be reported as a recovered publication. Plan-file contents that no record explains are **not** adopted as a revision and never count as approval: they are reported, kept, and left for you to reconcile (by asking for a revision) or confirm (from `/plan`).
+Publication order is: prepare the candidate bytes and a record of what they are — both exclusively created and fsynced, the record first, because it is the only thing that can later prove those bytes were this package's to publish — then replace the plan file, then write the snapshot and the manifest. A failure while preparing publishes nothing and leaves no half-written pair behind. (The containing directory is still not fsynced, so a power loss can lose a *name* whose bytes were flushed; what is promised is that a name which survives never points at bytes that did not.) A crash between the second and third steps is repaired at the next session start — but only on evidence that this package published exactly those bytes *and has not finished doing so*: the record must name a revision above the one the manifest holds and not already be in its history. Without that, a plan revised and then rolled back would let the old revision's record explain any later reappearance of its bytes, and an outside edit would be reported as a recovered publication. Plan-file contents that no record explains are **not** adopted as a revision and never count as approval: they are reported, kept, and left for you to reconcile (by asking for a revision) or confirm (from `/plan`).
 
 If a plan's history directory disappears while a revision is open, the revision is invalidated rather than left half-usable — asking for the change again starts a fresh history. Every candidate and snapshot still on disk is kept.
 
@@ -133,7 +141,11 @@ Approval is the digest of the bytes you approved, so two situations read as unve
 - **The plan file changed after it was approved** — a hand-edit, or another session.
 - **This session never recorded an approval** — a plan carried in from a version before managed approval.
 
-Either way the footer becomes `▶ plan · unverified → /plan`, the system prompt tells the model not to claim the plan was implemented, **`edit` and `write` are refused**, and every completion path refuses. Two things resolve it, both deliberate: ask for a revision (`update_plan` reconciles the file, and accepting it records the result), or `/plan` → **Confirm the plan file**, which records the file exactly as it is as approved and as a revision in its history. Nothing resolves it automatically, and no model-callable tool can bypass it.
+Either way the footer becomes `▶ plan · unverified → /plan`, the system prompt tells the model not to claim the plan was implemented or to treat it as approved on its own, **`edit` and `write` are refused**, and every completion path refuses. Two things resolve it, both deliberate: ask for a revision (`update_plan` reconciles the file, and accepting it records the result), or `/plan` → **Confirm the plan file**, which records the file exactly as it is as approved and as a revision in its history. Nothing resolves it automatically, and no model-callable tool can bypass it.
+
+**In print and JSON modes there is no `/plan` menu**, so the guidance names the route that works there instead: `/plan implement` re-approves the plan exactly as it is on disk and restarts implementation from it. It is a command *you* run — there is no `/plan confirm`, and no way for the model to approve anything on your behalf.
+
+A third case is different and gets a different answer. If the plan file **cannot be read**, neither revising nor confirming can help: both need its bytes. The guidance and the status line say to restore the file at its path or clear the active plan with `/plan exit`, and the menu withholds **Confirm the plan file** rather than offering an action that would fail.
 
 The digest is compared at three moments, not one: at the start of every turn, before every mutating tool call, and at completion. The middle one is what catches an edit that lands *between* two tool calls in the same turn — without it, the rest of that turn would carry out a plan nobody agreed to and only the next turn would notice.
 
@@ -146,7 +158,7 @@ Approval is recorded in the session branch, so `/tree` navigation re-reads it: m
 The plan lives at `<agent dir>/plans/<session-id>.md` — normally `~/.pi/agent/plans/<session-id>.md`.
 
 - **It is the plan.** Session state stores only the path.
-- **Hand-edit it freely.** Everything reads from disk, so your edits are what the agent implements.
+- **Hand-edit it freely — then re-approve it.** Everything reads from disk, so your edits are what the agent implements. But an edit after the plan was approved invalidates that approval: `edit` and `write` are refused and the plan cannot be marked implemented until you confirm the file or revise it (see [When approval cannot be verified](#when-approval-cannot-be-verified)).
 - **It survives compaction** because the model only ever sees a one-line pointer to it, and re-reads the file when needed.
 - **A fresh implementation session points at the same file.** The plan is never copied, so both sessions see the same content.
 - **Finishing archives it** to `<session-id>.<n>.md` in the same directory, numbered upward, so the next plan in the session gets a clean slot without overwriting the last one.
@@ -219,7 +231,8 @@ It used to be a skill. A skill's description line is in every system prompt, whi
 The footer status and the widget above the editor render from **one formatter**, so they cannot drift, and they share a glyph vocabulary with the sibling [`pi-loop`](../pi-loop): `◆` for a state wanting a decision, `▶` for work under way.
 
 - `◆ plan · drafting` — planning is under way.
-- `◆ plan · revising` — a revision of an existing plan is being written, or feedback superseded a completed plan; the stored plan is not current.
+- `◆ plan · revising` — a revision of an existing plan is being written, or feedback superseded a first draft; the stored plan is not current.
+- `◆ plan · agreed r<n> → /plan` — an agreed plan at spec revision *n* is current and paused. The widget says whether it is approved for implementation yet.
 - `◆ plan · revision ready → /plan` — a proposed revision is waiting for your decision.
 - `◆ plan · ready → /plan` — a completed plan is waiting for your choice.
 - `▶ plan · implementing` — a plan file is active and guiding implementation.

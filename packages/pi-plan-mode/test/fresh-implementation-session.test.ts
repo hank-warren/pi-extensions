@@ -368,7 +368,9 @@ test("a cancelled fresh flow leaves the parent ready, never implementing", async
 		const parent = mock.entries.at(-1)?.data as Record<string, unknown>;
 		assert.equal(parent.enabled, true, "the parent is still planning, not implementing");
 		assert.equal(parent.awaitingAction, true);
-		assert.equal(context.statuses.get("plan-mode"), "◆ plan · ready → /plan");
+		// Managed, because recording the approval gave the plan an identity; still a
+		// planning state, which is the point — a cancelled choice implements nothing.
+		assert.equal(context.statuses.get("plan-mode"), "◆ plan · agreed r1 → /plan");
 		assert.equal(mock.sentUserMessages.length, 0, "no implementation handoff was sent");
 	});
 });
@@ -494,9 +496,32 @@ test("a destination seeded before managed approval reads as unverified, not appr
 			| ((...args: unknown[]) => Promise<unknown>)
 			| undefined;
 		assert.ok(implemented);
+		// This context has no UI, so the guidance names the route that works without
+		// one. `/plan` with no arguments throws in print and JSON modes, and "confirm"
+		// is not a subcommand — typing it would turn Plan mode on over an implementing
+		// plan and forward the word to the model as a prompt.
 		await assert.rejects(
 			implemented("call", {}, undefined, undefined, context.ctx),
-			/Confirm the plan file/,
+			(error: Error) =>
+				/no interactive review/u.test(error.message) &&
+				/\/plan implement/u.test(error.message) &&
+				!/Confirm the plan file/u.test(error.message),
+		);
+
+		// The same state in an interactive session names the menu item, which exists there.
+		const interactive = createMockContext({
+			hasUI: true,
+			mode: "tui",
+			sessionManager: {
+				getSessionId: () => "test-session",
+				getSessionFile: () => "/sessions/implementation.jsonl",
+				getBranch: () => entries,
+				getEntries: () => entries,
+			},
+		});
+		await assert.rejects(
+			implemented("call", {}, undefined, undefined, interactive.ctx),
+			/Confirm the plan file/u,
 		);
 	});
 });

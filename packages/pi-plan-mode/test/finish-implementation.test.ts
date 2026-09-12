@@ -102,12 +102,18 @@ test("a /plan start issued while the archive is pending is not undone when it la
 			const menu = mock.commands.get("plan")?.handler("", context.ctx);
 			await settle();
 			await mock.commands.get("plan")?.handler("start", context.ctx);
-			assert.equal(context.statuses.get("plan-mode"), "◆ plan · revising");
+			// The plan gained managed identity when it was implemented, so planning over
+			// it reads as the agreed plan rather than as a superseded draft.
+			assert.equal(context.statuses.get("plan-mode"), "◆ plan · agreed r1 → /plan");
 			held.release();
 			await menu;
 			await settle();
 		});
-		assert.equal(context.statuses.get("plan-mode"), "◆ plan · revising", "the newer workflow owns the state");
+		assert.equal(
+			context.statuses.get("plan-mode"),
+			"◆ plan · agreed r1 → /plan",
+			"the newer workflow owns the state",
+		);
 		const block = await mock.events.get("tool_call")?.[0]?.({ toolName: "edit" }, context.ctx);
 		assert.equal((block as { block?: boolean } | undefined)?.block, true, "planning still blocks edit");
 		assert.ok(!context.notifications.some((n) => /Plan implemented/.test(n.message)), "no stale success");

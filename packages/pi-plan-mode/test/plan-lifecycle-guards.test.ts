@@ -11,10 +11,23 @@
  */
 
 import assert from "node:assert/strict";
+import { rm } from "node:fs/promises";
 import test from "node:test";
 import { readPlanFile, writePlanFile } from "../src/plan-file.js";
-import { completionRefusal, managedCompletionRefusal, mutationRefusal } from "../src/plan-approval.js";
-import { digestOf, planRevisionsRoot, readPlanManifest, readPlanSnapshot } from "../src/revision-store.js";
+import {
+	approvalRecoveryInstruction,
+	canConfirmPlanFile,
+	completionRefusal,
+	managedCompletionRefusal,
+	mutationRefusal,
+} from "../src/plan-approval.js";
+import {
+	digestOf,
+	listPlanProposals,
+	planRevisionsRoot,
+	readPlanManifest,
+	readPlanSnapshot,
+} from "../src/revision-store.js";
 import {
 	callTool,
 	createRevisionHarness,
@@ -245,42 +258,126 @@ test("/plan finalize names the call that will be accepted in each state", async 
 	assert.match(revising, /refused while this revision is open/u);
 });
 
-test("/plan exit during a revision keeps the agreed plan and implements nothing", async (t) => {
-	const harness = createRevisionHarness({ reviews: [{ kind: "dismissed" }] });
+/**
+ * Exit over an agreed managed plan, in all three states a revision leaves behind
+ * and one turn later, through the typed command and through the menu item.
+ *
+ * This is the shape of the defect: the guard used to fire only while a transaction
+ * was *open*, and resolving one (accept or cancel) leaves Plan mode on with the
+ * plan attached — the same state an unmanaged draft occupies. So exit fell through
+ * to "Plan mode disabled. Proposed plan discarded." and deleted the document the
+ * user had agreed to, from a menu item labelled as discarding a proposal.
+ */
+const MANAGED_EXIT_CASES = [
+	{ name: "with an open revision", resolve: "open" },
+	{ name: "after accepting a revision", resolve: "accept" },
+	{ name: "after cancelling a revision", resolve: "cancel" },
+	{ name: "a turn after accepting, once awaitingAction has cleared", resolve: "accept-then-turn" },
+] as const;
+
+for (const scenario of MANAGED_EXIT_CASES) {
+	for (const route of ["command", "menu"] as const) {
+		test(`${route} exit ${scenario.name} keeps the agreed plan attached and paused`, async (t) => {
+			const reviews =
+				scenario.resolve === "accept" || scenario.resolve === "accept-then-turn"
+					? [{ kind: "accepted" as const }]
+					: scenario.resolve === "cancel"
+						? [{ kind: "cancelled" as const }]
+						: [{ kind: "dismissed" as const }];
+			const harness = createRevisionHarness({ reviews });
+			t.after(harness.cleanup);
+			await implementPlan(harness);
+			await beginRevision(harness, 1);
+			await proposeRevision(harness);
+			if (scenario.resolve === "accept-then-turn") {
+				// The turn boundary clears `awaitingAction`, which is where the state stops
+				// looking "ready" and started looking like a superseded draft.
+				await harness.systemPromptAddition();
+				assert.equal(stateOf(harness).awaitingAction, false);
+			}
+			const path = planPath(harness);
+			const planId = String(stateOf(harness).planId);
+			const expectedRevision = scenario.resolve === "open" || scenario.resolve === "cancel" ? 1 : 2;
+			const expectedPlan = expectedRevision === 1 ? `${FIRST_PLAN}\n` : `${REVISED_PLAN}\n`;
+
+			if (route === "command") {
+				await runPlanCommand(harness, "exit");
+			} else {
+				await runPlanCommand(harness, "");
+				const menu = harness.planMenuCalls.at(-1) as {
+					managedPlan?: boolean;
+					exit?: () => void;
+				};
+				assert.equal(menu.managedPlan, true, "the menu must know this is an agreed plan");
+				menu.exit?.();
+				// `exitReady` is fire-and-forget, so let the state write land.
+				for (let attempt = 0; attempt < 50 && stateOf(harness).revision !== undefined; attempt += 1) {
+					await new Promise((resolve) => setTimeout(resolve, 5));
+				}
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+
+			// The agreed document is still there, unchanged.
+			assert.equal(await readPlanFile(path), expectedPlan, scenario.name);
+			const message = harness.notifications.at(-1)?.message ?? "";
+			assert.ok(
+				!/Proposed plan discarded/u.test(message),
+				`${route}/${scenario.name}: an agreed plan must not be called a discarded draft`,
+			);
+			assert.match(message, /stays attached and paused/u);
+			assert.match(message, /nothing was discarded and nothing is being implemented/u);
+			// Every route the message offers exists from this state.
+			assert.match(message, /Run \/plan to implement it here, start a fresh implementation session, or export it/u);
+
+			// Attached and paused: Plan mode is on, the plan is tracked, no transaction is
+			// open, and nothing claims an implementation or a completion happened.
+			const state = stateOf(harness);
+			assert.equal(state.planPath, path);
+			assert.equal(state.planId, planId);
+			assert.equal(state.specRevision, expectedRevision);
+			assert.equal(state.enabled, true);
+			assert.equal(state.awaitingAction, true, "back at the managed ready decision");
+			assert.equal(state.revision, undefined);
+			assert.equal(state.archivePath, undefined, "nothing was marked implemented");
+			assert.equal(harness.statuses.get("plan-mode"), `◆ plan · agreed r${expectedRevision} → /plan`);
+
+			// History is retained, and any candidate is retired rather than left pending or
+			// deleted.
+			assert.equal((await readPlanManifest(planRevisionsRoot(), planId)).kind, "loaded");
+			assert.equal(await readPlanSnapshot(planRevisionsRoot(), planId, 1), `${FIRST_PLAN}\n`);
+			const proposals = await listPlanProposals(planRevisionsRoot(), planId);
+			assert.equal(proposals.length, 1);
+			assert.ok(proposals[0]?.proposedPlan.length, "the candidate content is kept");
+			assert.notEqual(proposals[0]?.status, "pending", "no candidate is left waiting");
+
+			// And the routes the message named are the ones the menu actually offers.
+			await runPlanCommand(harness, "");
+			const reopened = harness.planMenuCalls.at(-1) as {
+				hasReadyPlan?: boolean;
+				implementHere?: unknown;
+				implementFresh?: unknown;
+			};
+			assert.equal(reopened.hasReadyPlan, true);
+			assert.equal(typeof reopened.implementHere, "function");
+			assert.equal(typeof reopened.implementFresh, "function");
+		});
+	}
+}
+
+test("exit while implementing still clears the active plan", async (t) => {
+	// The long-standing explicit clear, untouched by the managed-planning rule: this
+	// state is implementing, not planning, and clearing is what exit has always meant
+	// there.
+	const harness = createRevisionHarness();
 	t.after(harness.cleanup);
 	await implementPlan(harness);
-	await beginRevision(harness, 1);
-	const proposed = await proposeRevision(harness);
-	assert.equal(proposed.payload.status, "pending_review");
 	const path = planPath(harness);
-	const planId = String(stateOf(harness).planId);
+	assert.equal(stateOf(harness).enabled, false);
 
 	await runPlanCommand(harness, "exit");
-
-	// The file the user agreed to is still there: exiting a revision of an approved
-	// plan is not discarding a proposal.
-	assert.equal(await readPlanFile(path), `${FIRST_PLAN}\n`);
-	assert.match(harness.notifications.at(-1)?.message ?? "", /kept at/u);
-	assert.ok(
-		!/Proposed plan discarded/u.test(harness.notifications.at(-1)?.message ?? ""),
-		"the approved baseline must not be described as a discarded draft",
-	);
-	// Execution is paused: nothing is tracked, nothing was archived, no approval.
-	const state = stateOf(harness);
-	assert.equal(state.planPath, undefined);
-	assert.equal(state.revision, undefined);
-	assert.equal(state.approvedDigest, undefined);
-	assert.equal(state.archivePath, undefined, "nothing was marked implemented");
-	assert.equal(harness.statuses.get("plan-mode"), undefined);
-	// History and the candidate are retained.
-	assert.equal((await readPlanManifest(planRevisionsRoot(), planId)).kind, "loaded");
-	assert.equal(await readPlanSnapshot(planRevisionsRoot(), planId, 1), `${FIRST_PLAN}\n`);
-	const { listPlanProposals } = await import("../src/revision-store.js");
-	const proposals = await listPlanProposals(planRevisionsRoot(), planId);
-	assert.equal(proposals.length, 1);
-	assert.equal(proposals[0]?.status, "superseded");
-	assert.match(String(proposals[0]?.resolutionReason), /exited Plan mode/u);
-	assert.ok(proposals[0]?.proposedPlan.length, "the candidate content is kept");
+	assert.equal(harness.notifications.at(-1)?.message, "Active implementation plan cleared.");
+	assert.equal(await readPlanFile(path), undefined);
+	assert.equal(stateOf(harness).planPath, undefined);
 });
 
 test("/plan exit on an ordinary proposed draft still deletes it", async (t) => {
@@ -462,4 +559,107 @@ test("a session with no plan at all is not policed", async (t) => {
 	await harness.emit("session_start", { reason: "resume" });
 	assert.equal(await toolCall(harness, "edit"), undefined);
 	assert.equal(await toolCall(harness, "write"), undefined);
+});
+
+// ------------------------------------------------------ approval recovery routes
+
+test("recovery guidance names only routes that exist in the mode it addresses", () => {
+	const stale = { kind: "stale", approvedDigest: "a".repeat(64), currentDigest: "b".repeat(64) } as const;
+	const interactive = String(approvalRecoveryInstruction(stale, { interactive: true }));
+	assert.match(interactive, /update_plan with action "begin"/u);
+	assert.match(interactive, /Confirm the plan file/u);
+
+	// No menu in print/JSON mode, and "confirm" is not a subcommand: typing it would
+	// turn Plan mode on over an implementing plan and forward the word to the model.
+	const headless = String(approvalRecoveryInstruction(stale, { interactive: false }));
+	assert.ok(!/Confirm the plan file/u.test(headless), headless);
+	assert.match(headless, /no interactive review/u);
+	assert.match(headless, /\/plan implement/u);
+	// The existing command, framed as the user's action and never the model's.
+	assert.match(headless, /they can re-approve/u);
+	assert.match(headless, /Do not treat either as done until they have acted/u);
+
+	// A file that cannot be read gets its own answer: begin refuses for it and
+	// Confirm has no bytes to record, so neither is offered.
+	for (const mode of [{ interactive: true }, { interactive: false }]) {
+		const missing = String(approvalRecoveryInstruction({ kind: "missing" }, mode));
+		assert.match(missing, /restore the plan file/u);
+		assert.match(missing, /\/plan exit/u);
+		assert.ok(!/action "begin"/u.test(missing), missing);
+		assert.ok(!/Confirm the plan file/u.test(missing), missing);
+	}
+
+	// Nothing to say about a plan whose approval is intact.
+	assert.equal(approvalRecoveryInstruction({ kind: "approved", digest: "a".repeat(64) }, { interactive: true }), undefined);
+	// Only the two states that record bytes can be confirmed.
+	assert.equal(canConfirmPlanFile({ kind: "missing" }), false);
+	assert.equal(canConfirmPlanFile({ kind: "unknown" }), true);
+	assert.equal(canConfirmPlanFile(stale), true);
+});
+
+test("a headless session is never pointed at the interactive menu", async (t) => {
+	const harness = createRevisionHarness({ mode: "print", hasUI: false });
+	t.after(harness.cleanup);
+	await implementPlan(harness);
+	await writePlanFile(planPath(harness), "# Changed after approval");
+
+	// The turn boundary, the mutation guard and the completion gate all speak to the
+	// same session, so all three have to name the same reachable route.
+	const prompt = (await harness.systemPromptAddition()) ?? "";
+	assert.match(prompt, /\/plan implement/u);
+	assert.ok(!/Confirm the plan file/u.test(prompt), prompt);
+	assert.match(prompt, /do not treat it as approved on your own/u);
+
+	const blocked = await toolCall(harness, "edit");
+	assert.equal(blocked?.block, true);
+	assert.match(String(blocked?.reason), /\/plan implement/u);
+	assert.ok(!/Confirm the plan file/u.test(String(blocked?.reason)));
+
+	await assert.rejects(
+		toolExecute(harness, "plan_implemented")("call", {}, undefined, undefined, harness.ctx),
+		(error: Error) =>
+			/\/plan implement/u.test(error.message) && !/Confirm the plan file/u.test(error.message),
+	);
+
+	// And that route works without a UI: it re-approves the bytes on disk and
+	// restarts implementation from them.
+	await runPlanCommand(harness, "implement");
+	assert.equal(stateOf(harness).approvedDigest, digestOf("# Changed after approval\n"));
+	assert.equal(await toolCall(harness, "edit"), undefined, "approved again, so allowed again");
+});
+
+test("a plan file that cannot be read is told to restore or clear, not to confirm", async (t) => {
+	const harness = createRevisionHarness();
+	t.after(harness.cleanup);
+	await implementPlan(harness);
+	const path = planPath(harness);
+	const planId = String(stateOf(harness).planId);
+	await rm(path);
+
+	// Both guarded surfaces refuse, and neither offers a route that needs the bytes.
+	const blocked = await toolCall(harness, "write");
+	assert.equal(blocked?.block, true);
+	assert.match(String(blocked?.reason), /could not be read/u);
+	assert.match(String(blocked?.reason), /restore the plan file/u);
+	assert.ok(!/Confirm the plan file/u.test(String(blocked?.reason)));
+
+	await assert.rejects(
+		toolExecute(harness, "plan_implemented")("call", {}, undefined, undefined, harness.ctx),
+		/restore the plan file/u,
+	);
+
+	// The menu withholds Confirm, because confirming has no bytes to record, and the
+	// status line names the routes that do work.
+	await runPlanCommand(harness, "");
+	const menu = harness.activeMenuCalls.at(-1) as {
+		canConfirm?: boolean;
+		statusText?: string;
+	};
+	assert.equal(menu.canConfirm, false);
+	assert.match(String(menu.statusText), /restore the plan file/u);
+	assert.match(String(menu.statusText), /\/plan exit/u);
+
+	// Nothing was deleted on this package's behalf: the history is still there.
+	assert.equal((await readPlanManifest(planRevisionsRoot(), planId)).kind, "loaded");
+	assert.equal(await readPlanSnapshot(planRevisionsRoot(), planId, 1), `${FIRST_PLAN}\n`);
 });

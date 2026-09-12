@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createMockContext } from "../../../test/support/mock-pi.js";
 import { showActiveImplementationMenu } from "../src/active-implementation-menu.js";
-import { showPlanModeMenu } from "../src/plan-action-menus.js";
+import { showPlanModeMenu, showReadyPlanMenu } from "../src/plan-action-menus.js";
 import {
 	planRevisionDiffScreen,
 	planRevisionProposedScreen,
@@ -153,6 +153,7 @@ test("/plan during a revision offers the revision's controls, not drafting's", a
 		showPlanModeMenu(ctx, {
 			...base,
 			hasReadyPlan: false,
+			managedPlan: true,
 			hasOpenRevision: true,
 			hasPendingRevision: true,
 		}),
@@ -168,6 +169,80 @@ test("/plan during a revision offers the revision's controls, not drafting's", a
 	// plan the revision exists to change.
 	assert.equal(options.includes("Request final plan"), false);
 	assert.equal(options.includes("Discard plan and exit"), false);
+});
+
+test("an agreed managed plan is never offered a discard, in either menu shape", async () => {
+	// The state an accepted or cancelled revision leaves behind, and the same state
+	// one turn later once `awaitingAction` has cleared. Both used to offer an item
+	// that deleted the agreed plan file and called it discarding a proposal.
+	const base = {
+		statusText: "The agreed plan at spec revision 3 is current and paused.",
+		planPathLine: "Plan file: /tmp/plan.md",
+		getExportDestination: () => ({ configuredPath: "PLAN.md", resolvedPath: "/tmp/PLAN.md" }),
+		signal: new AbortController().signal,
+		isCurrent: () => true,
+		show: () => undefined,
+		finalize: () => undefined,
+		implementHere: () => undefined,
+		implementFresh: () => undefined,
+		exportPlan: async () => false,
+		reviewRevision: () => undefined,
+		cancelRevision: () => undefined,
+		stay: () => undefined,
+		exit: () => undefined,
+		hasOpenRevision: false,
+		hasPendingRevision: false,
+	};
+	for (const hasReadyPlan of [true, false]) {
+		const managed = await offered((ctx) =>
+			showPlanModeMenu(ctx, { ...base, managedPlan: true, hasReadyPlan }),
+		);
+		assert.equal(
+			managed.options.includes("Discard plan and exit"),
+			false,
+			`ready=${hasReadyPlan}: an agreed plan must not be offered a discard`,
+		);
+		assert.ok(
+			managed.options.some((option) => option.startsWith("Leave the plan paused")),
+			managed.options.join(" | "),
+		);
+		assert.match(managed.frame, /Nothing is discarded and nothing is implemented/u);
+		if (hasReadyPlan) {
+			// The standing line must stop promising that the next completed plan
+			// supersedes this one: for a managed plan that call is refused.
+			assert.match(managed.frame, /becomes a revision you accept or cancel/u);
+			assert.ok(!/the next completed plan supersedes/u.test(managed.frame));
+		}
+	}
+
+	// An unmanaged first draft keeps the original, accurate wording.
+	const draft = await offered((ctx) =>
+		showPlanModeMenu(ctx, { ...base, managedPlan: false, hasReadyPlan: true }),
+	);
+	assert.ok(draft.options.includes("Discard plan and exit"));
+	assert.match(draft.frame, /the next completed plan supersedes this one/u);
+});
+
+test("the post-accept ready card names the agreed revision, not a proposal", async () => {
+	const base = {
+		getExportDestination: () => ({ configuredPath: "PLAN.md", resolvedPath: "/tmp/PLAN.md" }),
+		signal: new AbortController().signal,
+		isCurrent: () => true,
+		implementHere: () => undefined,
+		implementFresh: () => undefined,
+		exportPlan: async () => false,
+		stay: () => undefined,
+		exit: () => undefined,
+	};
+	const managed = await offered((ctx) =>
+		showReadyPlanMenu(ctx, { ...base, managedPlan: true, specRevision: 4 }),
+	);
+	assert.match(managed.frame, /spec revision 4 is current/u);
+	assert.equal(managed.options.includes("Discard plan and exit"), false);
+
+	const draft = await offered((ctx) => showReadyPlanMenu(ctx, base));
+	assert.match(draft.frame, /Proposed plan ready/u);
+	assert.ok(draft.options.includes("Discard plan and exit"));
 });
 
 test("an unverified implementing plan offers confirmation and withholds completion", async () => {
@@ -193,6 +268,7 @@ test("an unverified implementing plan offers confirmation and withholds completi
 		showActiveImplementationMenu(ctx, {
 			...base,
 			approvalNotice: "The plan file changed after it was approved.",
+			canConfirm: true,
 		}),
 	);
 	// The resolution is offered, and the two paths that would claim the plan was
@@ -209,5 +285,22 @@ test("an unverified implementing plan offers confirmation and withholds completi
 	assert.ok(
 		unverified.options.some((option) => option.startsWith("Clear active implementation")),
 		unverified.options.join(" | "),
+	);
+
+	// A plan file that cannot be read is unverified too, and Confirm cannot help:
+	// it records the bytes on disk, and there are none to record. Offering it would
+	// be an invitation to "the plan file could not be read".
+	const missing = await offered((ctx) =>
+		showActiveImplementationMenu(ctx, {
+			...base,
+			approvalNotice: "The plan file could not be read.",
+			canConfirm: false,
+		}),
+	);
+	assert.equal(missing.options.includes("Confirm the plan file"), false);
+	assert.match(missing.frame, /Mark as implemented/u);
+	assert.ok(
+		missing.options.some((option) => option.startsWith("Clear active implementation")),
+		missing.options.join(" | "),
 	);
 });

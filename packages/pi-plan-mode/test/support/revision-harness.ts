@@ -35,6 +35,17 @@ export interface RevisionHarnessOptions {
 		summary: PlanRevisionSummary,
 		index: number,
 	) => PlanRevisionOutcome | Promise<PlanRevisionOutcome>;
+	/**
+	 * Runs synchronously inside the controller's clock, which every mutation
+	 * consults before it starts writing.
+	 *
+	 * The one deterministic way to make something happen *between* a controller's
+	 * decision and its awaited writes. `propose` stamps its candidate, writes it to
+	 * disk, and only then records the id in session state — so interrupting at the
+	 * stamp is how the "candidate on disk, id never persisted" boundary is reached
+	 * without a timer that would only reproduce it sometimes.
+	 */
+	onTimestamp?: (index: number) => void;
 	activeTools?: string[];
 	branch?: unknown[];
 	/** Share another harness's agent dir, to model a second session on one plan. */
@@ -134,6 +145,7 @@ export function createRevisionHarness(options: RevisionHarnessOptions = {}): Rev
 		readSettings: async () => ({ kind: "missing" as const }),
 		now: () => {
 			clock += 1;
+			options.onTimestamp?.(clock - 1);
 			return new Date(Date.UTC(2026, 0, 1, 0, 0, clock)).toISOString();
 		},
 		newId: () => {

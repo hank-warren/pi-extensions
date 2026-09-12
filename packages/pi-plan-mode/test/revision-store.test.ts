@@ -12,7 +12,9 @@
  */
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -228,7 +230,10 @@ test("a revision identical to the plan on disk publishes nothing", async (t) => 
 	});
 	assert.equal(result.kind, "conflict");
 	if (result.kind !== "conflict") return;
-	assert.match(result.reason, /byte-identical/u);
+	// Not "byte-identical": the comparison normalizes line endings and the trailing
+	// newline away, so claiming byte-identity would claim a check nobody ran.
+	assert.match(result.reason, /already what the plan file holds/u);
+	assert.ok(!/byte-identical/u.test(result.reason));
 });
 
 test("publishing over bytes the manifest cannot explain keeps them", async (t) => {
@@ -785,4 +790,82 @@ test("a proposal whose stored plan is unparseable or empty is not a proposal", a
 			JSON.stringify(broken).slice(0, 60),
 		);
 	}
+});
+
+/**
+ * Replace `fs.promises.open` for the duration of `run`, whatever happens inside
+ * it. Patched through the CJS object and re-synced into the (frozen) ESM
+ * namespace, exactly as `finish-implementation.test.ts` does for `link`.
+ */
+async function withOpen<T>(replacement: typeof fs.promises.open, run: () => Promise<T>): Promise<T> {
+	const fsp = fs.promises as { open: typeof fs.promises.open };
+	const real = fs.promises.open;
+	fsp.open = replacement;
+	syncBuiltinESMExports();
+	try {
+		return await run();
+	} finally {
+		fsp.open = real;
+		syncBuiltinESMExports();
+	}
+}
+
+test("a preparation record that cannot be written publishes nothing", async (t) => {
+	// The record is the only thing that can later prove these bytes were this
+	// package's to publish, so it is written and fsynced *before* the live document
+	// is replaced. A failure at that point must therefore leave no publication at
+	// all — not a live document whose provenance nothing can account for.
+	const base = await initialized();
+	t.after(base.cleanup);
+	const real = fs.promises.open;
+	const refusing: typeof fs.promises.open = async (path, ...rest) => {
+		const name = String(path);
+		if (name.includes("pending-") && name.endsWith(".json")) {
+			throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+		}
+		return real(path, ...(rest as []));
+	};
+
+	const result = await withOpen(refusing, () =>
+		publishPlanRevision({
+			root: base.root,
+			planId: PLAN_ID,
+			planPath: base.planPath,
+			baseRevision: 1,
+			baseDigest: digestOf("# Plan v1\n"),
+			plan: "# Plan v2",
+			now: NOW,
+			changeSummary: "x",
+		}),
+	);
+
+	assert.equal(result.kind, "failed");
+	if (result.kind !== "failed") return;
+	assert.match(result.reason, /ENOSPC/u);
+	// Nothing was published and nothing is half-prepared: the live document still
+	// holds revision 1, no snapshot exists for 2, and the manifest has not moved.
+	assert.equal(await readPlanFile(base.planPath), "# Plan v1\n");
+	assert.equal(await readPlanSnapshot(base.root, PLAN_ID, 2), undefined);
+	const manifest = await readPlanManifest(base.root, PLAN_ID);
+	assert.equal(manifest.kind, "loaded");
+	if (manifest.kind !== "loaded") return;
+	assert.equal(manifest.manifest.specRevision, 1);
+	assert.equal(manifest.manifest.currentDigest, digestOf("# Plan v1\n"));
+	// And the half-written pair is cleaned up, so nothing can later be mistaken for
+	// evidence of a publication that never happened.
+	const names = await readdir(join(base.root, PLAN_ID, "revisions"));
+	assert.deepEqual(
+		names.filter((name) => name.startsWith("pending-2-")),
+		[],
+		names.join(", "),
+	);
+
+	// Recovery agrees: there is nothing to recover.
+	const recovery = await recoverPlanRevisions({
+		root: base.root,
+		planId: PLAN_ID,
+		planPath: base.planPath,
+		now: NOW,
+	});
+	assert.equal(recovery.kind, "ok");
 });

@@ -58,6 +58,9 @@ export function createPlanActionController(options: PlanActionControllerOptions)
 			await ui.showPlanModeMenu(ctx, {
 				statusText: options.statusText(),
 				hasReadyPlan: options.getState().awaitingAction,
+				// Managed identity, not approval: accepting a revision clears the approval
+				// while the plan stays very much agreed.
+				managedPlan: options.getState().planId !== undefined,
 				hasOpenRevision: options.getState().revision !== undefined,
 				hasPendingRevision: options.hasPendingRevision(),
 				planPathLine: options.planPathLine(),
@@ -84,6 +87,10 @@ export function createPlanActionController(options: PlanActionControllerOptions)
 				await ui.showReadyPlanMenu(ctx, {
 					...lifecycle,
 					planPathLine: options.planPathLine(),
+					managedPlan: options.getState().planId !== undefined,
+					...(options.getState().specRevision !== undefined
+						? { specRevision: options.getState().specRevision }
+						: {}),
 					getExportDestination: () => options.getExportDestination(ctx),
 					implementHere: () => options.implementHere(ctx),
 					implementFresh: (signal) => freshAction(ctx, lifecycle, signal),

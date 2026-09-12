@@ -69,9 +69,21 @@ export function approvalNotice(approval: PlanApproval): string | undefined {
 		return "The plan file changed after it was approved, so the approval no longer covers what is on disk.";
 	}
 	if (approval.kind === "missing") {
-		return "The plan file could not be read, so nothing can be verified against it.";
+		return "The plan file could not be read, so nothing can be verified against it and nothing may be implemented from it.";
 	}
 	return undefined;
+}
+
+/**
+ * Whether `/plan`'s "Confirm the plan file" can do anything for this state.
+ *
+ * Confirming records the bytes on disk as approved, so it needs bytes. For a file
+ * that cannot be read, `confirmCurrentPlan` fails with "could not be read" — so
+ * offering the item is an invitation to an error, and the menu keys on this
+ * instead of on "is there a notice at all".
+ */
+export function canConfirmPlanFile(approval: PlanApproval): boolean {
+	return approval.kind === "unknown" || approval.kind === "stale";
 }
 
 /**
@@ -100,14 +112,61 @@ export function managedCompletionRefusal(state: PlanModeState): string | undefin
 	return undefined;
 }
 
-/** How to get back to a known-approved plan, in the words both surfaces use. */
-export const APPROVAL_RECOVERY_INSTRUCTION =
-	'resolve it first: call update_plan with action "begin" to revise the plan with the user, or ask them to run /plan and choose "Confirm the plan file" to record the current file as approved.';
+/**
+ * Whether the session the guidance is for can render the `/plan` menu.
+ *
+ * It changes which routes exist, not how strict the rule is. Print and JSON
+ * modes refuse the interactive `/plan` menu outright, so naming "run /plan and
+ * choose …" there sends a user at a throw — and because the command handler
+ * treats an unrecognised argument as a planning prompt, typing the name of the
+ * menu item turns Plan mode *on* over an implementing plan and forwards the word
+ * to the model. Only routes that work in the mode being addressed are offered.
+ */
+export interface ApprovalGuidanceMode {
+	interactive: boolean;
+}
 
-export function completionRefusal(approval: PlanApproval): string | undefined {
+/**
+ * How to get back to a known-approved plan, naming only routes that exist.
+ *
+ * Three rules hold across every variant:
+ *
+ *   1. Every named route is an **existing** one. No `/plan confirm`, no
+ *      `/plan review`, no model-callable approval: the only things offered are
+ *      `update_plan(begin)`, the `/plan` menu's own items, and `/plan implement`,
+ *      all of which are already here.
+ *   2. Re-approval is always something a **person** does. The model is told what
+ *      to tell the user, never how to manufacture an approval of its own.
+ *   3. A plan whose bytes cannot be read is a different problem and gets a
+ *      different answer. `begin` refuses (`plan_missing`) and Confirm fails for
+ *      it, so offering either would be advice that cannot work.
+ */
+export function approvalRecoveryInstruction(
+	approval: PlanApproval,
+	mode: ApprovalGuidanceMode,
+): string | undefined {
+	if (approval.kind === "missing") {
+		return "restore the plan file at that path, or clear the active plan with /plan exit. Revising and confirming both need the file's bytes, so neither can run until it is readable.";
+	}
+	if (approval.kind !== "unknown" && approval.kind !== "stale") return undefined;
+	if (mode.interactive) {
+		return 'resolve it first: call update_plan with action "begin" to revise the plan with the user, or ask them to run /plan and choose "Confirm the plan file" to record the current file as approved.';
+	}
+	// No menu in this mode. `/plan implement` is the one existing command that
+	// re-approves the bytes on disk, and it is the user's to type: it records the
+	// approval and re-sends the implementation handoff.
+	return 'resolve it first: call update_plan with action "begin" to revise the plan with the user, or tell them this session has no interactive review, so they can re-approve the file exactly as it is by running /plan implement — which records the approval and restarts implementation from it. Do not treat either as done until they have acted.';
+}
+
+export function completionRefusal(
+	approval: PlanApproval,
+	mode: ApprovalGuidanceMode = { interactive: true },
+): string | undefined {
 	if (approval.kind === "revising") return REVISION_IN_PROGRESS_REFUSAL;
 	const notice = approvalNotice(approval);
-	return notice ? `${notice} Do not mark it implemented — ${APPROVAL_RECOVERY_INSTRUCTION}` : undefined;
+	if (!notice) return undefined;
+	const instruction = approvalRecoveryInstruction(approval, mode);
+	return instruction ? `${notice} Do not mark it implemented — ${instruction}` : notice;
 }
 
 /**
@@ -136,8 +195,15 @@ export const REVISION_IN_PROGRESS_REFUSAL =
  * every mutating tool outright and says why; routing those through this function
  * would give one situation two wordings.
  */
-export function mutationRefusal(toolName: string, approval: PlanApproval): string | undefined {
+export function mutationRefusal(
+	toolName: string,
+	approval: PlanApproval,
+	mode: ApprovalGuidanceMode = { interactive: true },
+): string | undefined {
 	const notice = approvalNotice(approval);
 	if (!notice) return undefined;
-	return `Plan mode blocks '${toolName}' because the plan being implemented is not the plan that was approved. ${notice} Stop implementing and ${APPROVAL_RECOVERY_INSTRUCTION}`;
+	const instruction = approvalRecoveryInstruction(approval, mode);
+	return `Plan mode blocks '${toolName}' because the plan being implemented is not the plan that was approved. ${notice}${
+		instruction ? ` Stop implementing and ${instruction}` : ""
+	}`;
 }

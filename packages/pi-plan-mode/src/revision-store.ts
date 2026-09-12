@@ -751,7 +751,7 @@ export async function publishPlanRevision(input: PublishInput): Promise<PublishR
 				if (liveDigest === digest) {
 					return {
 						kind: "conflict",
-						reason: "the proposed plan is byte-identical to the plan on disk; nothing was published",
+						reason: "the proposed plan is already what the plan file holds; nothing was published",
 					};
 				}
 				// Bytes the manifest cannot account for are preserved before being
@@ -858,25 +858,45 @@ async function prepareRevision(
 		baseDigest,
 		createdAt: now,
 	};
+	const recordPath = join(directory, `pending-${revision}-${token}.json`);
 	const candidatePath = join(directory, `pending-${revision}-${token}.md`);
 	try {
 		await mkdir(directory, { recursive: true });
-		await writeFile(join(directory, `pending-${revision}-${token}.json`), `${JSON.stringify(record)}\n`, {
-			encoding: "utf8",
-			flag: "wx",
-			mode: 0o600,
-		});
-		const handle = await open(candidatePath, "wx", 0o600);
-		try {
-			await handle.writeFile(contents, { encoding: "utf8" });
-			await handle.sync();
-		} finally {
-			await handle.close().catch(() => undefined);
-		}
+		// The record is fsynced, not merely written. It is the only thing that can
+		// later prove these bytes were this package's to publish, so a record the
+		// kernel had not flushed would leave an accepted revision looking like an
+		// outside edit after a power loss — a conflict for something the user agreed
+		// to. Same exclusive-create / write / sync discipline as the candidate below.
+		await writeSynced(recordPath, `${JSON.stringify(record)}\n`);
+		await writeSynced(candidatePath, contents);
 	} catch (error: unknown) {
+		// Nothing has been published: the live document is untouched and the caller
+		// reports a plain failure. The reservation is cleaned up so a half-written
+		// pair cannot later be mistaken for evidence; the number stays consumed only
+		// when the record is durable.
+		await rm(candidatePath, { force: true }).catch(() => undefined);
+		await rm(recordPath, { force: true }).catch(() => undefined);
 		return { kind: "failed", reason: describe(error) };
 	}
 	return { kind: "ok", candidatePath };
+}
+
+/**
+ * Exclusive create, write, fsync, close.
+ *
+ * The directory entry itself is still not fsynced, so a power loss can lose the
+ * *name* even though the bytes behind it were flushed. That limitation is
+ * unchanged and deliberate here: what this buys is that a name which survives
+ * never points at bytes that did not.
+ */
+async function writeSynced(path: string, contents: string): Promise<void> {
+	const handle = await open(path, "wx", 0o600);
+	try {
+		await handle.writeFile(contents, { encoding: "utf8" });
+		await handle.sync();
+	} finally {
+		await handle.close().catch(() => undefined);
+	}
 }
 
 /**

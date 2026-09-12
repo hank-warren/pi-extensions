@@ -93,6 +93,12 @@ interface PlanModeView {
 export interface PlanModeViewDetail {
 	/** Set while implementing a plan whose approval is unknown or stale. */
 	approvalNotice?: string;
+	/**
+	 * How a person gets back to a known-approved plan, from
+	 * `approvalRecoveryInstruction`. Only routes that exist in this session's mode
+	 * are in it, which is why it is passed in rather than written here.
+	 */
+	recoveryInstruction?: string;
 }
 
 export function planModeView(
@@ -113,6 +119,25 @@ export function planModeView(
 				hint: proposed
 					? "/plan to accept it, ask for changes, or cancel the revision."
 					: "The approved plan is unchanged until a revision is accepted.",
+				tone: "accent",
+			};
+		}
+		// An agreed plan and a first draft occupy the same two states once a revision
+		// resolves, and they mean opposite things: the draft is superseded by the next
+		// plan_mode_complete, the agreed plan is current and that call is refused. The
+		// discriminator is managed identity, because accepting a revision clears the
+		// approval but never the identity.
+		const managed = state.planId !== undefined && state.planPath !== undefined;
+		if (managed) {
+			const revision = state.specRevision ?? 0;
+			const approved = state.approvedDigest !== undefined;
+			return {
+				phase: state.awaitingAction ? "ready" : "revising",
+				footer: `◆ plan · agreed r${revision} → /plan`,
+				headline: `◆ plan · agreed plan, spec revision ${revision}`,
+				hint: approved
+					? "/plan to resume implementing, export, or leave it paused — or ask for a change."
+					: "Not yet approved for implementation. /plan to implement or export it — or ask for a change.",
 				tone: "accent",
 			};
 		}
@@ -244,9 +269,11 @@ export async function showStoredPlan(
 	const title = state.revision
 		? `Current Plan (revision in progress against revision ${state.revision.baseRevision})`
 		: state.enabled
-			? state.awaitingAction
-				? "Proposed Plan"
-				: "Superseded Proposed Plan (revision in progress — awaiting a new plan_mode_complete)"
+			? state.planId !== undefined
+				? `Agreed Plan (spec revision ${state.specRevision ?? 0})`
+				: state.awaitingAction
+					? "Proposed Plan"
+					: "Superseded Proposed Plan (revision in progress — awaiting a new plan_mode_complete)"
 			: "Active Implementation Plan";
 	showPlanModePlan(pi, ctx, title, plan);
 }
@@ -273,6 +300,12 @@ export function planModeStatusText(state: PlanModeState, detail: PlanModeViewDet
 				? `A revision of the approved plan is proposed and waiting for your decision (base revision ${state.revision.baseRevision}).`
 				: `A revision of the approved plan is in progress (base revision ${state.revision.baseRevision}). The approved plan is unchanged until a revision is accepted.`;
 		}
+		if (state.planId !== undefined && state.planPath !== undefined) {
+			const revision = state.specRevision ?? 0;
+			return state.approvedDigest !== undefined
+				? `The agreed plan at spec revision ${revision} is current and paused; it is approved for implementation. Ask for a change and it becomes a reviewed revision.`
+				: `The agreed plan at spec revision ${revision} is current and not yet approved for implementation. Choose how to implement it, or ask for a change and it becomes a reviewed revision.`;
+		}
 		if (state.awaitingAction) return "Plan mode is active and a proposed plan is ready.";
 		if (state.planPath) {
 			return "Plan mode is active; revision in progress. The stored plan is superseded until the next plan_mode_complete.";
@@ -280,9 +313,10 @@ export function planModeStatusText(state: PlanModeState, detail: PlanModeViewDet
 		return "Plan mode is active. Explore, ask, and finish with plan_mode_complete when decision-ready.";
 	}
 	if (state.planPath) {
-		return detail.approvalNotice
-			? `An implementation plan is active, but its approval cannot be verified. ${detail.approvalNotice}`
-			: "An implementation plan is active.";
+		if (!detail.approvalNotice) return "An implementation plan is active.";
+		return detail.recoveryInstruction
+			? `An implementation plan is active, but its approval cannot be verified. ${detail.approvalNotice} To ${detail.recoveryInstruction}`
+			: `An implementation plan is active, but its approval cannot be verified. ${detail.approvalNotice}`;
 	}
 	return "Plan mode is off.";
 }

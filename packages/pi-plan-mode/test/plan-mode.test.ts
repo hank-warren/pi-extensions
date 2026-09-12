@@ -800,7 +800,9 @@ test("a Plan mode message the session refuses rolls the state back", async () =>
 
 		await mock.commands.get("plan")?.handler("implement", context.ctx);
 
-		assert.equal(context.statuses.get("plan-mode"), "◆ plan · ready → /plan");
+		// Approving for implementation gave the plan an identity before the handoff was
+		// refused, so the rolled-back ready state is the managed one.
+		assert.equal(context.statuses.get("plan-mode"), "◆ plan · agreed r1 → /plan");
 		assert.equal((mock.entries.at(-1)?.data as { enabled?: unknown }).enabled, true);
 	});
 });

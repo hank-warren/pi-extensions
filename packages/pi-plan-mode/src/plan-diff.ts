@@ -24,7 +24,14 @@ export interface PlanDiff {
 	removed: number;
 	/** The output was capped, so `lines` is a prefix of the real change. */
 	truncated: boolean;
-	/** Both documents are byte-identical once trailing whitespace is normalized. */
+	/**
+	 * No textual change: the two documents have the same lines.
+	 *
+	 * Line endings and trailing newlines are normalized away before the comparison
+	 * (`splitLines`), so this is emphatically *not* byte-identity — a candidate that
+	 * differs only in CRLF or a final newline lands here. Callers must say "no
+	 * textual change", never "byte-identical", or they claim a check nobody ran.
+	 */
 	identical: boolean;
 }
 
