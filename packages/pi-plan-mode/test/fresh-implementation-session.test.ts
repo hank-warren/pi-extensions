@@ -13,7 +13,13 @@ import {
 import { planFilePathForSession } from "../src/plan-file.js";
 import { showReadyPlanMenu } from "../src/plan-action-menus.js";
 import planMode from "../src/plan-mode.js";
-import { digestOf } from "../src/revision-store.js";
+import {
+	digestOf,
+	planRevisionsRoot,
+	readPlanManifest,
+	readPlanSnapshot,
+	recoverPlanRevisions,
+} from "../src/revision-store.js";
 
 const PLAN = `# Fresh implementation plan
 
@@ -146,14 +152,22 @@ test("fresh selection fails closed when automatic readiness has no command conte
 			awaitingAction: true,
 			planPath: planFilePathForSession("test-session"),
 		};
+		let approvals = 0;
 		const result = await startFreshImplementationFromState(context.ctx, {
 			getState: () => state,
 			menuIsCurrent: () => true,
 			stateEntryType: STATE_ENTRY_TYPE,
+			recordApproval: async () => {
+				approvals += 1;
+				return { ok: true as const, digest: "0".repeat(64) };
+			},
 		});
 
 		assert.equal(result.kind, "rejected");
 		assert.match(context.notifications.at(-1)?.message ?? "", /reopen \/plan/i);
+		// Nothing was approved: the context cannot start a session, so the refusal
+		// happens before any approval is recorded.
+		assert.equal(approvals, 0);
 	});
 });
 
@@ -211,15 +225,17 @@ test("fresh implementation links the destination to the same plan file", async (
 		const planPath = planFilePathForSession("test-session");
 		assert.equal(newSessionCalls, 1);
 		assert.equal(parentSession, "/sessions/planning.jsonl");
-		// One new source entry: the plan gains a managed identity so the destination
-		// can name it. The source's own mode is untouched.
-		assert.equal(mock.entries.length, sourceEntriesBefore + 1);
+		// The source records the approval the user just gave: an identity for the plan
+		// and the digest of the bytes being handed over. Its own mode is untouched — the
+		// parent stays a ready plan, not an implementing one.
+		assert.ok(mock.entries.length > sourceEntriesBefore, "the approval is recorded");
 		const sourceState = mock.entries.at(-1)?.data as Record<string, unknown>;
 		assert.equal(sourceState.enabled, true);
 		assert.equal(sourceState.awaitingAction, true);
 		assert.equal(sourceState.planPath, planPath);
 		assert.equal(typeof sourceState.planId, "string");
 		assert.equal(sourceState.specRevision, 1);
+		assert.equal(sourceState.approvedDigest, digestOf(`${PLAN}\n`));
 		assert.equal(mock.sentUserMessages.length, 0);
 		assert.equal(destinationEntries.length, 1);
 		const destinationState = destinationEntries[0]?.data as {
@@ -241,6 +257,119 @@ test("fresh implementation links the destination to the same plan file", async (
 		assert.equal(replacementMessages.length, 1);
 		assert.ok(replacementMessages[0]?.includes(planPath));
 		assert.ok(!replacementMessages[0]?.includes("Exclude the planning conversation"));
+	});
+});
+
+test("a hand-edited plan approved through the fresh choice is recorded before handoff", async () => {
+	// The gap this closes: the destination was handed `approvedDigest` for the bytes
+	// on disk while only the *identity* had been recorded, so a plan edited after
+	// plan_mode_complete arrived at a child that called it approved and whose own
+	// manifest immediately reported it as changed outside Plan mode. Approval and
+	// history have to name one set of bytes.
+	await withAgentDir(async () => {
+		const mock = createMockPi({ activeTools: ["read", "edit"] });
+		planMode(mock.pi, MISSING_SETTINGS);
+		const destinationEntries: Array<{ customType: string; data: unknown }> = [];
+		const context = createMockContext({
+			mode: "rpc",
+			hasUI: true,
+			model: { provider: "test-provider", id: "test-model" },
+			modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true as const }) },
+			sessionManager: {
+				getSessionId: () => "test-session",
+				getSessionFile: () => "/sessions/planning.jsonl",
+				getBranch: () => [],
+				getEntries: () => [],
+			},
+			select: async (_title: string, options: string[]) =>
+				options.includes("Start fresh and implement") ? "Start fresh and implement" : undefined,
+			newSession: async (options: {
+				setup?: (sessionManager: {
+					appendCustomEntry(customType: string, data: unknown): string;
+				}) => Promise<void>;
+				withSession?: (ctx: { sendUserMessage(message: string): Promise<void> }) => Promise<void>;
+			}) => {
+				await options.setup?.({
+					appendCustomEntry(customType, data) {
+						destinationEntries.push({ customType, data });
+						return "destination-state";
+					},
+				});
+				await options.withSession?.({ async sendUserMessage() {} });
+				return { cancelled: false };
+			},
+		});
+
+		await mock.events.get("session_start")?.[0]?.({}, context.ctx);
+		await mock.commands.get("plan")?.handler("start", context.ctx);
+		await completePlan(mock, context.ctx);
+		// The user fixes a typo in the plan file before choosing how to implement it.
+		const planPath = planFilePathForSession("test-session");
+		const edited = `${PLAN}\n\n4. Also update the runbook.\n`;
+		await writeFile(planPath, edited, "utf8");
+		await mock.commands.get("plan")?.handler("", context.ctx);
+
+		const destinationState = destinationEntries[0]?.data as {
+			planId?: string;
+			specRevision?: number;
+			approvedDigest?: string;
+		};
+		assert.equal(destinationState.approvedDigest, digestOf(edited));
+		assert.equal(typeof destinationState.planId, "string");
+		// The bytes the child is approved for are the bytes its manifest records, so the
+		// child reconciles cleanly instead of reporting a conflict about its own plan.
+		const manifest = await readPlanManifest(planRevisionsRoot(), String(destinationState.planId));
+		assert.equal(manifest.kind, "loaded");
+		if (manifest.kind !== "loaded") return;
+		assert.equal(manifest.manifest.currentDigest, digestOf(edited));
+		assert.equal(manifest.manifest.specRevision, destinationState.specRevision);
+		assert.equal(
+			await readPlanSnapshot(planRevisionsRoot(), manifest.manifest.planId, manifest.manifest.specRevision),
+			edited,
+		);
+		const recovery = await recoverPlanRevisions({
+			root: planRevisionsRoot(),
+			planId: manifest.manifest.planId,
+			planPath,
+			now: "2026-01-01T00:00:00.000Z",
+		});
+		assert.equal(recovery.kind, "ok", "the destination's own reconcile must not conflict");
+	});
+});
+
+test("a cancelled fresh flow leaves the parent ready, never implementing", async () => {
+	// Recording the approval before the handoff must not turn a cancelled choice
+	// into an ongoing implementation: the parent stays a ready plan.
+	await withAgentDir(async () => {
+		const mock = createMockPi({ activeTools: ["read", "edit"] });
+		planMode(mock.pi, MISSING_SETTINGS);
+		const context = createMockContext({
+			mode: "rpc",
+			hasUI: true,
+			model: { provider: "test-provider", id: "test-model" },
+			modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true as const }) },
+			sessionManager: {
+				getSessionId: () => "test-session",
+				getSessionFile: () => "/sessions/planning.jsonl",
+				getBranch: () => [],
+				getEntries: () => [],
+			},
+			select: async (_title: string, options: string[]) =>
+				options.includes("Start fresh and implement") ? "Start fresh and implement" : undefined,
+			newSession: async () => ({ cancelled: true }),
+		});
+
+		await mock.events.get("session_start")?.[0]?.({}, context.ctx);
+		await mock.commands.get("plan")?.handler("start", context.ctx);
+		await completePlan(mock, context.ctx);
+		await mock.commands.get("plan")?.handler("", context.ctx);
+
+		assert.match(context.notifications.at(-1)?.message ?? "", /cancelled/i);
+		const parent = mock.entries.at(-1)?.data as Record<string, unknown>;
+		assert.equal(parent.enabled, true, "the parent is still planning, not implementing");
+		assert.equal(parent.awaitingAction, true);
+		assert.equal(context.statuses.get("plan-mode"), "◆ plan · ready → /plan");
+		assert.equal(mock.sentUserMessages.length, 0, "no implementation handoff was sent");
 	});
 });
 

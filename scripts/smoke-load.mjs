@@ -64,12 +64,15 @@ const EXPECTED_SURFACES = {
 		// level, so it has no manual override to detect.
 		// input: stages plan tools before Pi snapshots the base system prompt,
 		// so a staged tool ships with its guideline on the same turn.
+		// session_tree: the approval digest lives in the branch's entries, so moving
+		// to another branch has to re-read which plan that branch approved.
 		handlers: [
 			"agent_settled",
 			"before_agent_start",
 			"input",
 			"session_shutdown",
 			"session_start",
+			"session_tree",
 			"tool_call",
 		],
 	},

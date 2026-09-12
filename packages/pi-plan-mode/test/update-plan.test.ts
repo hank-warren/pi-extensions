@@ -14,7 +14,7 @@
  */
 
 import assert from "node:assert/strict";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import test from "node:test";
 import { readPlanFile, writePlanFile } from "../src/plan-file.js";
 import {
@@ -633,10 +633,20 @@ test("an open revision blocks both finishing and resuming implementation", async
 	const implemented = harness.tools.get("plan_implemented")?.execute as (
 		...args: unknown[]
 	) => Promise<unknown>;
+	// The refusal has to name the revision. "No plan is being implemented" would be
+	// false about a plan the model is holding the revision id for, and it is the
+	// message both completion paths used to give, because an open revision turns
+	// Plan mode back on and both returned early on that.
 	await assert.rejects(
 		implemented("call", {}, undefined, undefined, harness.ctx),
-		/only available while an approved plan is being implemented/u,
+		/A plan revision is in progress.*update_plan action "propose"/su,
 	);
+	await runPlanCommand(harness, "done");
+	assert.match(
+		harness.notifications.at(-1)?.message ?? "",
+		/A plan revision is in progress/u,
+	);
+	assert.notEqual(stateOf(harness).planPath, undefined, "nothing was archived");
 
 	// `/plan implement` is the only door that reaches implementation during a
 	// revision, and taking it would approve bytes the user is still changing.
@@ -645,6 +655,59 @@ test("an open revision blocks both finishing and resuming implementation", async
 	const state = stateOf(harness);
 	assert.equal(state.revision?.revisionId, started.payload.revisionId);
 	assert.equal(state.enabled, true);
+});
+
+test("a restored transaction whose history is gone is invalidated, not left looping", async (t) => {
+	// The history directory can disappear under a restored transaction: a cleaned
+	// `~/.pi/agent/plans/.revisions`, a synced machine, manual testing. Left in
+	// place, `begin` answered "a revision is already open, propose against it" while
+	// `propose` answered "no revision is open, call begin first" — a loop the agent
+	// could not break out of, with `/plan` → Review contradicting the menu too.
+	const harness = createRevisionHarness({ reviews: [{ kind: "dismissed" }, { kind: "accepted" }] });
+	t.after(harness.cleanup);
+	await implementPlan(harness);
+	await begin(harness, { expectedRevision: 1 });
+	const proposed = await propose(harness);
+	assert.equal(proposed.payload.status, "pending_review");
+	const planId = String(stateOf(harness).planId);
+	const proposalsBefore = await listPlanProposals(planRevisionsRoot(), planId);
+	assert.equal(proposalsBefore.length, 1);
+
+	// Only the manifest goes; the candidates and snapshots stay where they are.
+	await rm(`${planRevisionsRoot()}/${planId}/manifest.json`);
+	await harness.emit("session_start", { reason: "resume" });
+
+	const restored = stateOf(harness);
+	assert.equal(restored.revision, undefined, "an unusable transaction is not kept open");
+	assert.equal(restored.planId, undefined);
+	assert.match(
+		harness.notifications.map((entry) => entry.message).join(" | "),
+		/no longer on disk.*cannot be completed/su,
+	);
+	// Nothing was deleted on this package's behalf.
+	assert.deepEqual(
+		(await listPlanProposals(planRevisionsRoot(), planId)).map((entry) => entry.proposalId),
+		proposalsBefore.map((entry) => entry.proposalId),
+	);
+	assert.equal(await readPlanSnapshot(planRevisionsRoot(), planId, 1), `${FIRST_PLAN}\n`);
+
+	// `/plan` agrees there is nothing to review, and the pair of tools agrees too:
+	// begin establishes a fresh identity and propose works against it.
+	await runPlanCommand(harness, "");
+	const menu = harness.activeMenuCalls.at(-1) ?? harness.planMenuCalls.at(-1);
+	assert.ok(menu, "a menu opened");
+	assert.notEqual(
+		(menu as { hasPendingRevision?: boolean }).hasPendingRevision,
+		true,
+		"no review may be offered for a transaction that cannot be completed",
+	);
+
+	const reopened = await begin(harness, { expectedRevision: 0 });
+	assert.equal(reopened.payload.status, "revision_started");
+	assert.notEqual(reopened.payload.planId, planId, "a fresh history is started");
+	const accepted = await propose(harness);
+	assert.equal(accepted.payload.status, "accepted", JSON.stringify(accepted.payload));
+	assert.equal(await readPlanFile(planPath(harness)), `${REVISED_PLAN}\n`);
 });
 
 test("a restart restores the open revision and finds its waiting candidate", async (t) => {

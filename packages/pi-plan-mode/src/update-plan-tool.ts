@@ -80,6 +80,7 @@ export const UPDATE_PLAN_SNIPPET = "Revise the existing implementation plan";
 
 export const UPDATE_PLAN_GUIDELINES = [
 	`When the user asks to change, extend, reduce, or re-sequence a plan that already exists, call ${UPDATE_PLAN_TOOL_NAME} with action "begin" and then action "propose". It is the plan-editing interface: never tell the user to edit the plan file themselves, never use edit or write on it, and never answer with a command for them to type.`,
+	`plan_mode_complete is for a first draft only. Once a plan exists it refuses, because it carries no base revision and no digest for the change to be reviewed against — so a change to an existing plan goes through ${UPDATE_PLAN_TOOL_NAME} even when you are already in Plan mode.`,
 	`In ${UPDATE_PLAN_TOOL_NAME}, pass expectedRevision exactly as the active-plan context line or the previous result reported it, and pass action "propose" the complete rewritten plan rather than a description of the change.`,
 	`${UPDATE_PLAN_TOOL_NAME} action "begin" is an opening move: call it early, then keep exploring in the same turn. Action "propose" is the closing one: call it alone as the final action of its turn, like plan_mode_complete.`,
 ];

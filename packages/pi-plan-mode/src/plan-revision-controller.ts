@@ -255,8 +255,14 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 		// added to their request, or the model called begin twice. Returning the
 		// existing one is what stops a second call throwing away the first
 		// candidate, which is the work the user is waiting on.
+		//
+		// Unless it has no identity to propose against. That happens when the history
+		// directory went missing under a restored transaction: `propose` would refuse
+		// for want of a `planId`, so answering "already open, propose against it" here
+		// is the half of a loop this function controls. Such a transaction is
+		// superseded instead, and a usable one is opened below.
 		const open = state.revision;
-		if (open && open.baseDigest === reading.digest) {
+		if (open && state.planId !== undefined && open.baseDigest === reading.digest) {
 			const merged = mergeInstructions(open.instructions, input.instructions);
 			if (merged !== open.instructions) {
 				options.setState(ctx, { revision: { ...open, instructions: merged } });
@@ -556,6 +562,22 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 			resolutionReason: reason,
 		});
 		if (pendingProposal?.proposalId === proposal.proposalId) pendingProposal = undefined;
+	}
+
+/**
+	 * Retire the open transaction's candidate without touching plan state.
+	 *
+	 * For a caller that is taking the session somewhere else entirely — `/plan exit`
+	 * during a revision — and needs the candidate resolved rather than left pending
+	 * forever against a transaction nobody can reach. The record stays on disk; only
+	 * its status changes, through the same primitive Cancel uses.
+	 */
+	async function retireOpenRevision(reason: string): Promise<void> {
+		const state = options.getState();
+		const open = state.revision;
+		if (!open) return;
+		await supersedeOpenProposal(state.planId, open, undefined, reason);
+		pendingProposal = undefined;
 	}
 
 	/**
@@ -904,9 +926,24 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 		});
 		if (!scope.isCurrent()) return;
 		if (result.kind === "unmanaged") {
-			options.setState(ctx, { planId: undefined, specRevision: undefined, currentDigest: undefined });
+			// The identity and any open transaction go together. A transaction whose
+			// history directory is gone cannot be proposed against — `propose` needs the
+			// identity it no longer has — while `begin` would still recognise it as open
+			// and hand the agent straight back to `propose`. Invalidating it here is what
+			// leaves one coherent answer: start a fresh revision. Nothing on disk is
+			// removed; the candidate files stay exactly where they are.
+			const strandedRevision = state.revision !== undefined;
+			options.setState(ctx, {
+				planId: undefined,
+				specRevision: undefined,
+				currentDigest: undefined,
+				revision: undefined,
+			});
+			pendingProposal = undefined;
 			ctx.ui.notify(
-				"This plan's recorded revision history is no longer on disk. The plan file is untouched; the next revision starts a fresh history for it.",
+				strandedRevision
+					? "This plan's recorded revision history is no longer on disk, so the revision that was in progress cannot be completed. The plan file and every saved candidate are untouched; ask for the change again and a fresh history is started for it."
+					: "This plan's recorded revision history is no longer on disk. The plan file is untouched; the next revision starts a fresh history for it.",
 				"warning",
 			);
 			return;
@@ -938,8 +975,11 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 		}
 		const pending = await listPendingPlanProposals(root(), state.planId);
 		if (!scope.isCurrent()) return;
-		pendingProposal = state.revision
-			? pending.find((candidate) => candidate.revisionId === state.revision?.revisionId)
+		// Re-read rather than closing over the restored copy: the branches above may
+		// have invalidated the transaction this would otherwise re-arm a card for.
+		const open = options.getState().revision;
+		pendingProposal = open
+			? pending.find((candidate) => candidate.revisionId === open.revisionId)
 			: undefined;
 		if (pendingProposal) {
 			ctx.ui.notify(
@@ -1068,6 +1108,7 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 		reconcileOnSessionStart,
 		reviewPendingRevision,
 		cancelRevision,
+		retireOpenRevision,
 		confirmCurrentPlan,
 		/** Dropped when a session starts or the plan is cleared. */
 		reset() {

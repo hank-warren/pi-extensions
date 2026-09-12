@@ -62,6 +62,16 @@ export interface RevisionHarness {
 	planMenuCalls: Array<Record<string, unknown>>;
 	/** How many times anything asked the session to wait for idle. Must stay 0. */
 	waitForIdleCalls: number;
+	/**
+	 * Make `getBranch()` report a different set of entries, as Pi's tree navigation
+	 * does when the user selects another leaf.
+	 *
+	 * The only way to model a branch switch: Plan mode restores its state — including
+	 * the approval digest — from whatever branch is selected, and there is no other
+	 * seam that changes which branch that is. Pass `undefined` to go back to the
+	 * growing branch this session is writing.
+	 */
+	viewBranch(entries: readonly unknown[] | undefined): void;
 	state(): Record<string, unknown> | undefined;
 	emit(event: string, payload?: Record<string, unknown>): Promise<unknown[]>;
 	systemPromptAddition(): Promise<string | undefined>;
@@ -91,6 +101,8 @@ export function createRevisionHarness(options: RevisionHarnessOptions = {}): Rev
 	};
 
 	let waitForIdleCalls = 0;
+	let branchView: readonly unknown[] | undefined;
+	const visible = () => [...(branchView ?? branch)];
 	const context = createMockContext({
 		mode: options.mode ?? "tui",
 		hasUI: options.hasUI ?? (options.mode ?? "tui") === "tui",
@@ -102,8 +114,8 @@ export function createRevisionHarness(options: RevisionHarnessOptions = {}): Rev
 			getSessionId: () => options.sessionId ?? "revision-test-session",
 			getSessionName: () => undefined,
 			getSessionFile: () => "/sessions/planning.jsonl",
-			getBranch: () => [...branch],
-			getEntries: () => [...branch],
+			getBranch: visible,
+			getEntries: visible,
 			buildContextEntries: () => [],
 		},
 	});
@@ -179,6 +191,9 @@ export function createRevisionHarness(options: RevisionHarnessOptions = {}): Rev
 		planMenuCalls,
 		get waitForIdleCalls() {
 			return waitForIdleCalls;
+		},
+		viewBranch(entries) {
+			branchView = entries ? [...entries] : undefined;
 		},
 		state() {
 			for (let index = branch.length - 1; index >= 0; index -= 1) {

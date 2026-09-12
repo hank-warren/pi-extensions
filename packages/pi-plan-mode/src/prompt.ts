@@ -79,6 +79,33 @@ export interface PlanRevisionPromptContext {
 }
 
 /**
+ * What the model is told while Plan mode is on over a plan that **already
+ * exists** and has managed history, with no revision open yet.
+ *
+ * That is the state an accepted or cancelled revision leaves behind, and the
+ * state a ready managed plan sits in. `plan_mode_complete` is refused there, so a
+ * prompt that still ended every turn in it would send the model at a refusal and
+ * leave the user's "tweak X" unanswered. This variant ends the turn in
+ * `update_plan(action:"begin")` instead — the same route the tool description and
+ * the active-plan context line name.
+ */
+export interface ManagedPlanPromptContext {
+	planPath: string;
+	/** The managed spec revision the next `begin` must quote back. */
+	specRevision: number;
+}
+
+/**
+ * Which plan the prompt is about, when it is not a first draft.
+ *
+ * Omitted for initial drafting, which is the state `plan_mode_complete` exists
+ * for and the one whose wording must not move.
+ */
+export type PlanModePromptContext =
+	| ({ kind: "revision" } & PlanRevisionPromptContext)
+	| ({ kind: "managed" } & ManagedPlanPromptContext);
+
+/**
  * Build the Plan mode prompt around whichever question tool is available.
  *
  * The prompt is the enforcement surface and the turn contract; the craft it
@@ -94,8 +121,10 @@ export interface PlanRevisionPromptContext {
  */
 export function buildPlanModePrompt(
 	questionTool: string | null = PLAN_MODE_QUESTION_TOOL,
-	revision?: PlanRevisionPromptContext,
+	context?: PlanModePromptContext,
 ) {
+	const revision = context?.kind === "revision" ? context : undefined;
+	const managed = context?.kind === "managed" ? context : undefined;
 	const tool =
 		questionTool === null
 			? undefined
@@ -110,9 +139,14 @@ export function buildPlanModePrompt(
 	const endingBullet = tool
 		? `If a material decision remains, use ${tool.name}.`
 		: "If a material decision remains, ask one concise plain-text question.";
+	const beginCall = managed
+		? `update_plan with action "begin" and expectedRevision ${managed.specRevision}`
+		: "";
 	const finalCall = revision
 		? `update_plan with action "propose", revisionId "${revision.revisionId}" and expectedRevision ${revision.baseRevision}`
-		: "plan_mode_complete";
+		: managed
+			? beginCall
+			: "plan_mode_complete";
 	const revisionClause = tool
 		? `continue planning with ${tool.name} instead of calling ${finalCall}`
 		: `continue planning with a plain-text question instead of calling ${finalCall}`;
@@ -127,33 +161,57 @@ export function buildPlanModePrompt(
 				revision.conflict ? `\n- Note: ${revision.conflict} Reconcile it in the revision rather than ignoring it.` : ""
 			}
 - Finish the revision by calling ${finalCall} with the complete rewritten plan. Do not call plan_mode_complete; it is for a first draft and will refuse while this revision is open.`
-		: "You are in Plan mode, a collaboration mode for producing a decision-complete implementation plan: one a competent implementer could execute without asking anything further. Chat your way to the plan before finalizing it.";
-	const checklistBullet = revision
-		? "- Do not use todo/checklist tooling to track execution progress; the plan itself belongs in the revision you propose."
-		: "- Do not use todo/checklist tooling to track execution progress; the plan itself belongs in plan_mode_complete.";
+		: managed
+			? `You are in Plan mode over a plan that already exists and has been agreed with the user, at ${managed.planPath} (spec revision ${managed.specRevision}).
+
+## This plan already exists
+
+- Read ${managed.planPath} before saying anything about the plan. It is the agreed plan, not a draft to replace from memory.
+- Changing it is a reviewed revision, not a rewrite: call ${beginCall}, then action "propose" with the complete rewritten plan. The user accepts, asks for changes, or cancels.
+- Do not call plan_mode_complete. It is refused for a plan that already exists, because it carries no base revision and no digest, so nothing could check what the change was against.
+- If the user only wants to talk about the plan, answer them. Open a revision when they ask for the plan itself to change.`
+			: "You are in Plan mode, a collaboration mode for producing a decision-complete implementation plan: one a competent implementer could execute without asking anything further. Chat your way to the plan before finalizing it.";
+	const checklistBullet =
+		revision || managed
+			? "- Do not use todo/checklist tooling to track execution progress; the plan itself belongs in the revision you propose."
+			: "- Do not use todo/checklist tooling to track execution progress; the plan itself belongs in plan_mode_complete.";
 	const completionHeading = revision
 		? `Only call ${finalCall} when the revised plan leaves no implementation decisions unresolved. Pass the complete plan as Markdown, structured as the craft document describes:`
-		: "Only call plan_mode_complete when the plan leaves no implementation decisions unresolved. Pass the complete plan as Markdown, structured as the craft document describes:";
+		: managed
+			? `A change to this plan is proposed, never submitted outright. Open it with ${beginCall}, then propose the complete rewritten plan as Markdown, structured as the craft document describes:`
+			: "Only call plan_mode_complete when the plan leaves no implementation decisions unresolved. Pass the complete plan as Markdown, structured as the craft document describes:";
 	const completionTail = revision
 		? `Keep the plan concise, human and agent digestible, and free of open decisions. Prefer grouped behavior-level changes over file-by-file or symbol-by-symbol inventories. Do not ask "should I proceed?"; proposing the revision opens the review card the user decides on.
 
 The plan is saved to a durable file, so it survives compaction and can be re-read at any time.
 
 Every proposal is a complete replacement, never a delta. If the user asks for further changes after you propose, call ${finalCall} again with the complete corrected plan. If there is not enough information for a complete replacement, ${revisionClause}.`
-		: `Keep the plan concise, human and agent digestible, and free of open decisions. Prefer grouped behavior-level changes over file-by-file or symbol-by-symbol inventories. Do not ask "should I proceed?"; plan_mode_complete opens the /plan ready menu.
+		: managed
+			? `Keep the plan concise, human and agent digestible, and free of open decisions. Prefer grouped behavior-level changes over file-by-file or symbol-by-symbol inventories. Do not ask "should I proceed?"; proposing a revision opens the review card the user decides on.
+
+The plan is saved to a durable file, so it survives compaction and can be re-read at any time.
+
+Every proposal is a complete replacement, never a delta. If there is not enough information for a complete replacement, ${revisionClause}.`
+			: `Keep the plan concise, human and agent digestible, and free of open decisions. Prefer grouped behavior-level changes over file-by-file or symbol-by-symbol inventories. Do not ask "should I proceed?"; plan_mode_complete opens the /plan ready menu.
 
 The plan is saved to a durable file, so it survives compaction and can be re-read at any time.
 
 If the user requests revisions after a completed plan, the next plan_mode_complete call must contain a complete replacement, not a delta. If there is not enough information for a complete replacement, ${revisionClause}.`;
 	const endingFinalBullet = revision
 		? `- If the revised plan is decision-complete, call ${finalCall} alone as your final action. Do not call other tools in the same batch and do not emit a normal assistant response after it.`
-		: "- If the implementation plan is decision-complete, call plan_mode_complete alone as your final action. Do not call other tools in the same batch and do not emit a normal assistant response after it.";
+		: managed
+			? `- If the user asked for the plan to change, call ${beginCall} and carry on in the same turn; finish that revision with action "propose" alone as your final action.`
+			: "- If the implementation plan is decision-complete, call plan_mode_complete alone as your final action. Do not call other tools in the same batch and do not emit a normal assistant response after it.";
 	const clarificationParagraph = revision
 		? `If a follow-up asks only for clarification and does not change or challenge the revision, answer it directly, then call ${finalCall} alone as the final action with the complete plan so the revision remains available for review.`
-		: "If a follow-up asks only for clarification and does not change or challenge the plan, answer it directly, then call plan_mode_complete alone as the final action with the complete unchanged plan so it remains available for implementation.";
+		: managed
+			? "If a follow-up asks only for clarification and does not change or challenge the plan, answer it directly and open no revision. The agreed plan stays exactly as it is."
+			: "If a follow-up asks only for clarification and does not change or challenge the plan, answer it directly, then call plan_mode_complete alone as the final action with the complete unchanged plan so it remains available for implementation.";
 	const announceParagraph = revision
 		? `Never end with prose that merely announces you are about to present, write, or finalize the plan. Submit the actual plan with ${finalCall} in that turn.`
-		: "Never end with prose that merely announces you are about to present, write, or finalize the plan. Submit the actual plan with plan_mode_complete in that turn.";
+		: managed
+			? `Never end with prose that merely announces you are about to revise the plan. Open the revision with ${beginCall} in that turn.`
+			: "Never end with prose that merely announces you are about to present, write, or finalize the plan. Submit the actual plan with plan_mode_complete in that turn.";
 	return `${PLAN_CONTEXT_MARKER}
 # Plan mode
 

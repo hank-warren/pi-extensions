@@ -33,7 +33,13 @@ import {
 	writePlanFile,
 } from "./plan-file.js";
 import { createPlanActionController } from "./plan-action-controller.js";
-import { completionRefusal, evaluatePlanApproval } from "./plan-approval.js";
+import {
+	completionRefusal,
+	evaluatePlanApproval,
+	managedCompletionRefusal,
+	mutationRefusal,
+	REVISION_IN_PROGRESS_REFUSAL,
+} from "./plan-approval.js";
 import { createPlanExportController } from "./plan-export-controller.js";
 import { createPlanRevisionController } from "./plan-revision-controller.js";
 import {
@@ -114,8 +120,13 @@ function setHerdrBlocked(pi: ExtensionAPI, active: boolean, label: string): void
  * re-enables Plan mode, so from the next tool call onward the model cannot edit
  * files while it is changing the plan. Work already in flight when begin lands
  * is not undone — a tool call that has started has started.
+ *
+ * The same set is what the implementation-time digest guard judges, so "which
+ * tools does Plan mode consider a mutation" has one answer and one spelling.
+ * Bash is not in it on purpose: Plan mode cannot tell which command writes, and
+ * that classification belongs to the session's permission layer.
  */
-const BLOCKED_TOOLS = new Set(["edit", "write"]);
+const MUTATING_TOOLS = new Set(["edit", "write"]);
 /** Long enough to collapse one save's burst of filesystem events into one read. */
 const SETTINGS_RELOAD_DEBOUNCE_MS = 75;
 
@@ -284,14 +295,10 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		implementFresh: startFreshImplementation,
 		exportPlan: (ctx, path, signal, isCurrent) => planExports.export(path, ctx, signal, isCurrent),
 		stay: updateUi,
+		// One exit, so the menu and the typed command cannot disagree about whether a
+		// plan was a discarded draft or an agreed baseline kept.
 		exitReady: (ctx) => {
-			// Same had-plan branching as the /plan exit command: the menu must not
-			// claim a plan was discarded when none was ever completed.
-			const text =
-				state.planPath !== undefined
-					? "Plan mode disabled. Proposed plan discarded."
-					: "Plan mode disabled.";
-			void exitAndNotify(ctx, text);
+			void exitPlanModeCommand(ctx);
 		},
 		onReadyBlocked: (active) => setHerdrBlocked(pi, active, HERDR_READY_BLOCKED_LABEL),
 	});
@@ -366,15 +373,11 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 			if (!state.enabled) {
 				throw new Error("plan_mode_complete is only available while Plan mode is active");
 			}
-			// A managed revision has a base revision and a digest behind it, and
-			// plan_mode_complete has neither: accepting one here would publish a plan
-			// with no recorded base and silently retire the candidate the user was
-			// reviewing. The refusal names the call that does work.
-			if (state.revision) {
-				throw new Error(
-					`plan_mode_complete cannot finalize a revision of an existing plan. Call ${UPDATE_PLAN_TOOL_NAME} with action "propose", revisionId "${state.revision.revisionId}", expectedRevision ${state.revision.baseRevision}, the complete rewritten plan, and a changeSummary.`,
-				);
-			}
+			// A plan with managed history has a base revision and a digest behind it,
+			// and plan_mode_complete has neither. Refused here *and* in the shared write
+			// path below, so no other caller can reach it either.
+			const managedRefusal = managedCompletionRefusal(state);
+			if (managedRefusal) throw new Error(managedRefusal);
 			const parsed = normalizePlanModeCompletion(params);
 			if (!parsed.ok) throw new Error(parsed.error);
 
@@ -424,6 +427,10 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		promptGuidelines: [PLAN_IMPLEMENTED_GUIDELINE],
 		parameters: PLAN_IMPLEMENTED_PARAMS,
 		async execute(_toolCallId, _params: unknown, _signal, _onUpdate, ctx) {
+			// A revision of an implementing plan is a plan that *is* being implemented,
+			// paused. Naming it before the generic refusal is what stops the model being
+			// told there is no plan while it is holding that plan's revision id.
+			if (state.revision && state.planPath) throw new Error(REVISION_IN_PROGRESS_REFUSAL);
 			if (state.enabled || !state.planPath) {
 				throw new Error("plan_implemented is only available while an approved plan is being implemented");
 			}
@@ -496,15 +503,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 				return;
 			}
 			if (command === "exit" || command === "off") {
-				const hadPlan = state.planPath !== undefined;
-				const notification = state.enabled
-					? hadPlan
-						? "Plan mode disabled. Proposed plan discarded."
-						: "Plan mode disabled."
-					: hadPlan
-						? "Active implementation plan cleared."
-						: "Plan mode disabled.";
-				await exitAndNotify(ctx, notification);
+				await exitPlanModeCommand(ctx);
 				return;
 			}
 			if (prompt) {
@@ -608,6 +607,55 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		updateUi(ctx);
 	});
 
+	/**
+	 * Tree navigation moves which branch of the conversation is live without
+	 * starting a session, and Plan mode's state — including, since managed
+	 * revisions, the approval digest — lives in that branch's entries.
+	 *
+	 * So the selected branch is re-read here. Without it, `approvedDigest` stayed in
+	 * memory across a navigation: moving to a branch recorded *before* the user
+	 * approved anything left the in-memory digest matching the file, so approval
+	 * read as current and completion proceeded on a branch where no approval was
+	 * ever recorded. The fix is to let the branch answer, which is also what makes a
+	 * branch that never had a plan report none.
+	 *
+	 * What is deliberately *not* done is rewinding anything on disk. Moving the
+	 * conversation back does not un-write the work the later turns did: the plan file
+	 * and its recorded revisions stay exactly as they are, and a plan whose bytes no
+	 * longer match what this branch approved becomes unverified rather than being
+	 * reverted. Old menus and in-flight waits are superseded first, so a card opened
+	 * against the previous branch cannot write to this one.
+	 */
+	pi.on("session_tree", async (_event, ctx) => {
+		lifecycle.nextWorkflow();
+		const scope = lifecycle.capture();
+		const previousPlanPath = state.planPath;
+		pendingReadyNonce = undefined;
+		viewDetail = {};
+		revisions.reset();
+		currentHasUI = ctx.hasUI;
+		restoreState(ctx);
+		await reconcileMissingPlan(ctx);
+		if (!scope.isCurrent()) return;
+		await revisions.reconcileOnSessionStart(ctx, scope);
+		if (!scope.isCurrent()) return;
+		// Staging is monotonic by design, so a branch with a plan stages what it needs
+		// and a branch without one keeps tools that now refuse to run.
+		if (state.enabled) activatePlanTools(ctx.hasUI);
+		else if (state.planPath) activateImplementedTool(ctx.hasUI);
+		if (state.planPath) activateUpdatePlanTool(ctx.hasUI);
+		await refreshViewDetail(scope);
+		if (!scope.isCurrent()) return;
+		updateUi(ctx);
+		if (previousPlanPath === state.planPath) return;
+		ctx.ui.notify(
+			state.planPath
+				? `This branch tracks the plan at ${state.planPath}. Nothing on disk was changed.`
+				: "This branch tracks no plan. The plan file and its recorded revisions were left alone.",
+			"info",
+		);
+	});
+
 	pi.on("session_shutdown", async (_event, ctx) => {
 		// No re-arm: nothing may become current again until a session_start.
 		lifecycle.endSession("Plan mode session shut down");
@@ -621,19 +669,52 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 	});
 
 	/**
-	 * The complete enforcement surface: two static built-in names. Plan mode
-	 * does not classify, inspect, or filter any other tool.
+	 * The complete enforcement surface, and the only place a mutating tool is
+	 * judged: the same two static built-in names, for two different reasons.
+	 *
+	 * While planning or revising, they are blocked outright — planning must not
+	 * mutate files. While *implementing*, they are allowed only if the plan on disk
+	 * is still the plan the user approved. That second check is the approved plan's
+	 * "validate the accepted digest at subsequent mutation calls": an edit to the
+	 * plan that lands mid-turn is otherwise invisible until the next turn boundary,
+	 * so the tool calls after it would carry out a plan nobody agreed to.
+	 *
+	 * It is not a permission system and does not grow into one. The classified set
+	 * is the same `MUTATING_TOOLS` the planning block uses, read-only tools are never
+	 * touched, and Bash, MCP and subagent calls are deliberately not inspected — Plan
+	 * mode cannot tell which of those write, and guessing is worse than leaving it to
+	 * the session's permission layer. The cost is one plan-file read per `edit`/`write`
+	 * while a plan is active.
 	 */
-	pi.on("tool_call", async (event) => {
-		if (!state.enabled) return;
-		if (!BLOCKED_TOOLS.has(event.toolName)) return;
-		const revision = state.revision;
-		return {
-			block: true,
-			reason: revision
-				? `Plan mode blocks '${event.toolName}' because a plan revision is open and revising must not mutate files. Submit the revision with ${UPDATE_PLAN_TOOL_NAME} action "propose" (revisionId "${revision.revisionId}"), then implement once the user accepts it.`
-				: `Plan mode blocks '${event.toolName}' because planning must not mutate files. Finish the plan with plan_mode_complete, then implement.`,
-		};
+	pi.on("tool_call", async (event, ctx) => {
+		if (!MUTATING_TOOLS.has(event.toolName)) return;
+		if (state.enabled) {
+			const revision = state.revision;
+			// Three states again, and the refusal has to name the call that is accepted in
+			// each: "finish with plan_mode_complete" would be advice that fails for a plan
+			// that already has history, where the route is a reviewed revision.
+			const route = revision
+				? `Submit the revision with ${UPDATE_PLAN_TOOL_NAME} action "propose" (revisionId "${revision.revisionId}"), then implement once the user accepts it.`
+				: state.planId && state.planPath
+					? `This plan already exists: change it with ${UPDATE_PLAN_TOOL_NAME} action "begin" and expectedRevision ${state.specRevision ?? 0}, then action "propose", and implement once the user accepts it.`
+					: "Finish the plan with plan_mode_complete, then implement.";
+			return {
+				block: true,
+				reason: `Plan mode blocks '${event.toolName}' because planning must not mutate files. ${route}`,
+			};
+		}
+		if (!state.planPath) return;
+		const reading = await revisions.read(state);
+		const refusal = mutationRefusal(event.toolName, reading.approval);
+		if (!refusal) return;
+		// The widget and the next prompt should agree with the refusal the model just
+		// received, so the reading is published rather than discarded.
+		const notice = revisions.approvalNotice(reading.approval);
+		if (notice !== viewDetail.approvalNotice) {
+			viewDetail = notice ? { approvalNotice: notice } : {};
+			updateUi(ctx);
+		}
+		return { block: true, reason: refusal };
 	});
 
 	/**
@@ -700,16 +781,28 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		}
 		const revision = state.revision;
 		if (state.enabled) {
-			const context =
+			// Three states, three endings, and the prompt has to name the one that will
+			// actually be accepted: propose while a revision is open, begin over a plan
+			// that already has managed history, plan_mode_complete for a first draft.
+			// Telling the model to finish in a call the tool refuses is how a user's
+			// "tweak X" ends in an error instead of a reviewed revision.
+			const context: Parameters<typeof buildPlanModePrompt>[1] =
 				revision && state.planPath
 					? {
+							kind: "revision",
 							planPath: state.planPath,
 							revisionId: revision.revisionId,
 							baseRevision: revision.baseRevision,
 							instructions: revision.instructions,
 							...(reading?.unaccounted ? { conflict: reading.unaccounted } : {}),
 						}
-					: undefined;
+					: state.planId && state.planPath
+						? {
+								kind: "managed",
+								planPath: state.planPath,
+								specRevision: reading?.revision ?? state.specRevision ?? 0,
+							}
+						: undefined;
 			return {
 				systemPrompt: `${event.systemPrompt}\n\n${buildPlanModePrompt(questionTool, context)}`,
 			};
@@ -772,6 +865,44 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 	}
 
 	/**
+	 * `/plan exit` and `/plan off`, which mean different things in each state.
+	 *
+	 * The case worth spelling out is exit *during a revision*. Opening a revision
+	 * turns Plan mode back on, so the plain reading of "Plan mode is on and a plan
+	 * file exists" is "a proposed draft is being discarded" — and it is not: the file
+	 * holds the plan the user already agreed to. Deleting it would throw away the
+	 * approved baseline to abandon a revision of it, and say so in the wrong words.
+	 *
+	 * So exit during a revision keeps the live file and the retained candidate,
+	 * retires the transaction, and leaves nothing implementing: execution stays
+	 * paused until the user picks the plan back up. `/plan exit` again, or "Clear
+	 * active implementation plan", is still how the file is deleted.
+	 */
+	async function exitPlanModeCommand(ctx: ExtensionContext) {
+		const planPath = state.planPath;
+		if (state.revision && planPath) {
+			// The candidate is retired through the same primitive the review card's
+			// Cancel uses, so there is one way a transaction ends.
+			await revisions.retireOpenRevision("the user exited Plan mode during the revision");
+			await exitAndNotify(
+				ctx,
+				`Plan revision abandoned and Plan mode disabled. The agreed plan was kept at ${planPath}; nothing is implementing it. Run /plan to pick it up, or /plan exit again to delete it.`,
+				{ keepPlanFile: true },
+			);
+			return;
+		}
+		const hadPlan = planPath !== undefined;
+		const notification = state.enabled
+			? hadPlan
+				? "Plan mode disabled. Proposed plan discarded."
+				: "Plan mode disabled."
+			: hadPlan
+				? "Active implementation plan cleared."
+				: "Plan mode disabled.";
+		await exitAndNotify(ctx, notification);
+	}
+
+	/**
 	 * The managed fields a plan takes with it when the session stops tracking one.
 	 *
 	 * Spelled out rather than spread, because a left-over `approvedDigest` or
@@ -799,6 +930,10 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 	 * by a tool call deciding its own authorisation.
 	 */
 	async function completionGate(ctx: ExtensionContext): Promise<string | undefined> {
+		// Named before anything is read, because both completion entry points return
+		// early on `state.enabled` and an open revision always implies it: without
+		// this the user hears "No plan is being implemented" about a plan that is.
+		if (state.revision) return REVISION_IN_PROGRESS_REFUSAL;
 		const reading = await revisions.read(state);
 		const refusal = completionRefusal(reading.approval);
 		if (!refusal) return undefined;
@@ -855,6 +990,10 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 	 * user can export and clear by hand. Returns whether implementation ended.
 	 */
 	async function markImplemented(ctx: ExtensionContext): Promise<boolean> {
+		if (state.revision && state.planPath) {
+			ctx.ui.notify(REVISION_IN_PROGRESS_REFUSAL, "warning");
+			return false;
+		}
 		if (state.enabled || !state.planPath) {
 			ctx.ui.notify("No plan is being implemented.", "warning");
 			return false;
@@ -933,6 +1072,11 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 	 * keeps Plan mode active rather than silently losing the plan.
 	 */
 	async function acceptCompletedPlan(plan: string, ctx: ExtensionContext): Promise<string> {
+		// The guard lives on the write, not only on the tool that calls it: this is
+		// the one place an unreviewed plan could replace a reviewed one, and a future
+		// caller must not be able to reach it by going around the tool wrapper.
+		const managedRefusal = managedCompletionRefusal(state);
+		if (managedRefusal) throw new Error(managedRefusal);
 		const planPath = sessionPlanPath ?? resolveSessionPlanPath(ctx);
 		try {
 			await writePlanFile(planPath, plan);
@@ -965,6 +1109,15 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		return state.planPath ? await readPlanFile(state.planPath) : undefined;
 	}
 
+	/**
+	 * "Finalize now" has to name the call that will actually be accepted.
+	 *
+	 * While a revision is open, `plan_mode_complete` is refused and the revision
+	 * prompt says so, so asking for it here would send the model at a wall the rest
+	 * of the package built on purpose. A plan that already has managed history is
+	 * the same situation one step earlier: the way to change it is a reviewed
+	 * revision, which starts with `begin`.
+	 */
 	function requestFinalPlan(ctx: ExtensionContext) {
 		if (!state.enabled) {
 			ctx.ui.notify("Plan mode is not active. Use /plan first.", "warning");
@@ -972,35 +1125,42 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		}
 		// Same rule as the prompt: a headless run has no question tool to name.
 		const questionTool = ctx.hasUI ? preferredQuestionTool(pi) : null;
+		const askInstead =
+			questionTool === null ? "ask it in plain text" : `use ${questionTool}`;
+		const revision = state.revision;
+		if (revision) {
+			sendPlanModeUserMessage(
+				`Finish the plan revision now. If any material decision remains, ${askInstead} instead. Otherwise call ${UPDATE_PLAN_TOOL_NAME} alone as your final action with action "propose", revisionId "${revision.revisionId}", expectedRevision ${revision.baseRevision}, the complete rewritten plan, and a changeSummary. Do not call plan_mode_complete; it is refused while this revision is open.`,
+				ctx,
+			);
+			return;
+		}
+		if (state.planId !== undefined && state.planPath !== undefined) {
+			sendPlanModeUserMessage(
+				`This session already has an agreed plan at ${state.planPath} (spec revision ${state.specRevision ?? 0}). To change it, call ${UPDATE_PLAN_TOOL_NAME} with action "begin" and expectedRevision ${state.specRevision ?? 0}, then action "propose" with the complete rewritten plan. If any material decision remains, ${askInstead} first. Do not call plan_mode_complete; it is refused for a plan that already exists.`,
+				ctx,
+			);
+			return;
+		}
 		sendPlanModeUserMessage(
-			`Finalize the current implementation plan now. If any material decision remains, ${
-				questionTool === null ? "ask it in plain text" : `use ${questionTool}`
-			} instead. Otherwise call plan_mode_complete alone as your final action with the complete decision-ready plan.`,
+			`Finalize the current implementation plan now. If any material decision remains, ${askInstead} instead. Otherwise call plan_mode_complete alone as your final action with the complete decision-ready plan.`,
 			ctx,
 		);
 	}
 
 	async function startFreshImplementation(ctx: ExtensionContext, menuIsCurrent: () => boolean) {
-		// The destination inherits the plan's identity, so give it one before the
-		// handoff: a child that cannot name the plan cannot revise it either.
-		if (state.planPath) {
-			const identity = await revisions.ensureIdentity(
-				ctx,
-				{ signal: lifecycle.signal, isCurrent: menuIsCurrent, isStale: () => !menuIsCurrent() },
-				"the plan was approved for implementation in a fresh session",
-			);
-			if (!identity.ok && menuIsCurrent()) {
-				ctx.ui.notify(
-					`The plan's revision history could not be opened: ${identity.error}. The fresh session still gets the plan.`,
-					"warning",
-				);
-			}
-			if (!menuIsCurrent()) return;
-		}
 		await startFreshImplementationFromState(ctx, {
 			getState: () => state,
 			menuIsCurrent,
 			stateEntryType: STATE_ENTRY_TYPE,
+			// The same recording "Implement here" performs, for the same reason: the user
+			// choosing to implement is the approval, and the destination has to inherit
+			// an identity, a revision and a digest that all name the bytes it will read.
+			recordApproval: () =>
+				revisions.approveCurrentPlan(
+					ctx,
+					"the plan was approved for implementation in a fresh session",
+				),
 		});
 	}
 

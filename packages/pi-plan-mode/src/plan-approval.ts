@@ -74,14 +74,70 @@ export function approvalNotice(approval: PlanApproval): string | undefined {
 	return undefined;
 }
 
+/**
+ * Why `plan_mode_complete` cannot finalize this plan, or undefined when it can.
+ *
+ * `plan_mode_complete` carries a whole plan and no base: no revision it was
+ * computed against, no digest, no diff the user approved. That is exactly right
+ * for a first draft and exactly wrong for a plan that already has managed
+ * history — publishing through it would replace reviewed scope from model memory,
+ * leave the manifest claiming bytes the file no longer holds, and strand the
+ * candidate the user was looking at.
+ *
+ * So the refusal is by *state*, not by tool wrapper, and it names the call that
+ * does work: `propose` while a transaction is open, `begin` otherwise. It is a
+ * refusal and not a quiet adoption of the live bytes on purpose — adopting them
+ * would be this package deciding that a change nobody reviewed is the new agreed
+ * scope.
+ */
+export function managedCompletionRefusal(state: PlanModeState): string | undefined {
+	if (state.revision) {
+		return `plan_mode_complete cannot finalize a revision of an existing plan. Call update_plan with action "propose", revisionId "${state.revision.revisionId}", expectedRevision ${state.revision.baseRevision}, the complete rewritten plan, and a changeSummary.`;
+	}
+	if (state.planId !== undefined && state.planPath !== undefined) {
+		return `plan_mode_complete cannot replace a plan that already exists: this one is at spec revision ${state.specRevision ?? 0} with recorded history, and a change to it has to be reviewed against that base. Call update_plan with action "begin" and expectedRevision ${state.specRevision ?? 0}, then action "propose" with the complete rewritten plan.`;
+	}
+	return undefined;
+}
+
 /** How to get back to a known-approved plan, in the words both surfaces use. */
 export const APPROVAL_RECOVERY_INSTRUCTION =
 	'resolve it first: call update_plan with action "begin" to revise the plan with the user, or ask them to run /plan and choose "Confirm the plan file" to record the current file as approved.';
 
 export function completionRefusal(approval: PlanApproval): string | undefined {
-	if (approval.kind === "revising") {
-		return `A plan revision is in progress, so the plan cannot be marked implemented yet. Finish it with update_plan action "propose", or ask the user to cancel the revision from /plan.`;
-	}
+	if (approval.kind === "revising") return REVISION_IN_PROGRESS_REFUSAL;
 	const notice = approvalNotice(approval);
 	return notice ? `${notice} Do not mark it implemented — ${APPROVAL_RECOVERY_INSTRUCTION}` : undefined;
+}
+
+/**
+ * The completion refusal for an open revision, reachable on its own.
+ *
+ * Both completion entry points return early on `state.enabled`, and an open
+ * revision always implies `enabled`, so without naming this case first the user
+ * hears "No plan is being implemented" about a plan that very much is.
+ */
+export const REVISION_IN_PROGRESS_REFUSAL =
+	'A plan revision is in progress, so the plan cannot be marked implemented yet. Finish it with update_plan action "propose", or cancel the revision from /plan.';
+
+/**
+ * What a mutating tool is told when the plan it is implementing is not the plan
+ * that was approved.
+ *
+ * The approved plan requires the accepted digest to be validated at mutation
+ * calls as well as at turn boundaries, because an edit that lands mid-turn is
+ * otherwise invisible until the next one. This is that refusal: it blocks the
+ * write and says how a person resolves it, rather than letting implementation
+ * continue against bytes nobody agreed to.
+ *
+ * Only the states an *implementing* session can be in are answered here —
+ * `none`, `approved`, `unknown`, `stale`, `missing`. `drafting`, `proposed` and
+ * `revising` all require Plan mode to be on, where the same hook already refuses
+ * every mutating tool outright and says why; routing those through this function
+ * would give one situation two wordings.
+ */
+export function mutationRefusal(toolName: string, approval: PlanApproval): string | undefined {
+	const notice = approvalNotice(approval);
+	if (!notice) return undefined;
+	return `Plan mode blocks '${toolName}' because the plan being implemented is not the plan that was approved. ${notice} Stop implementing and ${APPROVAL_RECOVERY_INSTRUCTION}`;
 }

@@ -64,13 +64,23 @@ async function fixture(plan = "# Plan v1"): Promise<Fixture> {
 	};
 }
 
+/**
+ * Initialize from the bytes the file actually holds, which is what
+ * `ensureIdentity` does in production (`readPlanFile` then initialize).
+ *
+ * Passing the caller's own idea of the plan text instead is the mistake the
+ * exact-byte rule exists to prevent: the manifest would describe something the
+ * file does not contain and every later read would call it unaccounted.
+ */
 async function initialized(plan = "# Plan v1") {
 	const base = await fixture(plan);
+	const onDisk = await readPlanFile(base.planPath);
+	assert.ok(onDisk, "the fixture must have written a plan");
 	const result = await initializePlanManifest({
 		root: base.root,
 		planId: PLAN_ID,
 		planPath: base.planPath,
-		plan,
+		plan: onDisk,
 		now: NOW,
 		changeSummary: "the plan was approved for implementation",
 	});
@@ -119,7 +129,7 @@ test("initialization records the live bytes as revision 1 and is idempotent", as
 		root: base.root,
 		planId: PLAN_ID,
 		planPath: base.planPath,
-		plan: "# Plan v1",
+		plan: "# Plan v1\n",
 		now: NOW,
 		changeSummary: "second call",
 	});
@@ -312,6 +322,153 @@ test("an interrupted publication is completed from its preparation record", asyn
 		now: NOW,
 	});
 	assert.equal(again.kind, "ok");
+});
+
+test("a rolled-back plan that reappears externally is a conflict, not a recovery", async (t) => {
+	// The reachable sequence, no crash involved. Preparation records are never
+	// deleted — they are what keeps a revision number consumed — so a record of a
+	// *finished* revision outlives it. Publish D1 -> D2, roll back D2 -> D1, and
+	// revision 2's record still describes D2 over D1. With only the digest and base
+	// compared, any later reappearance of D2 would be reported as "revision 2 was
+	// published before its history could be recorded", write the manifest backwards
+	// to 2, and append a duplicate history entry — losing the one conflict signal
+	// the layer is built on.
+	const base = await initialized();
+	t.after(base.cleanup);
+	const d1 = digestOf("# Plan v1\n");
+	const forward = await publishPlanRevision({
+		root: base.root,
+		planId: PLAN_ID,
+		planPath: base.planPath,
+		baseRevision: 1,
+		baseDigest: d1,
+		plan: "# Plan v2",
+		now: NOW,
+		changeSummary: "go to v2",
+	});
+	assert.equal(forward.kind, "published");
+	if (forward.kind !== "published") return;
+	const rollback = await publishPlanRevision({
+		root: base.root,
+		planId: PLAN_ID,
+		planPath: base.planPath,
+		baseRevision: 2,
+		baseDigest: forward.digest,
+		plan: "# Plan v1",
+		now: NOW,
+		changeSummary: "roll back to v1",
+	});
+	assert.equal(rollback.kind, "published");
+	if (rollback.kind !== "published") return;
+	assert.equal(rollback.revision, 3);
+	assert.equal(rollback.digest, d1);
+
+	// Anything outside Plan mode puts D2 back: a hand-edit, an editor undo, a copy
+	// of revisions/2.md.
+	await writePlanFile(base.planPath, "# Plan v2");
+	const recovered = await recoverPlanRevisions({
+		root: base.root,
+		planId: PLAN_ID,
+		planPath: base.planPath,
+		now: NOW,
+	});
+	assert.equal(recovered.kind, "conflict", "a finished revision is not evidence of an unfinished one");
+	if (recovered.kind !== "conflict") return;
+	assert.match(recovered.reason, /changed outside Plan mode/u);
+	assert.equal(recovered.liveDigest, forward.digest);
+
+	// The manifest did not move backwards and grew no duplicate entry.
+	const manifest = await readPlanManifest(base.root, PLAN_ID);
+	assert.equal(manifest.kind, "loaded");
+	if (manifest.kind !== "loaded") return;
+	assert.equal(manifest.manifest.specRevision, 3);
+	assert.equal(manifest.manifest.currentDigest, d1);
+	assert.deepEqual(
+		manifest.manifest.history.map((record) => record.revision),
+		[1, 2, 3],
+	);
+});
+
+test("a genuinely unfinished newer publication still recovers after a rollback", async (t) => {
+	// The other direction of the same predicate: monotonic must not mean inert. A
+	// record *above* the recorded revision, whose bytes are live over the recorded
+	// base, is a real interrupted publication and is still completed.
+	const base = await initialized();
+	t.after(base.cleanup);
+	const d1 = digestOf("# Plan v1\n");
+	const forward = await publishPlanRevision({
+		root: base.root,
+		planId: PLAN_ID,
+		planPath: base.planPath,
+		baseRevision: 1,
+		baseDigest: d1,
+		plan: "# Plan v2",
+		now: NOW,
+		changeSummary: "go to v2",
+	});
+	assert.equal(forward.kind, "published");
+	if (forward.kind !== "published") return;
+	// A third publication that dies between replacing the file and recording it.
+	const directory = join(base.root, PLAN_ID, "revisions");
+	await writeFile(
+		join(directory, "pending-9-token.json"),
+		JSON.stringify({
+			schemaVersion: 1,
+			planId: PLAN_ID,
+			revision: 9,
+			digest: digestOf("# Plan v3\n"),
+			baseDigest: forward.digest,
+			createdAt: NOW,
+		}),
+	);
+	await writeFile(join(directory, "pending-9-token.md"), "# Plan v3\n");
+	await writePlanFile(base.planPath, "# Plan v3");
+
+	const recovered = await recoverPlanRevisions({
+		root: base.root,
+		planId: PLAN_ID,
+		planPath: base.planPath,
+		now: NOW,
+	});
+	assert.equal(recovered.kind, "recovered");
+	if (recovered.kind !== "recovered") return;
+	assert.equal(recovered.revision, 9);
+	assert.equal(recovered.manifest.specRevision, 9);
+	assert.equal(await readPlanSnapshot(base.root, PLAN_ID, 9), "# Plan v3\n");
+});
+
+test("an existing file without a trailing newline is accounted for as it is", async (t) => {
+	// A plan written by an editor that leaves off the final newline. Normalizing it
+	// into the digest would describe bytes the file does not contain, so the file
+	// would read as "changed outside Plan mode" on every turn from the moment it
+	// gained an identity, and its own first revision would be filed under external/.
+	const directory = await mkdtemp(join(tmpdir(), "pi-plan-store-raw-"));
+	t.after(() => rm(directory, { recursive: true, force: true }));
+	const root = join(directory, "revisions");
+	const planPath = join(directory, "plan.md");
+	for (const raw of ["# Legacy plan, no newline", "# CRLF plan\r\n\r\nstep one\r\n"]) {
+		await rm(root, { recursive: true, force: true });
+		await writeFile(planPath, raw, "utf8");
+		const onDisk = await readPlanFile(planPath);
+		assert.equal(onDisk, raw, "the fixture writes the bytes verbatim");
+		const initializedRaw = await initializePlanManifest({
+			root,
+			planId: PLAN_ID,
+			planPath,
+			plan: raw,
+			now: NOW,
+			changeSummary: "the user confirmed the plan file as approved",
+		});
+		assert.equal(initializedRaw.kind, "initialized", raw);
+		if (initializedRaw.kind !== "initialized") return;
+		assert.equal(initializedRaw.manifest.currentDigest, digestOf(raw), raw);
+		assert.equal(await readPlanSnapshot(root, PLAN_ID, 1), raw, raw);
+		// The decisive assertion: recovery accounts for the file, so nothing reports a
+		// change nobody made and no external/ copy is taken.
+		const recovery = await recoverPlanRevisions({ root, planId: PLAN_ID, planPath, now: NOW });
+		assert.equal(recovery.kind, "ok", `${raw} -> ${recovery.kind}`);
+		assert.equal(await readdir(join(root, PLAN_ID)).then((names) => names.includes("external")), false);
+	}
 });
 
 test("bytes no record explains are a conflict, never adopted as a revision", async (t) => {

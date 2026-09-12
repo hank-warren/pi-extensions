@@ -112,16 +112,16 @@ export function digestOf(text: string): string {
 }
 
 /**
- * The bytes a plan actually occupies on disk. `writePlanFile` appends the
- * trailing newline, so a digest taken over anything else would never match the
- * file it describes.
+ * The bytes an agent-authored plan will occupy once written, because
+ * `writePlanFile` appends the trailing newline.
+ *
+ * For **new** content only — a proposed candidate on its way in. It must never be
+ * applied to content that is already on disk: digesting normalized bytes and
+ * comparing them with a file that ends without a newline reports a change nobody
+ * made. Every comparison against accepted or live content digests the raw bytes.
  */
 export function normalizePlanText(plan: string): string {
 	return plan.endsWith("\n") ? plan : `${plan}\n`;
-}
-
-export function planDigest(plan: string): string {
-	return digestOf(normalizePlanText(plan));
 }
 
 /** Hidden beside the live plans so a plans directory listing stays readable. */
@@ -473,11 +473,22 @@ export type InitializeResult =
  * start: a plan written by an earlier version stays exactly as it is until
  * somebody does something managed with it, and then its current bytes become
  * revision 1 rather than being rewritten.
+ *
+ * **The bytes are taken exactly as they are on disk.** No trailing newline is
+ * added, no line ending is normalized. Normalizing here would digest something
+ * the file does not contain, so a plan written by an editor that leaves off the
+ * final newline would read as "changed outside Plan mode" from the moment it
+ * gained an identity — on every turn, forever, with its first revision routed
+ * through `external/` as if nobody could account for it. Candidates the agent
+ * authors are normalized on their way *in* (see `publishPlanRevision`), which is
+ * a choice about new content; every comparison against accepted or live content
+ * is raw-byte.
  */
 export async function initializePlanManifest(input: {
 	root: string;
 	planId: string;
 	planPath: string;
+	/** The exact bytes the plan file holds, as `readPlanFile` returned them. */
 	plan: string;
 	now: string;
 	changeSummary: string;
@@ -486,7 +497,7 @@ export async function initializePlanManifest(input: {
 	if (!isSafeManagedId(input.planId)) {
 		return { kind: "failed", reason: `unsafe plan id: ${input.planId}` };
 	}
-	const contents = normalizePlanText(input.plan);
+	const contents = input.plan;
 	if (Buffer.byteLength(contents, "utf8") > MAX_PLAN_BYTES) {
 		return { kind: "failed", reason: `plan exceeds ${MAX_PLAN_BYTES} bytes` };
 	}
@@ -1016,8 +1027,27 @@ export async function recoverPlanRevisions(input: {
 			if (digest === fresh.manifest.currentDigest) return { kind: "ok", manifest: fresh.manifest };
 
 			const records = await readPreparationRecords(input.root, input.planId);
+			// Evidence has to describe a publication that is genuinely *unfinished*, and
+			// that is more than "a record with these bytes exists".
+			//
+			// Preparation records are never deleted — they are what keeps a revision
+			// number consumed — so a record of a long-finished revision outlives it. With
+			// only the digest and base compared, a plan revised D1 -> D2 and then rolled
+			// back D2 -> D1 leaves revision 2's record matching any later reappearance of
+			// D2: an outside edit would be reported as a recovered publication, the
+			// manifest would be written *backwards* to revision 2, and a duplicate history
+			// entry appended — losing the one conflict signal the whole layer rests on.
+			//
+			// So the record must name a revision above the one recorded and must not
+			// already be in history. Both are monotonic: recovery can only ever finish a
+			// revision the manifest has not reached, never revisit one it has.
+			const recorded = new Set(fresh.manifest.history.map((entry) => entry.revision));
 			const evidence = records.find(
-				(record) => record.digest === digest && record.baseDigest === fresh.manifest.currentDigest,
+				(record) =>
+					record.revision > fresh.manifest.specRevision &&
+					!recorded.has(record.revision) &&
+					record.digest === digest &&
+					record.baseDigest === fresh.manifest.currentDigest,
 			);
 			if (!evidence) {
 				return {

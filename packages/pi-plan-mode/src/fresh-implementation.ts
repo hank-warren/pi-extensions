@@ -27,6 +27,21 @@ interface FreshImplementationFromStateOptions {
 	getState(): PlanModeState;
 	menuIsCurrent(): boolean;
 	stateEntryType: string;
+	/**
+	 * Records the plan exactly as it is on disk as approved, and in its managed
+	 * history, before the handoff. Returns the digest and revision that were
+	 * recorded, which is what the destination inherits.
+	 *
+	 * Taking the user's choice as the approval is the point: "start fresh and
+	 * implement" is the same decision "implement here" is, so it has to record the
+	 * same two things. Recording only the identity left the destination approved for
+	 * bytes its own manifest did not know — so it started implementing and then
+	 * reported a conflict for the plan it had just been given.
+	 */
+	recordApproval(): Promise<
+		| { ok: true; digest: string; revision?: number; warning?: string }
+		| { ok: false; error: string }
+	>;
 }
 
 type FreshImplementationResult =
@@ -72,7 +87,27 @@ export async function startFreshImplementationFromState(
 			current.planPath === planPath
 		);
 	};
+	// Approve and record *before* the handoff, so the identity, the revision and the
+	// digest the destination inherits all describe one set of bytes.
+	const approval = await options.recordApproval();
+	if (!approval.ok) {
+		ctx.ui.notify(`Unable to implement the plan: ${approval.error}`, "warning");
+		return { kind: "rejected" } as const;
+	}
+	if (approval.warning) ctx.ui.notify(approval.warning, "warning");
+	if (!isCurrent()) return { kind: "stale" } as const;
 	const digest = digestOf(plan);
+	if (digest !== approval.digest) {
+		// The file moved between the read above and the approval. Handing over an
+		// approval for bytes that are no longer there is how a destination ends up
+		// implementing something nobody reviewed, so nothing is started.
+		ctx.ui.notify(
+			"The plan file changed while the fresh session was being prepared, so nothing was started. Reopen /plan and choose again.",
+			"warning",
+		);
+		return { kind: "rejected" } as const;
+	}
+	const recorded = options.getState();
 	return startFreshImplementationSession(ctx, {
 		plan,
 		planPath,
@@ -80,12 +115,10 @@ export async function startFreshImplementationFromState(
 		isCurrent,
 		managed: {
 			schemaVersion: PLAN_STATE_SCHEMA_VERSION,
-			...(initialState.planId ? { planId: initialState.planId } : {}),
-			...(initialState.specRevision !== undefined
-				? { specRevision: initialState.specRevision }
-				: {}),
-			currentDigest: digest,
-			approvedDigest: digest,
+			...(recorded.planId ? { planId: recorded.planId } : {}),
+			...(approval.revision !== undefined ? { specRevision: approval.revision } : {}),
+			currentDigest: approval.digest,
+			approvedDigest: approval.digest,
 		},
 	});
 }
