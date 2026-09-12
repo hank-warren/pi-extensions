@@ -424,6 +424,16 @@ export interface CommitInput {
 	 * the next publication takes a number above everything.
 	 */
 	liveDocumentAuthorized?: boolean;
+	/**
+	 * The lease to use instead of a fresh one.
+	 *
+	 * Internal seam. `CommitInput` is built by the controller and never by a
+	 * tool, so nothing a model can send reaches this; it exists so the lease
+	 * failure paths can be exercised for real rather than reasoned about. The
+	 * injected lease is still handed to `proper-lockfile` as the compromise
+	 * handler, so the production wiring is the wiring under test.
+	 */
+	lease?: LockLease;
 }
 
 export type CommitResult =
@@ -491,7 +501,22 @@ export interface LockLease {
 	/** True once the lease is known lost. Never becomes false again. */
 	isLost(): boolean;
 	lostReason(): string | undefined;
+	/**
+	 * Told which boundary the commit has just crossed. The real lease ignores it
+	 * — a lock is lost when the filesystem says so, not when we reach a line of
+	 * code — but it gives a test a stable place to lose the lease, so the three
+	 * refusal branches and the post-publication branch can be driven by *where
+	 * the commit is* rather than by counting how many times a getter was read.
+	 */
+	observe?(phase: CommitPhase): void;
 }
+
+/**
+ * The boundaries a commit crosses, in order. Named so a test can say "lose the
+ * lease once the candidate bytes are on disk but before the rename" and mean
+ * exactly that.
+ */
+export type CommitPhase = "acquired" | "validated" | "prepared" | "published";
 
 export function createLockLease(): LockLease {
 	let lost: string | undefined;
@@ -532,7 +557,7 @@ export async function commitTaskDocument(input: CommitInput): Promise<CommitResu
 		await mkdir(join(directory, REVISIONS_DIRECTORY), { recursive: true });
 		// Created before `lock()` so a compromise reported while the acquisition
 		// promise is still settling is recorded rather than lost.
-		const lease = createLockLease();
+		const lease = input.lease ?? createLockLease();
 		const leaseLost = () =>
 			`the task lock for ${taskSetId} was lost before the change was published (${lease.lostReason()}); nothing was written`;
 		let release: (() => Promise<void>) | undefined;
@@ -557,6 +582,7 @@ export async function commitTaskDocument(input: CommitInput): Promise<CommitResu
 			if (signal?.aborted) {
 				return { kind: "cancelled", reason: "the turn was interrupted before anything was written" };
 			}
+			lease.observe?.("acquired");
 			// Lost between acquisition and here: another process already owns the
 			// lock, so this commit has no standing to read-modify-write behind it.
 			if (lease.isLost()) return { kind: "conflict", reason: leaseLost() };
@@ -597,6 +623,7 @@ export async function commitTaskDocument(input: CommitInput): Promise<CommitResu
 				}
 				if (repair.kind === "repaired") repairedRevision = repair.revision;
 			}
+			lease.observe?.("validated");
 			if (lease.isLost()) return { kind: "conflict", reason: leaseLost() };
 
 			// Past everything ever reserved, never merely past the live document: a
@@ -615,6 +642,7 @@ export async function commitTaskDocument(input: CommitInput): Promise<CommitResu
 			const digest = digestOf(raw);
 			const prepared = await prepareRevision(root, taskSetId, revision, raw, digest, now);
 			if (prepared.kind !== "ok") return prepared.result;
+			lease.observe?.("prepared");
 			// Last check before the rename. Publishing on a lease already known lost
 			// is the write this handler exists to prevent; the reservation stays
 			// consumed, which is what reservations are for.
@@ -622,6 +650,7 @@ export async function commitTaskDocument(input: CommitInput): Promise<CommitResu
 
 			// The publication boundary. Nothing below may report "not applied".
 			await writeAtomically(path, raw);
+			lease.observe?.("published");
 
 			// A loss noticed from here on cannot un-publish anything, so it is
 			// reported, not pretended away. Finalization is skipped rather than run

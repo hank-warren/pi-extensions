@@ -26,8 +26,10 @@ import { lock } from "proper-lockfile";
 import { applyTaskChanges } from "../src/changes.js";
 import { createTaskSet } from "../src/model.js";
 import {
+	type CommitPhase,
 	commitTaskDocument,
 	createLockLease,
+	type LockLease,
 	loadTaskDocument,
 	snapshotPath,
 	taskDocumentPath,
@@ -101,112 +103,178 @@ test("the real library's compromise callback records the loss and does not kill 
 	await release().catch(() => undefined);
 });
 
-test("a lease lost before publication refuses, writing nothing", async (t) => {
-	const root = scratchRoot(t);
-	const first = await seed(root);
-	assert.ok(first.kind === "committed");
-	const before = readFileSync(first.path, "utf8");
-	const loaded = await loadTaskDocument(first.path);
+/**
+ * A lease that loses itself at a named commit boundary.
+ *
+ * Keyed to *where the commit is*, not to how many times `isLost()` has been
+ * read: a counting stub silently stops testing what it claims the moment a
+ * check is added or removed, which is exactly the failure mode these tests
+ * exist to catch.
+ */
+function leaseLostAt(phase: CommitPhase | "start"): LockLease {
+	const lease = createLockLease();
+	const lose = () => lease.onCompromised(new Error(`lock lost at ${phase}`));
+	if (phase === "start") lose();
+	return {
+		...lease,
+		observe(reached: CommitPhase) {
+			if (reached === phase) lose();
+		},
+	};
+}
+
+async function nextRevisionOf(root: string) {
+	const loaded = await loadTaskDocument(taskDocumentPath(root, SET_ID), SET_ID);
 	assert.ok(loaded.kind === "loaded");
 	const next = applyTaskChanges(loaded.loaded.document.set, [{ op: "start", taskId: "t1" }], {
 		now: NOW,
 		hasExistingSet: true,
 	});
 	assert.ok(next.ok);
+	return { loaded: loaded.loaded, document: { set: next.result.set, extras: [] } };
+}
 
-	// Steal the lock directory out from under the commit: the same state a
-	// stale-reclaim leaves, reached without waiting for a refresh tick.
-	const stolen = commitTaskDocument({
-		root,
-		taskSetId: SET_ID,
-		document: { set: next.result.set, extras: [] },
-		expectedDigest: loaded.loaded.digest,
-		now: NOW,
-	});
-	const result = await stolen;
-
-	// Without a compromise this simply succeeds; the point of the assertion is
-	// that whichever way it goes, the live document is never a half-written or
-	// unowned write.
-	if (result.kind === "committed") {
-		assert.equal(result.revision, 2);
-	} else {
-		assert.equal(readFileSync(first.path, "utf8"), before);
-	}
-});
-
-test("a commit whose lease is already lost publishes nothing and says so", async (t) => {
+test("a lease already lost when the commit starts publishes nothing", async (t) => {
 	const root = scratchRoot(t);
 	const first = await seed(root);
 	assert.ok(first.kind === "committed");
 	const before = readFileSync(first.path, "utf8");
-	const loaded = await loadTaskDocument(first.path);
-	assert.ok(loaded.kind === "loaded");
+	const { loaded, document } = await nextRevisionOf(root);
 
-	// Hold the lock from "another process" so the commit cannot acquire it at
-	// all: the refusal is the same shape a lost lease produces, and neither ever
-	// reaches the rename.
-	const release = await lock(taskDocumentPath(root, SET_ID), {
-		realpath: false,
-		lockfilePath: join(root, SET_ID, "tasks.lock"),
-		stale: 10_000,
-	});
-	const next = applyTaskChanges(loaded.loaded.document.set, [{ op: "start", taskId: "t1" }], {
-		now: NOW,
-		hasExistingSet: true,
-	});
-	assert.ok(next.ok);
 	const refused = await commitTaskDocument({
 		root,
 		taskSetId: SET_ID,
-		document: { set: next.result.set, extras: [] },
-		expectedDigest: loaded.loaded.digest,
+		document,
+		expectedDigest: loaded.digest,
 		now: NOW,
+		lease: leaseLostAt("start"),
 	});
-	await release();
 
 	assert.equal(refused.kind, "conflict");
-	assert.match(refused.kind === "conflict" ? refused.reason : "", /holding the task lock/u);
-	assert.equal(readFileSync(first.path, "utf8"), before, "nothing was published");
-	// No revision was consumed by a commit that never reached preparation.
-	assert.equal(existsSync(snapshotPath(root, SET_ID, 2)), false);
+	assert.match(
+		refused.kind === "conflict" ? refused.reason : "",
+		/lost before the change was published/u,
+	);
+	assert.equal(readFileSync(first.path, "utf8"), before, "the live document is untouched");
+	assert.equal(existsSync(snapshotPath(root, SET_ID, 2)), false, "no accepted snapshot");
+	// Refused before `prepareRevision`, so no number was consumed either.
+	assert.deepEqual(
+		readdirSync(join(root, SET_ID, "revisions")).filter((name) => name.startsWith("pending-2-")),
+		[],
+	);
 });
 
-test("a loss after publication is reported, never as a change that did not happen", async (t) => {
+test("a lease lost after validation, before preparation, publishes nothing", async (t) => {
 	const root = scratchRoot(t);
 	const first = await seed(root);
 	assert.ok(first.kind === "committed");
+	const before = readFileSync(first.path, "utf8");
+	const { loaded, document } = await nextRevisionOf(root);
 
-	// The post-publication path is expressed as a pure decision in the store:
-	// skip finalization, report `historyPending` + `lockCompromised`, and leave
-	// the preparation record so the next commit repairs the entry on evidence.
-	// That repair is what this asserts end to end, by removing the finalized
-	// snapshot the way a skipped finalization would leave things.
-	rmSync(snapshotPath(root, SET_ID, 1));
-	const loaded = await loadTaskDocument(first.path);
-	assert.ok(loaded.kind === "loaded");
-	const next = applyTaskChanges(loaded.loaded.document.set, [{ op: "start", taskId: "t1" }], {
-		now: NOW,
-		hasExistingSet: true,
-	});
-	assert.ok(next.ok);
-	const resumed = await commitTaskDocument({
+	const refused = await commitTaskDocument({
 		root,
 		taskSetId: SET_ID,
-		document: { set: next.result.set, extras: [] },
-		expectedDigest: loaded.loaded.digest,
+		document,
+		expectedDigest: loaded.digest,
+		now: NOW,
+		lease: leaseLostAt("validated"),
+	});
+
+	assert.equal(refused.kind, "conflict");
+	assert.match(
+		refused.kind === "conflict" ? refused.reason : "",
+		/lost before the change was published/u,
+	);
+	assert.equal(readFileSync(first.path, "utf8"), before);
+	assert.equal(existsSync(snapshotPath(root, SET_ID, 2)), false);
+});
+
+test("a lease lost after preparation but before the rename publishes nothing", async (t) => {
+	const root = scratchRoot(t);
+	const first = await seed(root);
+	assert.ok(first.kind === "committed");
+	const before = readFileSync(first.path, "utf8");
+	const { loaded, document } = await nextRevisionOf(root);
+
+	const refused = await commitTaskDocument({
+		root,
+		taskSetId: SET_ID,
+		document,
+		expectedDigest: loaded.digest,
+		now: NOW,
+		lease: leaseLostAt("prepared"),
+	});
+
+	// The candidate bytes exist by now; the rename is what must not happen.
+	assert.equal(refused.kind, "conflict");
+	assert.match(
+		refused.kind === "conflict" ? refused.reason : "",
+		/lost before the change was published/u,
+	);
+	assert.equal(readFileSync(first.path, "utf8"), before, "the rename did not happen");
+	assert.equal(existsSync(snapshotPath(root, SET_ID, 2)), false, "nothing became history");
+	// The reservation stands, which is what reservations are for: the number is
+	// consumed and the next publication goes above it rather than reusing it.
+	assert.equal(
+		readdirSync(join(root, SET_ID, "revisions")).filter((name) => name.startsWith("pending-2-"))
+			.length > 0,
+		true,
+		"the reserved revision stays consumed",
+	);
+});
+
+test("a lease lost after the rename reports a published change, not a failed one", async (t) => {
+	const root = scratchRoot(t);
+	const first = await seed(root);
+	assert.ok(first.kind === "committed");
+	const { loaded, document } = await nextRevisionOf(root);
+
+	const published = await commitTaskDocument({
+		root,
+		taskSetId: SET_ID,
+		document,
+		expectedDigest: loaded.digest,
+		now: NOW,
+		lease: leaseLostAt("published"),
+	});
+
+	// The rename happened, so the only honest answer is that it happened.
+	assert.equal(published.kind, "committed");
+	assert.equal(published.kind === "committed" && published.revision, 2);
+	assert.match(
+		published.kind === "committed" ? (published.historyPending ?? "") : "",
+		/task lock was lost before its history entry could be written/u,
+	);
+	assert.match(
+		published.kind === "committed" ? (published.lockCompromised ?? "") : "",
+		/must not be retried/u,
+	);
+
+	// Finalization was skipped rather than run without a lease.
+	const live = await loadTaskDocument(taskDocumentPath(root, SET_ID), SET_ID);
+	assert.ok(live.kind === "loaded");
+	assert.equal(live.loaded.document.set.revision, 2, "the live document is at the new revision");
+	assert.equal(existsSync(snapshotPath(root, SET_ID, 2)), false, "no history entry was written");
+
+	// And the next commit repairs that entry from the preparation record rather
+	// than replaying the change: revision 2 is recorded, and 3 is a new number.
+	const follow = await nextRevisionOf(root);
+	const repaired = await commitTaskDocument({
+		root,
+		taskSetId: SET_ID,
+		document: follow.document,
+		expectedDigest: follow.loaded.digest,
 		now: NOW,
 	});
-	assert.equal(resumed.kind, "committed");
-	assert.equal(resumed.kind === "committed" && resumed.repairedRevision, 1);
-	assert.equal(existsSync(snapshotPath(root, SET_ID, 1)), true, "history entry repaired");
-	// And the publication that followed it is its own number, not a reuse.
-	assert.equal(resumed.kind === "committed" && resumed.revision, 2);
+	assert.equal(repaired.kind, "committed");
+	assert.equal(repaired.kind === "committed" && repaired.repairedRevision, 2);
+	assert.equal(repaired.kind === "committed" && repaired.revision, 3);
+	assert.equal(existsSync(snapshotPath(root, SET_ID, 2)), true);
 	assert.deepEqual(
 		readdirSync(join(root, SET_ID, "revisions"))
 			.filter((name) => /^\d+\.md$/u.test(name))
 			.sort(),
-		["1.md", "2.md"],
+		["1.md", "2.md", "3.md"],
 	);
 });
 

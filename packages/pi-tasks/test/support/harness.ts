@@ -18,6 +18,7 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createMockContext, createMockPi } from "../../../../test/support/mock-pi.js";
 import type { TasksController } from "../../src/controller.js";
+import { findRecoverySnapshot } from "../../src/store.js";
 import type { ReviewOutcome } from "../../src/task-menus.js";
 import tasks from "../../src/tasks.js";
 
@@ -46,6 +47,13 @@ export interface TasksHarnessOptions {
 	 * would only reproduce it sometimes.
 	 */
 	onTimestamp?: (index: number) => void;
+	/**
+	 * Wraps the controller's recovery-candidate walk. That walk is the single
+	 * await inside the unaccountable mapper, so this is the deterministic place
+	 * to interleave a detach with it and prove a late conflict cannot land on
+	 * the session that replaced the one the commit belonged to.
+	 */
+	onSnapshotWalk?: (taskSetId: string) => void | Promise<void>;
 	branch?: unknown[];
 	idle?: boolean;
 	/**
@@ -134,6 +142,12 @@ export function createTasksHarness(options: TasksHarnessOptions = {}): TasksHarn
 		newTaskSetId: () => {
 			nextId += 1;
 			return `00000000-0000-4000-8000-${String(nextId).padStart(12, "0")}`;
+		},
+		// The real walk, with a hook before it: the production mapper is what runs,
+		// and the test simply gets to act while it is suspended.
+		findRecoverySnapshot: async (walkRoot, taskSetId) => {
+			await options.onSnapshotWalk?.(taskSetId);
+			return findRecoverySnapshot(walkRoot, taskSetId);
 		},
 		loadInteractiveUi: async () => ({
 			showTaskReviewMenu: async (

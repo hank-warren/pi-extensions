@@ -84,6 +84,14 @@ export interface TasksControllerDependencies {
 	now?: () => string;
 	loadInteractiveUi?: () => Promise<InteractiveUi>;
 	newTaskSetId?: () => string;
+	/**
+	 * The recovery-candidate walk, injectable for the same reason `now` is: it is
+	 * the one await inside the unaccountable mapper, so interleaving a detach
+	 * with it is the only way to test that late recovery cannot land on the
+	 * session that replaced this one. Defaults to the real store function; no
+	 * tool or command can reach it.
+	 */
+	findRecoverySnapshot?: typeof findRecoverySnapshot;
 }
 
 export interface RecoveryState {
@@ -498,7 +506,8 @@ export class TasksController {
 		snapshotPath?: string;
 		snapshotCertainty?: "published" | "unverified";
 	}> {
-		const snapshot = await findRecoverySnapshot(this.root, taskSetId);
+		const walk = this.dependencies.findRecoverySnapshot ?? findRecoverySnapshot;
+		const snapshot = await walk(this.root, taskSetId);
 		return snapshot
 			? {
 					snapshotRevision: snapshot.revision,
@@ -589,15 +598,6 @@ export class TasksController {
 	}
 
 	/**
-	 * Whether the user has explicitly accounted for exactly this document.
-	 *
-	 * Exactly: same set, same revision, same bytes. The previous rule — "this
-	 * attachment has a reconciliation recorded" — made one `/tasks recover →
-	 * attach` a permanent licence to publish on top of anything unexplained for
-	 * the rest of the branch, which is a standing bypass wearing a decision's
-	 * clothes.
-	 */
-	/**
 	 * Turn the store's "I cannot account for this document" outcome into the same
 	 * recovery state every other path uses.
 	 *
@@ -607,27 +607,51 @@ export class TasksController {
 	 * there was nothing to recover, and the only way out was abandoning the set.
 	 * The classification in `adopt` is what makes this survive a refresh and a
 	 * restart; this is the write path reaching the same conclusion immediately.
+	 *
+	 * The snapshot walk it needs is a directory read plus a parse per candidate,
+	 * and a session can be replaced across it. So the conclusion is split in two:
+	 * the *outcome* describes the commit that actually happened and is returned
+	 * whatever else changed, while the *shared state* is only written if this is
+	 * still the operation's own session and attachment. Latching a conflict about
+	 * one task set onto the session that replaced it strands that session —
+	 * `refreshFromDisk` returns early while unattached, so nothing would ever
+	 * clear it, and `update_tasks` would answer `recovery_required` while
+	 * `get_tasks` answered `no_task_set`.
 	 */
 	private async enterUnaccountableRecovery(
 		ctx: ExtensionContext,
 		taskSetId: string,
+		scope: OperationScope,
 		result: { reason: string; revision: number },
 	): Promise<ToolOutcome> {
+		const attachment = this.attachment;
 		const hint = await this.snapshotHint(taskSetId);
-		this.recovery = {
-			reason: result.reason,
-			documentRevision: result.revision,
-			...(this.attachment ? { recordedRevision: this.attachment.revision } : {}),
-			unaccountable: true,
-			...hint,
-		};
-		this.refreshUi(ctx);
+		if (!scope.isStale() && this.attachment === attachment) {
+			this.recovery = {
+				reason: result.reason,
+				documentRevision: result.revision,
+				...(attachment ? { recordedRevision: attachment.revision } : {}),
+				unaccountable: true,
+				...hint,
+			};
+			this.refreshUi(ctx);
+		}
 		return fail(
 			"recovery_required",
 			`${result.reason}. Ask the user to run /tasks recover and choose attach or fork; the task set and its recorded revisions are still on disk. Do not create a replacement set and do not detach.`,
 			{ mutationsBlocked: true, documentRevision: result.revision },
 		);
 	}
+
+	/**
+	 * Whether the user has explicitly accounted for exactly this document.
+	 *
+	 * Exactly: same set, same revision, same bytes. The previous rule — "this
+	 * attachment has a reconciliation recorded" — made one `/tasks recover →
+	 * attach` a permanent licence to publish on top of anything unexplained for
+	 * the rest of the branch, which is a standing bypass wearing a decision's
+	 * clothes.
+	 */
 
 	private documentAuthorized(loaded: LoadedDocument | undefined): boolean {
 		const authorized = this.attachment?.authorizedDocument;
@@ -1010,7 +1034,7 @@ export class TasksController {
 			return fail("cancelled", `${result.reason}; no task set was created`);
 		}
 		if (result.kind === "unaccountable") {
-			return this.enterUnaccountableRecovery(ctx, taskSetId, result);
+			return this.enterUnaccountableRecovery(ctx, taskSetId, scope, result);
 		}
 		if (result.kind !== "committed") {
 			return fail(
@@ -1096,7 +1120,7 @@ export class TasksController {
 			return fail("cancelled", `${result.reason}; the task set is unchanged`);
 		}
 		if (result.kind === "unaccountable") {
-			return this.enterUnaccountableRecovery(ctx, taskSetId, result);
+			return this.enterUnaccountableRecovery(ctx, taskSetId, scope, result);
 		}
 		if (result.kind !== "committed") {
 			return fail(
@@ -1453,7 +1477,7 @@ export class TasksController {
 			});
 		}
 		if (result.kind === "unaccountable") {
-			return this.enterUnaccountableRecovery(ctx, persisted.taskSetId, result);
+			return this.enterUnaccountableRecovery(ctx, persisted.taskSetId, scope, result);
 		}
 		if (result.kind !== "committed") {
 			return fail(
@@ -1602,6 +1626,9 @@ export class TasksController {
 	}
 
 	async archive(ctx: ExtensionContext): Promise<boolean> {
+		// The scope this operation started in, so a conflict discovered while
+		// archiving cannot be written onto a session that has moved on since.
+		const scope = this.operationScope();
 		if (!this.loaded || !this.attachment) {
 			ctx.ui.notify("No task set is attached to archive.", "warning");
 			return false;
@@ -1633,7 +1660,7 @@ export class TasksController {
 			liveDocumentAuthorized: this.documentAuthorized(this.loaded),
 		});
 		if (result.kind === "unaccountable") {
-			await this.enterUnaccountableRecovery(ctx, this.loaded.document.set.taskSetId, result);
+			await this.enterUnaccountableRecovery(ctx, this.loaded.document.set.taskSetId, scope, result);
 			ctx.ui.notify(
 				`Unable to archive the task set: ${result.reason}. Run /tasks recover first.`,
 				"error",

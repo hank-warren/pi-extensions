@@ -265,3 +265,96 @@ test("the approval card does not promise a revision number the store may not use
 	assert.equal(/publishes revision \d/u.test(card?.body ?? ""), false);
 	assert.equal((card?.body ?? "").includes("revision 2"), false);
 });
+
+// ------ the unaccountable mapper must not contaminate a replacement session
+
+/**
+ * Reach the mapper for real.
+ *
+ * `adopt` and the store answer the same accountability question from different
+ * evidence, and there is one state where they legitimately disagree: a
+ * numbered snapshot holding bytes that are not the live document's, with the
+ * preparation record still matching. `isPublishedRevision` accepts it on the
+ * record, so classification says "same" and the write proceeds; the store's
+ * `repairMissingSnapshot` sees a snapshot that disagrees and returns
+ * `unaccountable`. That is what drives `update_tasks` into the mapper through
+ * its ordinary production path rather than by calling it directly.
+ */
+function makeSnapshotDisagree(harness: TasksHarness): void {
+	const snapshot = snapshotPath(harness.root, FIRST_SET, 1);
+	writeFileSync(snapshot, readFileSync(snapshot, "utf8").replace("flip the flag", "flip the fla9"));
+}
+
+test("a detach inside the unaccountable mapper leaves no recovery on the new session", async (t) => {
+	let harness: TasksHarness | undefined;
+	let detached = false;
+	harness = await seeded({
+		// Runs while the mapper is suspended on its snapshot walk — the exact
+		// window in which the session can be replaced underneath it.
+		onSnapshotWalk: async () => {
+			if (detached || !harness?.controller.attachedSet) return;
+			detached = true;
+			await harness.controller.startNew(harness.ctx);
+		},
+	});
+	t.after(() => harness?.cleanup());
+	makeSnapshotDisagree(harness);
+
+	const refused = await updateTasks(harness, {
+		mode: "apply",
+		changes: [{ op: "start", taskId: "t1" }],
+	});
+
+	assert.equal(detached, true, "the race must actually have been run");
+	// The outcome still describes the commit that really happened: this call was
+	// refused, and saying anything else would be a lie about the caller's write.
+	assert.equal(refused.isError, true);
+	assert.equal(refused.payload.status, "recovery_required");
+
+	// But none of it may stick to the session that replaced the attachment.
+	assert.equal(harness.controller.attachedSet, undefined);
+	assert.equal(
+		harness.controller.recoveryState,
+		undefined,
+		"a session with no task set must not inherit another set's conflict",
+	);
+	assert.equal(harness.controller.uiState.blocked, undefined, "no blocked widget/footer");
+	assert.equal(
+		await harness.systemPromptAddition(),
+		undefined,
+		"no per-turn recovery pointer for a set this session does not own",
+	);
+
+	// And the session is genuinely usable: a latched recovery used to make every
+	// non-init batch answer recovery_required while get_tasks said no_task_set.
+	const read = await callTool(harness, "get_tasks", {});
+	assert.equal(read.payload.status, "no_task_set");
+	const created = await callTool(harness, "update_tasks", { mode: "apply", changes: [SEED_INIT] });
+	assert.equal(created.payload.status, "applied");
+});
+
+test("without a detach the same mapper does record recovery on its own session", async (t) => {
+	const harness = await seeded();
+	t.after(harness.cleanup);
+	makeSnapshotDisagree(harness);
+
+	const refused = await updateTasks(harness, {
+		mode: "apply",
+		changes: [{ op: "start", taskId: "t1" }],
+	});
+
+	// The control for the test above: same path, nobody detaches, so the mapper
+	// does write its conclusion onto the session it belongs to. Without this, a
+	// guard that simply never recorded anything would pass the detach test.
+	assert.equal(refused.payload.status, "recovery_required");
+	assert.equal(harness.controller.recoveryState?.unaccountable, true);
+	assert.equal(harness.controller.recoveryState?.documentRevision, 1);
+	assert.equal(harness.controller.attachedSet?.taskSetId, FIRST_SET);
+	assert.equal(harness.controller.uiState.blocked !== undefined, true, "the widget shows it");
+	// Deliberately not asserted here: what the *next* turn refresh does with this
+	// state. In this particular corner the read side accepts the document on its
+	// preparation record while the write side refuses it, so a refresh clears the
+	// recovery again. That disagreement is a separately recorded P2 and is not in
+	// this pass's scope; asserting either way here would be claiming a verdict on
+	// it.
+});
