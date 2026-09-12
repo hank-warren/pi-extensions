@@ -15,6 +15,10 @@ interface PlanActionControllerOptions {
 	captureLifecycle(): MenuLifecycle;
 	statusText(): string;
 	planPathLine(): string | undefined;
+	/** A proposed revision is waiting for a decision. */
+	hasPendingRevision(): boolean;
+	reviewRevision(ctx: ExtensionContext): void | Promise<void>;
+	cancelRevision(ctx: ExtensionContext): void | Promise<void>;
 	getExportDestination(ctx: ExtensionContext): PlanExportDestination;
 	show(ctx: ExtensionContext): void | Promise<void>;
 	finalize(ctx: ExtensionContext): void;
@@ -54,6 +58,8 @@ export function createPlanActionController(options: PlanActionControllerOptions)
 			await ui.showPlanModeMenu(ctx, {
 				statusText: options.statusText(),
 				hasReadyPlan: options.getState().awaitingAction,
+				hasOpenRevision: options.getState().revision !== undefined,
+				hasPendingRevision: options.hasPendingRevision(),
 				planPathLine: options.planPathLine(),
 				getExportDestination: () => options.getExportDestination(ctx),
 				...lifecycle,
@@ -62,6 +68,8 @@ export function createPlanActionController(options: PlanActionControllerOptions)
 				implementHere: () => options.implementHere(ctx),
 				implementFresh: (signal) => freshAction(ctx, lifecycle, signal),
 				exportPlan: (path, signal) => options.exportPlan(ctx, path, signal, lifecycle.isCurrent),
+				reviewRevision: () => options.reviewRevision(ctx),
+				cancelRevision: () => options.cancelRevision(ctx),
 				stay: () => options.stay(ctx),
 				exit: () => options.exitReady(ctx),
 			});

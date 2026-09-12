@@ -16,7 +16,8 @@ import { basename, dirname, extname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 const PLANS_DIRECTORY = "plans";
-const MAX_PLAN_BYTES = 1024 * 1024;
+/** Refused outright rather than truncated: a bigger plan file is a broken one. */
+export const MAX_PLAN_BYTES = 1024 * 1024;
 
 /**
  * The durable plan file is the plan. Session state stores only its path, so a

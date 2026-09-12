@@ -353,7 +353,9 @@ test("staging happens on input, so before_agent_start finds the tool already act
 		entries.push({ type: "custom", customType: STATE_ENTRY_TYPE, data: { enabled: false, awaitingAction: false, planPath } });
 
 		await mock.events.get("input")?.[0]?.({ text: "implement", source: "extension" }, context.ctx);
-		assert.deepEqual(mock.setActiveToolsCalls, [["read", "edit", "plan_implemented"]]);
+		assert.deepEqual(mock.setActiveToolsCalls, [
+			["read", "edit", "plan_implemented", "update_plan"],
+		]);
 
 		const before = mock.setActiveToolsCalls.length;
 		await mock.events.get("before_agent_start")?.[0]?.({ systemPrompt: "base" }, context.ctx);

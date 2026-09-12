@@ -70,8 +70,8 @@ test("plan-mode registers flag, tools, command, and safety hooks", () => {
 	assert.ok(mock.flags.has("plan"));
 	assert.deepEqual(
 		mock.tools.map((tool) => tool.name).sort(),
-		["plan_implemented", "plan_mode_complete", "plan_mode_question"],
-		"all three tools are always registered, so a historical transcript resolves any of them",
+		["plan_implemented", "plan_mode_complete", "plan_mode_question", "update_plan"],
+		"all four tools are always registered, so a historical transcript resolves any of them",
 	);
 	assert.ok(mock.commands.has("plan"));
 	for (const event of ["session_start", "session_shutdown", "tool_call", "before_agent_start"]) {
@@ -110,17 +110,20 @@ test("Plan tools are staged and activation is monotonic for the source session",
 		await mock.commands.get("plan")?.handler("exit", context.ctx);
 		await mock.events.get("session_shutdown")?.[0]?.({}, context.ctx);
 
-		// Three writes for a whole plan lifecycle, each at a transition that
+		// Four writes for a whole plan lifecycle, each at a transition that
 		// already rewrites the system prompt: staging at session start, the
-		// planning tools on entry, plan_implemented on "implement". Nothing is
-		// ever removed, so the tool-list prefix stays cacheable between them.
+		// planning tools on entry, update_plan when a plan file first exists, and
+		// plan_implemented on "implement". Nothing is ever removed, so the tool-list
+		// prefix stays cacheable between them.
 		const planning = [
 			"read", "bash", "edit", "write", "subagent", "plan_mode_complete", "plan_mode_question",
 		];
-		const implementing = [...planning, "plan_implemented"];
+		const revisable = [...planning, "update_plan"];
+		const implementing = [...revisable, "plan_implemented"];
 		assert.deepEqual(mock.setActiveToolsCalls, [
 			["read", "bash", "edit", "write", "subagent"],
 			planning,
+			revisable,
 			implementing,
 		]);
 		assert.deepEqual(mock.rawPi.getActiveTools(), implementing);
@@ -325,8 +328,13 @@ test("before_agent_start injects the plan path, never the plan body", async () =
 			!systemPrompt.includes("Unmistakable-plan-content-marker"),
 			"the plan body must never be injected into context",
 		);
-		// The pointer is a single line regardless of plan size.
-		assert.equal(buildActivePlanPointer(planPath).split("\n").length, 1);
+		// The pointer is a fixed handful of lines regardless of plan size: the path,
+		// and how to change the plan. Never the plan.
+		assert.equal(buildActivePlanPointer(planPath).split("\n").length, 2);
+		assert.equal(
+			buildActivePlanPointer(planPath, { revision: 7, approvalNotice: "changed" }).split("\n").length,
+			3,
+		);
 	});
 });
 
@@ -1175,6 +1183,10 @@ test("a resumed implementation session stages plan_implemented once, at session 
 		await mock.events.get("before_agent_start")?.[0]?.({ systemPrompt: "base" }, context.ctx);
 		await mock.events.get("before_agent_start")?.[0]?.({ systemPrompt: "base" }, context.ctx);
 
-		assert.deepEqual(mock.setActiveToolsCalls, [["read", "edit", "plan_implemented"]]);
+		// One write, both tools: finishing needs plan_implemented and changing the
+		// plan needs update_plan, and both become possible at the same moment.
+		assert.deepEqual(mock.setActiveToolsCalls, [
+			["read", "edit", "plan_implemented", "update_plan"],
+		]);
 	});
 });

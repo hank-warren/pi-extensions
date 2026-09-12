@@ -1,6 +1,7 @@
 import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readPlanFile } from "./plan-file.js";
-import type { PlanModeState } from "./state.js";
+import { digestOf } from "./revision-store.js";
+import { PLAN_STATE_SCHEMA_VERSION, type PlanModeState } from "./state.js";
 
 type NewSessionOptions = Exclude<Parameters<ExtensionCommandContext["newSession"]>[0], undefined>;
 type ReplacementContext = Parameters<NonNullable<NewSessionOptions["withSession"]>>[0];
@@ -10,6 +11,16 @@ interface FreshImplementationRequest {
 	planPath: string;
 	stateEntryType: string;
 	isCurrent(): boolean;
+	/**
+	 * The managed identity and approval the destination inherits.
+	 *
+	 * Choosing "start fresh and implement" *is* the approval, so the digest of the
+	 * bytes being handed over crosses with the plan. Without it the destination
+	 * would start implementing a plan whose approval it could not verify and would
+	 * refuse to complete — approval would be lost at exactly the boundary the user
+	 * just crossed deliberately.
+	 */
+	managed?: Partial<PlanModeState>;
 }
 
 interface FreshImplementationFromStateOptions {
@@ -61,11 +72,21 @@ export async function startFreshImplementationFromState(
 			current.planPath === planPath
 		);
 	};
+	const digest = digestOf(plan);
 	return startFreshImplementationSession(ctx, {
 		plan,
 		planPath,
 		stateEntryType: options.stateEntryType,
 		isCurrent,
+		managed: {
+			schemaVersion: PLAN_STATE_SCHEMA_VERSION,
+			...(initialState.planId ? { planId: initialState.planId } : {}),
+			...(initialState.specRevision !== undefined
+				? { specRevision: initialState.specRevision }
+				: {}),
+			currentDigest: digest,
+			approvedDigest: digest,
+		},
 	});
 }
 
@@ -88,6 +109,7 @@ export async function startFreshImplementationSession(
 		enabled: false,
 		awaitingAction: false,
 		planPath: request.planPath,
+		...request.managed,
 	};
 	const handoff = formatImplementationHandoff(request.planPath);
 	const parentSession = ctx.sessionManager.getSessionFile();

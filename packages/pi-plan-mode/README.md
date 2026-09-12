@@ -13,7 +13,9 @@ The plan is written to a **durable file** that survives compaction, survives res
 - `/plan` mode with a planning system prompt: explore first, ask decision questions, do not implement.
 - `plan_mode_question` for structured 1-3 question decision points with options and a free-form path — or `ask_user_question` when that is installed (see below).
 - `plan_mode_complete({ plan })` writes the plan to `<agent dir>/plans/<session-id>.md`.
-- **Pointer, not payload.** An active plan adds one line to the system prompt naming the file. The plan body is never injected into context, so a 50-page plan costs the same as a one-liner and survives compaction for free.
+- `update_plan` revises a plan that already exists, conversationally: you ask for the change, the agent rewrites the plan, and you accept, send it back, or cancel on a card showing the **computed diff**. See [Revising an existing plan](#-revising-an-existing-plan).
+- **Approval binds to bytes.** Choosing to implement records the digest of the exact plan it approved; a plan whose file changed afterwards, or one this session never approved, is reported as unverified and cannot be marked implemented until you resolve it.
+- **Pointer, not payload.** An active plan adds two lines to the system prompt: the file to read, and how to change it. The plan body is never injected into context, so a 50-page plan costs the same as a one-liner and survives compaction for free.
 - Two ways to implement: continue in this conversation, or open a fresh session that reads the same file.
 - `plan_implemented` lets the model end implementation itself once the plan's verification has passed; `/plan done` does the same by hand. The plan file is **archived**, never deleted, so a session that plans several times keeps every plan.
 - `/plan export [path]` copies the plan anywhere, never overwriting an existing target.
@@ -36,6 +38,8 @@ pi -e npm:@hank-warren/pi-plan-mode
 
 ```text
 /plan                 open the menu for the current state
+                      (during a revision: review it, cancel it, or keep going;
+                       while implementing an unverified plan: confirm the file)
 /plan start           enter Plan mode without sending a prompt
 /plan <prompt>        enter Plan mode and start planning <prompt>
 /plan show            display the stored plan
@@ -51,6 +55,8 @@ pi -e npm:@hank-warren/pi-plan-mode
 While Plan mode is active, ask the agent to design the change. It can read, search, and run commands, but `edit` and `write` are blocked. When the plan is decision-complete, the agent calls `plan_mode_complete` and the plan is written to disk.
 
 A completed plan is not final until you act on it: just type feedback to revise — the next planning turn supersedes the proposed plan, and the next `plan_mode_complete` replaces it.
+
+Once a plan exists — waiting to be implemented, or already being implemented — changing it goes through `update_plan` instead, which keeps a reviewable history. See [Revising an existing plan](#-revising-an-existing-plan).
 
 From a completed plan you can:
 
@@ -75,6 +81,55 @@ A **fresh implementation session shares its parent's plan file**, so when it fin
 
 Print and JSON modes cannot show the interactive menu; use `/plan start`, `/plan <prompt>`, `/plan show`, `/plan export`, and `/plan exit` there.
 
+## 🔁 Revising an existing plan
+
+Once there is a plan, you change it by **saying what you want changed**. Not by editing Markdown, not by running a revise command:
+
+> change the deployment approach to a rolling restart, but keep the migration work
+
+The agent calls `update_plan` twice. `action: "begin"` opens a revision — the approved plan is kept exactly as it is, Plan mode's non-mutation rules come back (so `edit` and `write` are blocked from the next tool call onward), and your request is recorded with the revision. The agent then re-reads the plan, asks only what the change actually raises, and calls `action: "propose"` with the **complete rewritten plan**.
+
+Proposing opens a review card, in the same turn, without any command from you:
+
+- **Accept revision** — it becomes the current plan, and you then choose how to implement it.
+- **Request changes…** — your words go back to the agent, which proposes again. The rejected candidate is retired and kept on file.
+- **Show the changes / Show the proposed plan** — the computed diff, and the full text.
+- **Cancel revision** — the approved plan and its approval are untouched.
+
+The card shows a diff **this package computed** from the two documents, with the agent's `changeSummary` beside it, clearly labelled as the agent's account. A summary cannot be wrong about itself; a diff can. There is no classifier deciding which changes are "material" — you read the change and decide.
+
+Closing the card without choosing is not a decision: the candidate waits, implementation stays paused, and `/plan` → **Review the proposed revision** reopens it. A headless session (print, JSON) cannot show a card, so it saves the candidate and reports `pending_review` rather than inventing an approval.
+
+Accepting makes the revision **current but not yet approved**: the same "what next?" menu a completed plan opens appears, and choosing to implement is what approves those exact bytes. Cancelling leaves execution paused the same way, so nothing silently resumes against a plan you were in the middle of changing.
+
+### Revision history
+
+The live plan file stays where it always was. Beside it, `<agent dir>/plans/.revisions/<plan-id>/` holds the record:
+
+```txt
+plans/.revisions/<plan-id>/
+├── manifest.json          which revision the plan file is, and the history index
+├── revisions/<n>.md       the immutable snapshot of revision n
+├── proposals/<id>.json    candidates, including the ones you rejected
+├── external/<digest>.md   bytes found in the plan file that this package did not write
+└── manifest.lock          the cross-process lock
+```
+
+A plan gains a history the first time something managed happens to it — a revision, or an approval — never in bulk at session start. Nothing here is ever overwritten: revision numbers are allocated past everything ever reserved, so gaps are normal and a number is never reused. Clearing a plan from a session clears the session's pointer, not the record.
+
+Publication order is: prepare the candidate bytes and a record of what they are, replace the plan file, then write the snapshot and the manifest. A crash between the second and third steps is repaired at the next session start — but only on evidence that this package published exactly those bytes. Plan-file contents that no record explains are **not** adopted as a revision and never count as approval: they are reported, kept, and left for you to reconcile (by asking for a revision) or confirm (from `/plan`).
+
+`proper-lockfile` serialises two cooperating Pi sessions revising one plan, and the base digest is rechecked under the lock immediately before the plan file is replaced. That is optimistic conflict detection, not a compare-and-swap: an editor that ignores the lock and rewrites the file between the check and the rename wins. What is promised is that such a write is *detected* at the next read, and that every revision this package published is still on disk.
+
+### When approval cannot be verified
+
+Approval is the digest of the bytes you approved, so two situations read as unverified:
+
+- **The plan file changed after it was approved** — a hand-edit, or another session.
+- **This session never recorded an approval** — a plan carried in from a version before managed approval.
+
+Either way the footer becomes `▶ plan · unverified → /plan`, the system prompt tells the model not to claim the plan was implemented, and every completion path refuses. Two things resolve it, both deliberate: ask for a revision (`update_plan` reconciles the file, and accepting it records the result), or `/plan` → **Confirm the plan file**, which records the file exactly as it is as approved and as a revision in its history. Nothing resolves it automatically, and no model-callable tool can bypass it.
+
 ## 📄 The plan file
 
 The plan lives at `<agent dir>/plans/<session-id>.md` — normally `~/.pi/agent/plans/<session-id>.md`.
@@ -84,7 +139,8 @@ The plan lives at `<agent dir>/plans/<session-id>.md` — normally `~/.pi/agent/
 - **It survives compaction** because the model only ever sees a one-line pointer to it, and re-reads the file when needed.
 - **A fresh implementation session points at the same file.** The plan is never copied, so both sessions see the same content.
 - **Finishing archives it** to `<session-id>.<n>.md` in the same directory, numbered upward, so the next plan in the session gets a clean slot without overwriting the last one.
-- `/plan exit` on a *proposed* plan deletes it. Export first if you want to keep a copy.
+- `/plan exit` on a *proposed* plan deletes it. Export first if you want to keep a copy. Its recorded revisions under `.revisions/` are kept either way.
+- **A hand-edit is still read, and now also noticed.** Everything reads from disk as before, and an edit that moves the file away from the bytes you approved is reported instead of passing silently.
 
 Writes are atomic (temp file plus rename), so a reader never sees a partial plan.
 
@@ -114,7 +170,7 @@ A settings file that does not parse is reported at session start and the default
 
 Plan mode blocks exactly two tools while planning: `edit` and `write`. That is the whole enforcement surface.
 
-Its own tools are **staged, and never withdrawn mid-session**: `plan_mode_complete` joins the active set when Plan mode is entered, `plan_implemented` joins when implementation starts, and each stays until the session ends, refusing to run outside its phase. Staging happens on the `input` event, before Pi snapshots the base system prompt for the turn, so a staged tool ships with its guideline on the same turn rather than the next. Both joins land on a transition that already rewrites the system prompt, so a plan's whole lifecycle changes the **tool list** twice, at moments the mode switch was paying for anyway. The system prompt itself changes at those two moments and once more when implementation ends (the pointer line leaves); nothing else Plan mode does changes either between turns.
+Its own tools are **staged, and never withdrawn mid-session**: `plan_mode_complete` joins the active set when Plan mode is entered, `update_plan` joins as soon as a plan file exists, `plan_implemented` joins when implementation starts, and each stays until the session ends, refusing to run outside its phase. Staging happens on the `input` event, before Pi snapshots the base system prompt for the turn, so a staged tool ships with its guideline on the same turn rather than the next. Each join lands on a transition that already rewrites the system prompt, so a plan's whole lifecycle changes the **tool list** three times, at moments the mode switch was paying for anyway. The system prompt itself changes at those two moments and once more when implementation ends (the pointer line leaves); nothing else Plan mode does changes either between turns.
 
 The one exception is the `plan_mode_question` fallback, which follows `ask_user_question`'s availability and so can leave and rejoin when that changes mid-session (a headless turn, or the package being installed or removed) — rare, and older than this design. Checklist tools (a `todo` extension, for example) are deliberately not blocked — a task list is ephemeral planning scratch, and the planning prompt steers the model away from execution-progress tracking.
 
@@ -150,9 +206,11 @@ It used to be a skill. A skill's description line is in every system prompt, whi
 The footer status and the widget above the editor render from **one formatter**, so they cannot drift, and they share a glyph vocabulary with the sibling [`pi-loop`](../pi-loop): `◆` for a state wanting a decision, `▶` for work under way.
 
 - `◆ plan · drafting` — planning is under way.
-- `◆ plan · revising` — feedback superseded a completed plan; the stored one is not current.
+- `◆ plan · revising` — a revision of an existing plan is being written, or feedback superseded a completed plan; the stored plan is not current.
+- `◆ plan · revision ready → /plan` — a proposed revision is waiting for your decision.
 - `◆ plan · ready → /plan` — a completed plan is waiting for your choice.
 - `▶ plan · implementing` — a plan file is active and guiding implementation.
+- `▶ plan · unverified → /plan` — implementing a plan whose approval cannot be verified.
 
 The widget adds a dim second line naming what to do next.
 
@@ -162,10 +220,13 @@ The widget adds a dim second line naming what to do next.
 packages/pi-plan-mode/
 ├── index.ts              # Pi package entrypoint
 ├── src/
-│   ├── plan-mode.ts      # Extension registration, mode state, hooks
-│   ├── plan-file.ts      # Durable plan file read/write/delete
-│   ├── interactive-ui.ts # Lazily loaded interactive menus
-│   └── *.ts              # Prompt, question, export, settings modules
+│   ├── plan-mode.ts               # Extension registration, mode state, hooks
+│   ├── plan-file.ts               # Durable plan file read/write/archive
+│   ├── revision-store.ts          # Manifest, snapshots, proposals, locking, recovery
+│   ├── plan-revision-controller.ts # update_plan begin/propose, review, approval
+│   ├── plan-diff.ts               # The computed diff the review card shows
+│   ├── interactive-ui.ts          # Lazily loaded interactive menus
+│   └── *.ts                       # Prompt, question, export, settings modules
 ├── docs/plan-craft.md    # Plan-crafting depth, injected by path while the mode is active
 ├── test/
 ├── README.md

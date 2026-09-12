@@ -10,6 +10,7 @@ import {
 	createMockPi,
 } from "../../../test/support/mock-pi.js";
 import planMode, { completePlanArguments, planFilePathForSession } from "../src/plan-mode.js";
+import { digestOf } from "../src/revision-store.js";
 
 const PLAN = "# Exported plan\n\n1. Keep the exact plan.\n2. Make it readable to the agent.";
 const STATE_ENTRY_TYPE = "plan-mode-state";
@@ -60,8 +61,21 @@ async function withTempDirectory(run: (directory: string) => Promise<void>) {
 async function storedPlanEntry(sessionId: string, enabled = false) {
 	const planPath = planFilePathForSession(sessionId);
 	await mkdir(dirname(planPath), { recursive: true });
-	await writeFile(planPath, `${PLAN}\n`, "utf8");
-	return { entry: stateEntry({ enabled, awaitingAction: enabled, planPath }), planPath };
+	const contents = `${PLAN}\n`;
+	await writeFile(planPath, contents, "utf8");
+	// `approvedDigest` is what an implementing session records when the user
+	// chooses to implement; without it the restored state is approval-unknown,
+	// which is a different state with a different footer and a gated completion.
+	return {
+		entry: stateEntry({
+			schemaVersion: 2,
+			enabled,
+			awaitingAction: enabled,
+			planPath,
+			approvedDigest: digestOf(contents),
+		}),
+		planPath,
+	};
 }
 
 test("plan export autocomplete exposes a path-taking public route", () => {
@@ -98,7 +112,7 @@ test("ready plan export ends Plan mode without triggering a model turn", async (
 		assert.equal(persistedState.planPath, undefined);
 		assert.equal(persistedState.awaitingAction, false);
 		assert.deepEqual(mock.rawPi.getActiveTools(), [
-			"read", "edit", "plan_mode_complete", "plan_mode_question",
+			"read", "edit", "plan_mode_complete", "plan_mode_question", "update_plan",
 		]);
 		assert.deepEqual(mock.thinkingLevels, [], "an export must not set a thinking level either");
 		assert.equal(mock.sentUserMessages.length, 0);

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { createCustomSelectorHarness, createMockContext, createMockPi } from "../../../test/support/mock-pi.js";
@@ -13,6 +13,7 @@ import {
 import { planFilePathForSession } from "../src/plan-file.js";
 import { showReadyPlanMenu } from "../src/plan-action-menus.js";
 import planMode from "../src/plan-mode.js";
+import { digestOf } from "../src/revision-store.js";
 
 const PLAN = `# Fresh implementation plan
 
@@ -210,16 +211,33 @@ test("fresh implementation links the destination to the same plan file", async (
 		const planPath = planFilePathForSession("test-session");
 		assert.equal(newSessionCalls, 1);
 		assert.equal(parentSession, "/sessions/planning.jsonl");
-		assert.equal(mock.entries.length, sourceEntriesBefore);
+		// One new source entry: the plan gains a managed identity so the destination
+		// can name it. The source's own mode is untouched.
+		assert.equal(mock.entries.length, sourceEntriesBefore + 1);
+		const sourceState = mock.entries.at(-1)?.data as Record<string, unknown>;
+		assert.equal(sourceState.enabled, true);
+		assert.equal(sourceState.awaitingAction, true);
+		assert.equal(sourceState.planPath, planPath);
+		assert.equal(typeof sourceState.planId, "string");
+		assert.equal(sourceState.specRevision, 1);
 		assert.equal(mock.sentUserMessages.length, 0);
 		assert.equal(destinationEntries.length, 1);
 		const destinationState = destinationEntries[0]?.data as {
 			enabled?: boolean;
 			planPath?: string;
+			planId?: string;
+			specRevision?: number;
+			approvedDigest?: string;
 		};
 		assert.equal(destinationState.enabled, false);
 		// The destination points at the same file rather than copying the plan.
 		assert.equal(destinationState.planPath, planPath);
+		// Choosing "start fresh and implement" is the approval, so the digest of the
+		// bytes being handed over crosses with the plan; otherwise the destination
+		// would implement a plan it could not verify and refuse to complete it.
+		assert.equal(destinationState.planId, sourceState.planId);
+		assert.equal(destinationState.specRevision, 1);
+		assert.equal(destinationState.approvedDigest, digestOf(`${PLAN}\n`));
 		assert.equal(replacementMessages.length, 1);
 		assert.ok(replacementMessages[0]?.includes(planPath));
 		assert.ok(!replacementMessages[0]?.includes("Exclude the planning conversation"));
@@ -286,7 +304,17 @@ test("a fresh destination adopts its plan pointer on the first turn", async () =
 		await mock.events.get("session_start")?.[0]?.({ reason: "new" }, context.ctx);
 		assert.equal(context.statuses.get("plan-mode"), undefined);
 
-		entries.push(stateEntry({ enabled: false, awaitingAction: false, planPath }));
+		await mkdir(dirname(planPath), { recursive: true });
+		await writeFile(planPath, `${PLAN}\n`, "utf8");
+		entries.push(
+			stateEntry({
+				schemaVersion: 2,
+				enabled: false,
+				awaitingAction: false,
+				planPath,
+				approvedDigest: digestOf(`${PLAN}\n`),
+			}),
+		);
 		const result = (await mock.events.get("before_agent_start")?.[0]?.(
 			{ prompt: formatImplementationHandoff(planPath), systemPrompt: "system" },
 			context.ctx,
@@ -294,10 +322,53 @@ test("a fresh destination adopts its plan pointer on the first turn", async () =
 
 		assert.equal(context.statuses.get("plan-mode"), "▶ plan · implementing");
 		assert.ok(result?.systemPrompt?.includes(planPath));
-		// The destination stages plan_implemented on its first turn, alongside
-		// the pointer line: one write, at the one moment the prompt changes anyway.
-		assert.deepEqual(mock.setActiveToolsCalls, [["read", "edit", "plan_implemented"]]);
+		assert.match(result?.systemPrompt ?? "", /update_plan/);
+		// The destination stages both plan tools on its first turn, alongside the
+		// pointer line: one write, at the one moment the prompt changes anyway.
+		assert.deepEqual(mock.setActiveToolsCalls, [
+			["read", "edit", "plan_implemented", "update_plan"],
+		]);
 		assert.ok(!mock.rawPi.getActiveTools().includes("plan_mode_complete"));
+	});
+});
+
+test("a destination seeded before managed approval reads as unverified, not approved", async () => {
+	// A state entry written by an earlier version has no approvedDigest. That is
+	// deliberately not the same as approved: the plan is preserved and readable,
+	// but completion asks before claiming the agreed plan was implemented.
+	await withAgentDir(async () => {
+		const entries: Array<{ type: "custom"; customType: string; data: unknown }> = [];
+		const mock = createMockPi({ activeTools: ["read", "edit"] });
+		planMode(mock.pi, MISSING_SETTINGS);
+		const planPath = planFilePathForSession("test-session");
+		await mkdir(dirname(planPath), { recursive: true });
+		await writeFile(planPath, `${PLAN}\n`, "utf8");
+		const context = createMockContext({
+			sessionManager: {
+				getSessionId: () => "test-session",
+				getSessionFile: () => "/sessions/implementation.jsonl",
+				getBranch: () => entries,
+				getEntries: () => entries,
+			},
+		});
+		entries.push(stateEntry({ enabled: false, awaitingAction: false, planPath }));
+		await mock.events.get("session_start")?.[0]?.({ reason: "resume" }, context.ctx);
+
+		assert.equal(context.statuses.get("plan-mode"), "▶ plan · unverified → /plan");
+		const result = (await mock.events.get("before_agent_start")?.[0]?.(
+			{ systemPrompt: "system" },
+			context.ctx,
+		)) as { systemPrompt?: string } | undefined;
+		assert.match(result?.systemPrompt ?? "", /no record of the exact plan bytes that were approved/);
+
+		const implemented = mock.tools.find((tool) => tool.name === "plan_implemented")?.execute as
+			| ((...args: unknown[]) => Promise<unknown>)
+			| undefined;
+		assert.ok(implemented);
+		await assert.rejects(
+			implemented("call", {}, undefined, undefined, context.ctx),
+			/Confirm the plan file/,
+		);
 	});
 });
 

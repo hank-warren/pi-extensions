@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { defineMenu, runMenu } from "@narumitw/pi-tui-kit";
+import { type ActionsScreen, defineMenu, runMenu } from "@narumitw/pi-tui-kit";
 import { type PlanExportDestinationProvider, planExportInputScreen } from "./plan-export-screen.js";
 
 interface MenuLifecycle {
@@ -16,6 +16,10 @@ const IMPLEMENTATION_CONTEXT_LINES = [
 interface PlanMenuOptions extends MenuLifecycle {
 	statusText: string;
 	hasReadyPlan: boolean;
+	/** A revision transaction is open, so the approved plan is being changed. */
+	hasOpenRevision: boolean;
+	/** A proposed revision is waiting for a decision. */
+	hasPendingRevision: boolean;
 	planPathLine?: string;
 	getExportDestination: PlanExportDestinationProvider;
 	show(): void | Promise<void>;
@@ -23,6 +27,8 @@ interface PlanMenuOptions extends MenuLifecycle {
 	implementHere(): void | Promise<void>;
 	implementFresh(signal: AbortSignal): void | Promise<void>;
 	exportPlan(path: string, signal: AbortSignal): Promise<boolean>;
+	reviewRevision(): void | Promise<void>;
+	cancelRevision(): void | Promise<void>;
 	stay(): void;
 	exit(): void;
 }
@@ -35,24 +41,53 @@ export async function showPlanModeMenu(ctx: ExtensionContext, options: PlanMenuO
 		| "implement-here"
 		| "implement-fresh"
 		| "export"
+		| "review-revision"
+		| "cancel-revision"
 		| "stay"
 		| "exit";
+	/**
+	 * A revision replaces the drafting items rather than joining them. "Request
+	 * final plan" during a revision would ask for a `plan_mode_complete` that is
+	 * refused while the transaction is open, and "Exit Plan mode" would discard the
+	 * approved plan the revision exists to change.
+	 */
+	const revisionItems: ActionsScreen<Screen, Action>["items"] = [
+		{ id: "show", label: "Show the current plan", action: "show" },
+		{
+			id: "review-revision",
+			label: "Review the proposed revision",
+			description: options.hasPendingRevision
+				? "Accept it, ask for changes, or cancel it."
+				: "Nothing has been proposed yet.",
+			action: "review-revision",
+			disabled: !options.hasPendingRevision,
+		},
+		{
+			id: "cancel-revision",
+			label: "Cancel the revision",
+			description: "Keep the approved plan exactly as it is.",
+			action: "cancel-revision",
+		},
+		{ id: "stay", label: "Keep revising", action: "stay" },
+	];
 	const menu = defineMenu<undefined, Screen, Action, ExtensionContext>({
 		start: "main",
 		screens: {
 			main: () => ({
 				kind: "actions",
-				title: "Plan mode",
+				title: options.hasOpenRevision ? "Plan revision" : "Plan mode",
 				lines: [
 					options.statusText,
-					...(options.hasReadyPlan
-						? [
-								...IMPLEMENTATION_CONTEXT_LINES,
-								...(options.planPathLine ? [options.planPathLine] : []),
-							]
+					...(options.hasReadyPlan && !options.hasOpenRevision
+						? [...IMPLEMENTATION_CONTEXT_LINES]
+						: []),
+					...(options.planPathLine && (options.hasReadyPlan || options.hasOpenRevision)
+						? [options.planPathLine]
 						: []),
 				],
-				items: options.hasReadyPlan
+				items: options.hasOpenRevision
+					? revisionItems
+					: options.hasReadyPlan
 					? [
 							{ id: "show", label: "Show latest proposed plan", action: "show" },
 							{
@@ -100,6 +135,14 @@ export async function showPlanModeMenu(ctx: ExtensionContext, options: PlanMenuO
 			},
 			export: async ({ value, signal }) =>
 				(await options.exportPlan(value ?? "", signal)) ? { kind: "close" } : { kind: "rejected" },
+			"review-revision": async () => {
+				await options.reviewRevision();
+				return { kind: "close" };
+			},
+			"cancel-revision": async () => {
+				await options.cancelRevision();
+				return { kind: "close" };
+			},
 			stay: async () => {
 				options.stay();
 				return { kind: "close" };

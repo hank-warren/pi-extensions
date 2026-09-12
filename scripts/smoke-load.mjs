@@ -55,7 +55,7 @@ const EXPECTED_SURFACES = {
 		handlers: ["session_shutdown", "session_start", "tool_call", "tool_execution_end"],
 	},
 	"./packages/pi-plan-mode/index.ts": {
-		tools: ["plan_implemented", "plan_mode_complete", "plan_mode_question"],
+		tools: ["plan_implemented", "plan_mode_complete", "plan_mode_question", "update_plan"],
 		commands: ["plan"],
 		flags: ["plan"],
 		// No agent_end hook: the legacy <proposed_plan> completion path is gone.

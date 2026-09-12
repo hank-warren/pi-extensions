@@ -83,8 +83,39 @@ interface PlanModeView {
 	tone: "accent" | "normal";
 }
 
-export function planModeView(state: PlanModeState): PlanModeView | undefined {
+/**
+ * What the state alone cannot say.
+ *
+ * Approval is a comparison against the file on disk, so it is read
+ * asynchronously and handed in rather than derived here; the widget has to stay
+ * a pure function of what it is given.
+ */
+export interface PlanModeViewDetail {
+	/** Set while implementing a plan whose approval is unknown or stale. */
+	approvalNotice?: string;
+}
+
+export function planModeView(
+	state: PlanModeState,
+	detail: PlanModeViewDetail = {},
+): PlanModeView | undefined {
 	if (state.enabled) {
+		// A revision transaction outranks the ready plan: the plan on disk is what
+		// the user approved, and the thing being decided is whether to change it.
+		if (state.revision) {
+			const proposed = state.revision.proposalId !== undefined;
+			return {
+				phase: "revising",
+				footer: proposed ? "◆ plan · revision ready → /plan" : "◆ plan · revising",
+				headline: proposed
+					? "◆ plan · proposed revision ready"
+					: "◆ plan · revising the approved plan",
+				hint: proposed
+					? "/plan to accept it, ask for changes, or cancel the revision."
+					: "The approved plan is unchanged until a revision is accepted.",
+				tone: "accent",
+			};
+		}
 		if (state.awaitingAction) {
 			return {
 				phase: "ready",
@@ -115,6 +146,17 @@ export function planModeView(state: PlanModeState): PlanModeView | undefined {
 		};
 	}
 	if (state.planPath) {
+		// Implementing bytes nobody in this session agreed to is not the same as
+		// implementing, and the footer is the only place a user would notice.
+		if (detail.approvalNotice) {
+			return {
+				phase: "implementing",
+				footer: "▶ plan · unverified → /plan",
+				headline: "▶ plan · implementing an unverified plan",
+				hint: "/plan to confirm the plan file, or ask for a revision.",
+				tone: "accent",
+			};
+		}
 		return {
 			phase: "implementing",
 			footer: "▶ plan · implementing",
@@ -138,8 +180,12 @@ interface WidgetTheme {
 
 type WidgetFactory = Parameters<ExtensionContext["ui"]["setWidget"]>[1];
 
-export function updatePlanModeUi(ctx: ExtensionContext, state: PlanModeState) {
-	const view = planModeView(state);
+export function updatePlanModeUi(
+	ctx: ExtensionContext,
+	state: PlanModeState,
+	detail: PlanModeViewDetail = {},
+) {
+	const view = planModeView(state, detail);
 	ctx.ui.setStatus(STATUS_KEY, view?.footer);
 	if (!view) {
 		ctx.ui.setWidget(PLAN_WIDGET_KEY, undefined);
@@ -191,13 +237,17 @@ export async function showStoredPlan(
 		);
 		return;
 	}
-	// enabled without awaitingAction but with a stored plan means revision
+	// A managed revision shows the plan that is still current, because that is
+	// what the file holds: the candidate lives on the review card, not here.
+	// enabled without awaitingAction and without a transaction means revision
 	// feedback superseded the completed plan: show it, but never as current.
-	const title = state.enabled
-		? state.awaitingAction
-			? "Proposed Plan"
-			: "Superseded Proposed Plan (revision in progress — awaiting a new plan_mode_complete)"
-		: "Active Implementation Plan";
+	const title = state.revision
+		? `Current Plan (revision in progress against revision ${state.revision.baseRevision})`
+		: state.enabled
+			? state.awaitingAction
+				? "Proposed Plan"
+				: "Superseded Proposed Plan (revision in progress — awaiting a new plan_mode_complete)"
+			: "Active Implementation Plan";
 	showPlanModePlan(pi, ctx, title, plan);
 }
 
@@ -216,14 +266,23 @@ export function showPlanModePlan(
 }
 
 /** The sentence form, for menus, notifications, and non-TUI modes. */
-export function planModeStatusText(state: PlanModeState) {
+export function planModeStatusText(state: PlanModeState, detail: PlanModeViewDetail = {}) {
 	if (state.enabled) {
+		if (state.revision) {
+			return state.revision.proposalId !== undefined
+				? `A revision of the approved plan is proposed and waiting for your decision (base revision ${state.revision.baseRevision}).`
+				: `A revision of the approved plan is in progress (base revision ${state.revision.baseRevision}). The approved plan is unchanged until a revision is accepted.`;
+		}
 		if (state.awaitingAction) return "Plan mode is active and a proposed plan is ready.";
 		if (state.planPath) {
 			return "Plan mode is active; revision in progress. The stored plan is superseded until the next plan_mode_complete.";
 		}
 		return "Plan mode is active. Explore, ask, and finish with plan_mode_complete when decision-ready.";
 	}
-	if (state.planPath) return "An implementation plan is active.";
+	if (state.planPath) {
+		return detail.approvalNotice
+			? `An implementation plan is active, but its approval cannot be verified. ${detail.approvalNotice}`
+			: "An implementation plan is active.";
+	}
 	return "Plan mode is off.";
 }
