@@ -265,6 +265,41 @@ packages/pi-plan-mode/
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
 
+## Connected plan and task tracking
+
+When `@hank-warren/pi-tasks` is also loaded, the agent supplies `tasks` on `plan_mode_complete` and `update_plan(action: "propose")`:
+
+```json
+{
+  "expectedTaskRevision": 3,
+  "phases": [{
+    "id": "p1",
+    "name": "Delivery",
+    "tasks": [
+      { "id": "t1", "content": "Migrate the schema" },
+      { "id": "t2", "content": "Deploy with a rolling restart" },
+      { "content": "Observe production" }
+    ]
+  }]
+}
+```
+
+Initial seeds omit IDs and use revision 0 (or omit it). `update_plan(begin)` returns current task IDs, revision, statuses and completion evidence. The agent reconciles the whole task structure, even when unchanged. Retained IDs preserve progress; new items get IDs; removals stay in history. A closed task whose content changes needs `reopen: true`, which retains its old completion as history rather than treating it as verification of the new scope.
+
+The review contains **both computed diffs**. Routine `update_tasks(mode: "apply")` progress does not invalidate plan approval. Bound scope changes and task-only proposals return `requires_plan_revision` and the proposed changes, directing the agent back to the combined flow. No manual editing or revision command is required.
+
+Implementation binds a dedicated task set without overwriting unrelated standalone tasks. Every completion entry point reads the current bound set: pending, in-progress and blocked tasks refuse completion; completed and explicitly abandoned tasks are terminal. Abandoned counts are displayed, not hidden. Cached status events are display-only, never completion authority.
+
+### Failure and handoff behavior
+
+The two files are **not one atomic transaction**. A proposal is saved and task revisions checked before the plan publishes. Task binding is then acknowledged durably before implementation can start. If a task changes between checks, a write fails, or an acknowledgement is lost, the plan may already be published, but remains unapproved/blocked and the proposal is retained. Retry the explicit implementation choice for a lost acknowledgement; a genuinely stale task revision requires a fresh combined proposal. Exact binding retries preserve intervening progress rather than allocating or reopening twice.
+
+A fresh implementation session receives the approved plan identity and a task attachment in its setup entries. Both are revalidated before kickoff. Setup or provider failures produce a recoverable partial session, never a claimed successful kickoff. Ordinary new sessions inherit neither attachment.
+
+The bridge uses `hank:tasks:request.v1`, `hank:tasks:response.v1` and advisory `hank:tasks:status.v1`. Requests carry session/request IDs, subscribe before emitting, time out after five seconds, and discard stale responses. A bound plan with a missing, incompatible or unresponsive provider fails closed; absence is not a count of zero. Without a task provider an unbound plan continues to work independently.
+
+**Live canary pending:** composition tests use Pi API doubles. Real model tool selection, both load orders in a live TUI, feedback/cancel/accept, Esc, restart, fresh transfer, divergence and companion loss must be canaried before release.
+
 ## 📄 License
 
 MIT. See [`LICENSE`](./LICENSE).

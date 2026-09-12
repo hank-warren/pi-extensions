@@ -430,7 +430,9 @@ function parseBinding(value: unknown): TaskBinding | null | undefined {
 	if (typeof value.planId !== "string" || !value.planId) return null;
 	if (!Number.isSafeInteger(value.specRevision)) return null;
 	if (typeof value.digest !== "string" || !value.digest) return null;
+	if (value.requestDigest !== undefined && (typeof value.requestDigest !== "string" || !/^[a-f0-9]{64}$/u.test(value.requestDigest))) return null;
 	return {
+		...(typeof value.requestDigest === "string" ? { requestDigest: value.requestDigest } : {}),
 		planId: value.planId,
 		specRevision: value.specRevision as number,
 		digest: value.digest,

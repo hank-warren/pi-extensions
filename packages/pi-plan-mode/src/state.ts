@@ -44,7 +44,13 @@ export interface PlanRevisionTransaction {
 	paused?: string;
 }
 
+import { object, parseTaskSeed, safeId, type TaskSeed } from "./plan-contract.js";
+export interface TaskTracking { taskSetId: string; seed: TaskSeed; pending: boolean }
+
 export interface PlanModeState {
+	taskTracking?: TaskTracking;
+	/** Corrupt binding metadata is not permission to resume unbound. */
+	taskBindingError?: string;
 	/** Absent means a state entry from before managed revisions. */
 	schemaVersion?: number;
 	enabled: boolean;
@@ -111,6 +117,7 @@ export function restorePlanModeState(entries: unknown[], stateEntryType: string)
 			? { approvedDigest: digest(entry.data.approvedDigest) }
 			: {}),
 		...(managed && planId ? revisionPatch(entry.data.revision) : {}),
+		...(managed ? trackingPatch(entry.data.taskTracking, entry.data.taskBindingError) : {}),
 	};
 }
 
@@ -138,6 +145,15 @@ function revisionPatch(value: unknown): { revision?: PlanRevisionTransaction } {
 			...(typeof value.paused === "string" && value.paused ? { paused: value.paused } : {}),
 		},
 	};
+}
+
+function trackingPatch(value: unknown, error: unknown): Partial<PlanModeState> {
+	if (typeof error === "string") return { taskBindingError: error };
+	if (value === undefined) return {};
+	try {
+		if (!object(value) || !safeId(value.taskSetId) || typeof value.pending !== "boolean") throw new Error("invalid task attachment");
+		return { taskTracking: { taskSetId: value.taskSetId, seed: parseTaskSeed(value.seed), pending: value.pending } };
+	} catch { return { taskBindingError: "Saved plan/task binding is invalid; reconcile it before implementation or completion." }; }
 }
 
 function newestStateEntry(entries: unknown[], stateEntryType: string): SessionEntry | undefined {

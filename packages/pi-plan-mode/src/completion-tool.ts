@@ -1,6 +1,8 @@
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Markdown } from "@earendil-works/pi-tui";
 
+import { TASK_SEED_SCHEMA, parseTaskSeed, type TaskSeed } from "./plan-contract.js";
+
 export const PLAN_MODE_COMPLETE_TOOL_NAME = "plan_mode_complete";
 const PLAN_MODE_COMPLETE_VERSION = 1;
 const PLAN_MODE_MAX_CHARS = 50_000;
@@ -17,6 +19,7 @@ export const PLAN_MODE_COMPLETE_PARAMS = {
 	additionalProperties: false,
 	required: ["plan"],
 	properties: {
+		tasks: TASK_SEED_SCHEMA,
 		plan: {
 			type: "string",
 			minLength: 1,
@@ -26,7 +29,7 @@ export const PLAN_MODE_COMPLETE_PARAMS = {
 	},
 } as const;
 
-type NormalizePlanModeCompletionResult = { ok: true; plan: string } | { ok: false; error: string };
+type NormalizePlanModeCompletionResult = { ok: true; plan: string; tasks?: TaskSeed } | { ok: false; error: string };
 
 export function normalizePlanModeCompletion(input: unknown): NormalizePlanModeCompletionResult {
 	if (!isRecord(input) || typeof input.plan !== "string") {
@@ -40,7 +43,8 @@ export function normalizePlanModeCompletion(input: unknown): NormalizePlanModeCo
 			error: `plan must not exceed ${PLAN_MODE_MAX_CHARS} characters`,
 		};
 	}
-	return { ok: true, plan };
+	try { return { ok: true, plan, ...(input.tasks !== undefined ? { tasks: parseTaskSeed(input.tasks) } : {}) }; }
+	catch (error) { return { ok: false, error: String(error) }; }
 }
 
 function planFromCompletionDetails(value: unknown) {
@@ -55,12 +59,12 @@ function planFromCompletionDetails(value: unknown) {
 	return normalized.ok ? normalized.plan : undefined;
 }
 
-export function planModeCompleted(plan: string, planPath?: string) {
+export function planModeCompleted(plan: string, planPath?: string, tasks?: TaskSeed) {
 	return {
 		content: [
 			{
 				type: "text" as const,
-				text: planPath ? `Plan saved to ${planPath}.` : "Plan saved.",
+				text: (planPath ? `Plan saved to ${planPath}.` : "Plan saved.") + (tasks ? `\n\nTask scope for your implementation decision:\n${tasks.phases.map((p) => `## ${p.name}\n${p.tasks.map((t) => `- ${t.content}`).join("\n")}`).join("\n")}` : ""),
 			},
 		],
 		details: {

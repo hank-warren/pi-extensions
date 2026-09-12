@@ -52,7 +52,10 @@ import {
 
 type InteractiveUi = typeof import("./interactive-ui.js");
 
+import type { createTaskIntegration } from "./task-integration.js";
+
 export interface PlanRevisionControllerOptions {
+	tasks?: Pick<ReturnType<typeof createTaskIntegration>, "preview" | "bind">;
 	loadInteractiveUi(): Promise<InteractiveUi>;
 	getState(): PlanModeState;
 	/** Applies a patch, persists it, and refreshes the UI: one state move. */
@@ -415,9 +418,13 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 			);
 		}
 
+		let taskPreview: Awaited<ReturnType<NonNullable<PlanRevisionControllerOptions["tasks"]>["preview"]>>;
+		try { taskPreview = await options.tasks?.preview(ctx, input.tasks); }
+		catch (error) { return updatePlanFailure("tasks_not_reconciled", describe(error)); }
+		if (scope.isStale()) return updatePlanFailure("cancelled", "session changed during combined task preview");
 		const proposedPlan = normalizePlanText(input.plan);
 		const diff = diffPlanText(reading.plan, proposedPlan);
-		if (diff.identical) {
+		if (diff.identical && !taskPreview) {
 			// An unchanged proposal is a no-op, not a revision: the approved bytes
 			// are untouched, so approval survives and the transaction simply closes.
 			await supersedeOpenProposal(state.planId, open, undefined, "the proposal made no change");
@@ -437,6 +444,7 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 		}
 
 		const proposal: PlanProposal = {
+			...taskPreview,
 			schemaVersion: 1,
 			proposalId: newId(),
 			planId: state.planId,
@@ -490,12 +498,16 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 			instructions: proposal.instructions,
 			changeSummary: proposal.changeSummary,
 			baseRevision: proposal.baseRevision,
-			diff: proposal.diff,
+			diff: reviewDiff(proposal),
 			added: diff.added,
 			removed: diff.removed,
 			proposedPlan: proposal.proposedPlan,
 			...(conflict ? { conflict } : {}),
 		};
+	}
+
+	function reviewDiff(proposal: PlanProposal): string[] {
+		return proposal.tasks ? [...proposal.diff, "", "## Task changes (retained IDs preserve progress)", ...(proposal.taskDiff ?? "").split("\n")] : proposal.diff;
 	}
 
 	/** The summary of a proposal read back from disk, where the diff is all we kept. */
@@ -506,7 +518,7 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 			instructions: proposal.instructions,
 			changeSummary: proposal.changeSummary,
 			baseRevision: proposal.baseRevision,
-			diff: proposal.diff,
+			diff: reviewDiff(proposal),
 			added,
 			removed,
 			proposedPlan: proposal.proposedPlan,
@@ -799,7 +811,8 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 		if (
 			persisted.baseDigest !== proposal.baseDigest ||
 			persisted.baseRevision !== proposal.baseRevision ||
-			persisted.proposedPlan !== proposal.proposedPlan
+			persisted.proposedPlan !== proposal.proposedPlan ||
+			JSON.stringify(persisted.tasks) !== JSON.stringify(proposal.tasks) || persisted.taskDiff !== proposal.taskDiff
 		) {
 			return updatePlanFailure(
 				"stale_proposal",
@@ -807,7 +820,11 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 				{ proposalId: proposal.proposalId },
 			);
 		}
+		try { await options.tasks?.preview(ctx, persisted.tasks); }
+		catch (error) { return updatePlanFailure("stale_tasks", `${describe(error)}. The combined proposal is retained; refresh both artifacts before proposing again.`); }
+		if (scope.isStale()) return interrupted();
 		const result = await publishPlanRevision({
+			allowUnchanged: persisted.tasks !== undefined,
 			root: root(),
 			planId: proposal.planId,
 			planPath: state.planPath,
@@ -835,13 +852,8 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 				{ proposalId: proposal.proposalId },
 			);
 		}
-		// Published: the plan file now holds these bytes whatever this session does
-		// next, so the candidate is retired against the revision it produced even if
-		// the session has moved on.
-		await resolvePlanProposal(root(), persisted, "accepted", now(), {
-			resolutionReason: `published as revision ${result.revision}`,
-		});
-		if (pendingProposal?.proposalId === persisted.proposalId) pendingProposal = undefined;
+		// A combined revision is only acknowledged after task binding. If either
+		// side fails, the proposal stays on disk and implementation stays blocked.
 		if (scope.isStale()) {
 			return {
 				payload: {
@@ -855,16 +867,20 @@ export function createPlanRevisionController(options: PlanRevisionControllerOpti
 		}
 		// Current, and deliberately not approved: the user accepted the text, and
 		// approval is the separate decision to implement exactly these bytes.
-		options.nextWorkflow();
 		options.setState(ctx, {
-			schemaVersion: 2,
-			enabled: true,
-			awaitingAction: true,
-			specRevision: result.revision,
-			currentDigest: result.digest,
-			approvedDigest: undefined,
-			revision: undefined,
+			schemaVersion: 2, enabled: true, awaitingAction: true,
+			specRevision: result.revision, currentDigest: result.digest,
+			approvedDigest: undefined, revision: undefined,
 		});
+		if (persisted.tasks) {
+			try { await options.tasks!.bind(ctx, persisted.tasks); }
+			catch (error) { return updatePlanFailure("binding_pending", `Plan revision ${result.revision} was published, but tasks were not acknowledged: ${describe(error)}. Proposal retained; implementation is blocked. Retry the explicit implementation choice, or call begin and reconcile against current tasks.`, { proposalId: persisted.proposalId, revision: result.revision }); }
+		}
+		if (scope.isStale()) return interrupted();
+		await resolvePlanProposal(root(), persisted, "accepted", now(), { resolutionReason: `published as revision ${result.revision} with acknowledged tasks` });
+		if (scope.isStale()) return interrupted();
+		pendingProposal = undefined;
+		options.nextWorkflow();
 		options.markReady(ctx, `Plan revision ${result.revision}`, persisted.proposedPlan);
 		return {
 			payload: {

@@ -34,6 +34,10 @@ Its subagent integration was **not** adopted. It targets `@minhduydev/pi-core` t
 
 The durable-file discipline (same-directory temp file, atomic rename, per-path serialization, refusing a symlink or a non-regular file, a size cap) follows `@hank-warren/pi-plan-mode`'s `plan-file.ts`, and the one-formatter-two-surfaces rule for the widget and footer follows its `presentation.ts`. Both were reimplemented for this package's different shape rather than copied, so neither is registered in `DUPLICATED_SOURCES`.
 
+## Plan/task bridge
+
+`src/plan-contract.ts` is original MIT-licensed work, Copyright (c) 2026 Hank Warren, duplicated byte-for-byte in `pi-tasks` and `pi-plan-mode` and checked by `DUPLICATED_SOURCES`. Neither extension imports or depends on the other's source. The bridge and reconciliation implementation copy no external donor code.
+
 ## Runtime dependencies
 
 - [`proper-lockfile`](https://www.npmjs.com/package/proper-lockfile) — MIT, Copyright (c) 2018 Made With MOXY Lda.

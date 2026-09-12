@@ -19,6 +19,10 @@ As of 1.0 this package has diverged substantially from upstream and no longer tr
 
 Upstream had a tool named `update_plan` in its pre-1.0 line; the `update_plan` in this package is unrelated to it and shares no code or contract with it.
 
+## Plan/task bridge
+
+`src/plan-contract.ts` is original MIT-licensed work, Copyright (c) 2026 Hank Warren, duplicated byte-for-byte in `pi-tasks` and `pi-plan-mode` and checked by `DUPLICATED_SOURCES`. Neither extension imports or depends on the other's source. The bridge and reconciliation implementation copy no external donor code.
+
 ## Runtime dependencies
 
 - [`@narumitw/pi-tui-kit`](https://www.npmjs.com/package/@narumitw/pi-tui-kit) — MIT, Copyright (c) 2026 narumiruna.

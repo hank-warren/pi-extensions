@@ -119,6 +119,19 @@ For the human: `show`, `review`, `new`, `archive`, `export <path>`, `recover`. B
 
 `archive` refuses while any task is open; it never closes work for you. `export` writes a copy and does not touch the accepted set, and will not overwrite an existing file.
 
+## Plans and bound tasks
+
+With `@hank-warren/pi-plan-mode` loaded, a plan can own a dedicated task set. The plan agent derives a structured task seed; you review the plan and task changes together. Initial binding preserves any unrelated standalone set on disk rather than resetting it.
+
+- `get_tasks` still reports the exact IDs, revision, statuses, evidence and binding.
+- Routine progress uses `update_tasks(mode: "apply")` as before.
+- Bound scope changes or `mode: "propose"` return `requires_plan_revision`, the current binding and the proposed changes. The agent uses `update_plan(begin/propose)` to reconcile both artifacts; a missing plan owner is not permission to bypass it.
+- Reconciliation matches IDs only. New items receive IDs, removals retain history, and changed closed work requires explicit reopening. A recorded completion is not proof of revised work.
+- Binding uses the same locked snapshot store. Its persisted request fingerprint makes exact retries idempotent even after subsequent progress. Conflicting reuse and stale revisions refuse without overwriting work.
+- Plan completion re-reads the bound set and refuses open work. Explicitly abandoned work is terminal and counted separately.
+
+The versioned request/response bridge has no new model-facing tool and no dependency on the companion extension. Fresh-plan handoff writes and validates the task attachment before kickoff; ordinary new sessions remain unattached. See the [plan-mode integration notes](../pi-plan-mode/README.md#connected-plan-and-task-tracking) for partial-publication and provider-failure behavior. Live integration canaries remain pending before release.
+
 ## Known limitations
 
 - **Resolved proposals are never pruned.** The pending scan reads every file under `proposals/`, and it runs on each read, write, and turn boundary. Proportional to how many revisions a set has ever proposed, not to how many are open. An index or a `resolved/` subdirectory would bound it; that is deferred rather than done here, because it is a storage-layout change and this is not the round for one.

@@ -651,6 +651,8 @@ export async function adoptLiveDocument(input: {
 }
 
 export interface PublishInput {
+	/** Combined task-only revision still needs a new plan spec revision. */
+	allowUnchanged?: boolean;
 	root: string;
 	planId: string;
 	planPath: string;
@@ -748,7 +750,7 @@ export async function publishPlanRevision(input: PublishInput): Promise<PublishR
 							"the plan file changed after the revision was computed, so the revision was not published",
 					};
 				}
-				if (liveDigest === digest) {
+				if (liveDigest === digest && !input.allowUnchanged) {
 					return {
 						kind: "conflict",
 						reason: "the proposed plan is already what the plan file holds; nothing was published",
@@ -1169,7 +1171,11 @@ const PLAN_PROPOSAL_STATUSES: readonly PlanProposalStatus[] = [
  * base fails and *keeps* the file, so the agent can refresh it instead of losing
  * the work; cancelling and superseding resolve it in place for the same reason.
  */
+import { parseTaskSeed, type TaskSeed } from "./plan-contract.js";
+
 export interface PlanProposal {
+	tasks?: TaskSeed;
+	taskDiff?: string;
 	schemaVersion: typeof PLAN_PROPOSAL_SCHEMA_VERSION;
 	proposalId: string;
 	planId: string;
@@ -1226,7 +1232,11 @@ function parseProposal(value: unknown): PlanProposal | undefined {
 	if (typeof value.proposedPlan !== "string" || !value.proposedPlan.trim()) return undefined;
 	if (typeof value.baseDigest !== "string" || !DIGEST_RE.test(value.baseDigest)) return undefined;
 	if (!Number.isSafeInteger(value.baseRevision)) return undefined;
+	let tasks: TaskSeed | undefined;
+	try { if (value.tasks !== undefined) tasks = parseTaskSeed(value.tasks); } catch { return undefined; }
+	if (tasks && typeof value.taskDiff !== "string") return undefined;
 	return {
+		...(tasks ? { tasks, taskDiff: value.taskDiff as string } : {}),
 		schemaVersion: PLAN_PROPOSAL_SCHEMA_VERSION,
 		proposalId: value.proposalId,
 		planId: value.planId,

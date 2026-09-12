@@ -23,11 +23,13 @@ import { createSessionGuard } from "./session-guard.js";
 import { registerTasksCardRenderer, tasksStatusText } from "./presentation.js";
 import { buildTasksPointer, buildTasksRecoveryPointer } from "./prompt.js";
 import { registerGetTasksTool, registerUpdateTasksTool } from "./tools.js";
+import { registerPlanBridge } from "./plan-bridge.js";
 
 type InteractiveUi = typeof import("./interactive-ui.js");
 
 export default function tasks(pi: ExtensionAPI, dependencies: TasksControllerDependencies = {}) {
 	const controller = new TasksController(pi, dependencies);
+	const bridge = registerPlanBridge(pi, controller);
 	const menuGuard = createSessionGuard();
 	let interactiveUiPromise: Promise<InteractiveUi> | undefined;
 	const loadInteractiveUi = () => {
@@ -86,11 +88,13 @@ export default function tasks(pi: ExtensionAPI, dependencies: TasksControllerDep
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		bridge.setContext(ctx);
 		menuGuard.nextSession("pi-tasks session replaced");
 		await controller.onSessionStart(ctx);
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		bridge.setContext();
 		menuGuard.endSession("pi-tasks session shut down");
 		controller.onSessionShutdown(ctx);
 	});
@@ -98,6 +102,7 @@ export default function tasks(pi: ExtensionAPI, dependencies: TasksControllerDep
 	// `/tree` moves the branch without starting a session, so the attachment is
 	// re-read here or it silently belongs to a branch the user left.
 	pi.on("session_tree", async (_event, ctx) => {
+		bridge.setContext(ctx);
 		menuGuard.nextAttachment();
 		await controller.onSessionTree(ctx);
 	});
@@ -115,7 +120,9 @@ export default function tasks(pi: ExtensionAPI, dependencies: TasksControllerDep
 		}
 		const facts = controller.pointerFacts();
 		if (!facts) return;
-		return { systemPrompt: `${event.systemPrompt}\n\n${buildTasksPointer(facts)}` };
+		const binding = controller.attachedSet?.binding;
+		const bound = binding ? ` This set is bound to plan ${binding.planId} revision ${binding.specRevision}: scope changes require update_plan begin/propose, while update_tasks apply records routine progress.` : "";
+		return { systemPrompt: `${event.systemPrompt}\n\n${buildTasksPointer(facts)}${bound}` };
 	});
 
 	async function showMenu(ctx: ExtensionCommandContext) {

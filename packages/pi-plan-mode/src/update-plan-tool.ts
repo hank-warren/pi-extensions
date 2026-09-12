@@ -19,6 +19,8 @@
  * on the next call, so it should not have to re-derive them from prose.
  */
 
+import { TASK_SEED_SCHEMA, parseTaskSeed, type TaskSeed } from "./plan-contract.js";
+
 export const UPDATE_PLAN_TOOL_NAME = "update_plan";
 /** The same ceiling `plan_mode_complete` enforces; a revision is a whole plan. */
 export const UPDATE_PLAN_MAX_PLAN_CHARS = 50_000;
@@ -29,6 +31,7 @@ export const UPDATE_PLAN_PARAMS = {
 	additionalProperties: false,
 	required: ["action"],
 	properties: {
+		tasks: TASK_SEED_SCHEMA,
 		action: {
 			type: "string",
 			enum: ["begin", "propose"],
@@ -79,6 +82,7 @@ export const UPDATE_PLAN_DESCRIPTION = [
 export const UPDATE_PLAN_SNIPPET = "Revise the existing implementation plan";
 
 export const UPDATE_PLAN_GUIDELINES = [
+	"When task tracking is available, reconcile tasks alongside the plan: pass tasks.phases and expectedTaskRevision from begin. Retain IDs and completion evidence, explicitly reopen closed work whose scope changes. The user reviews both diffs together.",
 	`When the user asks to change, extend, reduce, or re-sequence a plan that already exists, call ${UPDATE_PLAN_TOOL_NAME} with action "begin" and then action "propose". It is the plan-editing interface: never tell the user to edit the plan file themselves, never use edit or write on it, and never answer with a command for them to type.`,
 	`plan_mode_complete is for a first draft only. Once a plan exists it refuses, because it carries no base revision and no digest for the change to be reviewed against — so a change to an existing plan goes through ${UPDATE_PLAN_TOOL_NAME} even when you are already in Plan mode.`,
 	`In ${UPDATE_PLAN_TOOL_NAME}, pass expectedRevision exactly as the active-plan context line or the previous result reported it, and pass action "propose" the complete rewritten plan rather than a description of the change.`,
@@ -93,6 +97,7 @@ export type UpdatePlanInput =
 			expectedRevision: number;
 			plan: string;
 			changeSummary: string;
+			tasks?: TaskSeed;
 	  };
 
 export type NormalizeUpdatePlanResult =
@@ -163,10 +168,11 @@ export function normalizeUpdatePlan(input: unknown): NormalizeUpdatePlanResult {
 	if (changeSummary.length > MAX_TEXT_CHARS) {
 		return { ok: false, error: `changeSummary must not exceed ${MAX_TEXT_CHARS} characters` };
 	}
-	return {
-		ok: true,
-		input: { action: "propose", revisionId, expectedRevision, plan, changeSummary },
-	};
+	try {
+		return { ok: true, input: { action: "propose", revisionId, expectedRevision, plan, changeSummary,
+			...(input.tasks !== undefined ? { tasks: parseTaskSeed(input.tasks) } : {}),
+		} };
+	} catch (error) { return { ok: false, error: String(error) }; }
 }
 
 export interface UpdatePlanOutcome {

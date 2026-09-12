@@ -68,10 +68,12 @@ export interface Phase {
 }
 
 /**
- * Reserved for the plan/task integration layer: which plan revision this set
- * was reviewed against. Layer 1 stores and reports it and never sets it.
+ * The plan revision this set was reviewed against. Only the acknowledged
+ * plan bridge sets it; model-facing progress tools cannot change this binding.
  */
 export interface TaskBinding {
+	/** Fingerprint of the exact reconciled seed; makes lost-ack retries idempotent. */
+	requestDigest?: string;
 	planId: string;
 	specRevision: number;
 	digest: string;

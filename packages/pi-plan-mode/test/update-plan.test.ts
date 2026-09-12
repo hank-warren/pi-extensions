@@ -118,6 +118,7 @@ test("the tool is registered under exactly one name, with a flat two-action sche
 	}
 	assert.deepEqual(UPDATE_PLAN_PARAMS.properties.action.enum, ["begin", "propose"]);
 	assert.deepEqual(Object.keys(UPDATE_PLAN_PARAMS.properties), [
+		"tasks", // Layer3 adds the reconciled task seed; the two actions stay unchanged.
 		"action",
 		"expectedRevision",
 		"instructions",

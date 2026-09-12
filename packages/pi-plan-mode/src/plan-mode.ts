@@ -4,6 +4,8 @@ import type {
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { completePlanArguments } from "./command.js";
+import { createTaskIntegration, taskCounts } from "./task-integration.js";
+import { TASK_STATUS, object, revision as validTaskRevision, validBinding, sameBinding } from "./plan-contract.js";
 import {
 	normalizePlanModeCompletion,
 	PLAN_MODE_COMPLETE_PARAMS,
@@ -275,7 +277,18 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 			void exitPlanMode(ctx, { keepPlanFile: true });
 		},
 	});
+	let tasksUiContext: ExtensionContext | undefined;
+	pi.events.on(TASK_STATUS, (raw: unknown) => {
+		const ctx = tasksUiContext;
+		if (!ctx || !object(raw) || raw.version !== 1 || raw.sessionId !== ctx.sessionManager.getSessionId() || raw.taskSetId !== state.taskTracking?.taskSetId || !object(raw.counts)) return;
+		const expected = state.planId && state.specRevision && state.currentDigest ? { planId: state.planId, specRevision: state.specRevision, digest: state.currentDigest } : undefined;
+		if (!validBinding(raw.binding) || !sameBinding(raw.binding, expected)) return;
+		const { open, completed, abandoned } = raw.counts;
+		if (validTaskRevision(open) && validTaskRevision(completed) && validTaskRevision(abandoned)) ctx.ui.setStatus("plan-tasks", `tasks · ${open} open · ${completed} done · ${abandoned} abandoned`);
+	});
+	const taskIntegration = createTaskIntegration(pi, { getState: () => state, setState: (ctx, patch) => setState(ctx, patch), capture: () => lifecycle.capture() });
 	const revisions = createPlanRevisionController({
+		tasks: taskIntegration,
 		loadInteractiveUi,
 		getState: () => state,
 		setState: (ctx, patch) => setState(ctx, patch),
@@ -380,6 +393,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		promptSnippet: "Submit the final Plan mode implementation plan",
 		promptGuidelines: [
 			"Call plan_mode_complete alone as the final action only after the implementation plan is decision-complete.",
+			"When get_tasks is available, include tasks.phases with the initial plan. Derive the phases and task contents from the plan; the user should not write a task list or assign IDs.",
 		],
 		parameters: PLAN_MODE_COMPLETE_PARAMS,
 		renderResult: renderPlanModeCompletion,
@@ -395,8 +409,19 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 			const parsed = normalizePlanModeCompletion(params);
 			if (!parsed.ok) throw new Error(parsed.error);
 
+			if (taskIntegration.present() && !parsed.tasks) throw new Error("Provide tasks.phases with this initial plan so the user can approve the plan and task scope together.");
+			if (parsed.tasks && !taskIntegration.present()) throw new Error("Task seed supplied but pi-tasks is unavailable");
+			if (parsed.tasks?.phases.some((p) => p.id || p.tasks.some((t) => t.id || t.reopen))) throw new Error("Initial task seeds allocate IDs; do not provide existing IDs or reopen flags");
 			const planPath = await acceptCompletedPlan(parsed.plan, ctx);
-			return planModeCompleted(parsed.plan, planPath);
+			if (parsed.tasks) {
+				const scope = lifecycle.capture();
+				const identity = await revisions.ensureIdentity(ctx, { ...scope, isStale: () => !scope.isCurrent() || scope.signal.aborted }, "initial plan with task seed");
+				if (!scope.isCurrent() || !identity.ok) throw new Error("Initial task plan identity could not be recorded");
+				await taskIntegration.preview(ctx, parsed.tasks);
+				if (!scope.isCurrent()) throw new Error("session moved on during initial task preview");
+				setState(ctx, { taskTracking: { taskSetId: identity.planId, seed: parsed.tasks, pending: true } });
+			}
+			return planModeCompleted(parsed.plan, planPath, parsed.tasks);
 		},
 	});
 
@@ -429,6 +454,14 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 				parsed.input.action === "begin"
 					? await revisions.begin(parsed.input, ctx, signal)
 					: await revisions.propose(parsed.input, ctx, signal);
+			if (parsed.input.action === "begin" && !outcome.isError) {
+				try { Object.assign(outcome.payload, await taskIntegration.describe(ctx)); }
+				catch (error) {
+					return updatePlanToolResult({ isError: true, payload: {
+						...outcome.payload, status: "tasks_unavailable", message: String(error),
+					} });
+				}
+			}
 			return updatePlanToolResult(outcome);
 		},
 	});
@@ -584,6 +617,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 	};
 
 	pi.on("session_start", async (event, ctx) => {
+		tasksUiContext = ctx;
 		const session = lifecycle.nextSession("Plan mode session replaced");
 		planToolsActivated = false;
 		implementedToolActivated = false;
@@ -671,7 +705,10 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		tasksUiContext = undefined;
+		ctx.ui.setStatus("plan-tasks", undefined);
 		// No re-arm: nothing may become current again until a session_start.
+		taskIntegration.close();
 		lifecycle.endSession("Plan mode session shut down");
 		stopPlanModeSettingsWatch();
 		pendingReadyNonce = undefined;
@@ -720,7 +757,10 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		if (!state.planPath) return;
 		const reading = await revisions.read(state);
 		const refusal = mutationRefusal(event.toolName, reading.approval, guidanceMode(ctx));
-		if (!refusal) return;
+		if (!refusal) {
+			try { await taskIntegration.verify(ctx); } catch (error) { return { block: true, reason: String(error) }; }
+			return;
+		}
 		// The widget and the next prompt should agree with the refusal the model just
 		// received, so the reading is published rather than discarded.
 		if (publishApproval(reading.approval, guidanceMode(ctx))) updateUi(ctx);
@@ -795,6 +835,20 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 		// still says: pi-ask-user-question strips its own tool on this same hook,
 		// and hook order between the two packages is not ours to depend on.
 		const questionTool = ctx.hasUI ? preferredQuestionTool(pi) : null;
+		let taskContext = "";
+		if (state.taskTracking && !state.enabled) {
+			try {
+				const set = await taskIntegration.verify(ctx, state, true);
+				if (set) {
+					const counts = taskCounts(set);
+					ctx.ui.setStatus("plan-tasks", `tasks · ${counts.open} open · ${counts.completed} done · ${counts.abandoned} abandoned`);
+					taskContext = `\n\nThis plan is bound to task set ${set.taskSetId} at task revision ${set.revision}. Use get_tasks and update_tasks apply for routine progress. Revise scope with update_plan begin/propose, reconciling both artifacts. Completion checks current bound tasks, not this display.`;
+				}
+			} catch (error) {
+				ctx.ui.setStatus("plan-tasks", "tasks · binding blocked");
+				taskContext = `\n\nSTOP implementation: ${String(error)}. Reconcile the plan/task binding before further work or completion.`;
+			}
+		} else ctx.ui.setStatus("plan-tasks", undefined);
 		const reading = state.planPath ? await revisions.read(state) : undefined;
 		if (publishApproval(reading?.approval ?? { kind: "none" }, guidanceMode(ctx))) updateUi(ctx);
 		const notice = viewDetail.approvalNotice;
@@ -833,7 +887,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 				? approvalRecoveryInstruction(reading.approval, guidanceMode(ctx))
 				: undefined;
 			return {
-				systemPrompt: `${event.systemPrompt}\n\n${buildActivePlanPointer(state.planPath, {
+				systemPrompt: `${event.systemPrompt}${taskContext}\n\n${buildActivePlanPointer(state.planPath, {
 					revision: reading?.revision ?? state.specRevision ?? 0,
 					...(notice ? { approvalNotice: notice } : {}),
 					...(recoveryInstruction ? { recoveryInstruction } : {}),
@@ -970,6 +1024,8 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 			specRevision: undefined,
 			currentDigest: undefined,
 			approvedDigest: undefined,
+			taskTracking: undefined,
+			taskBindingError: undefined,
 			revision: undefined,
 		};
 	}
@@ -984,6 +1040,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 	 * by a tool call deciding its own authorisation.
 	 */
 	async function completionGate(ctx: ExtensionContext): Promise<string | undefined> {
+		try { await taskIntegration.completion(ctx); } catch (error) { return String(error); }
 		// Named before anything is read, because both completion entry points return
 		// early on `state.enabled` and an open revision always implies it: without
 		// this the user hears "No plan is being implemented" about a plan that is.
@@ -1206,11 +1263,19 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 			// The same recording "Implement here" performs, for the same reason: the user
 			// choosing to implement is the approval, and the destination has to inherit
 			// an identity, a revision and a digest that all name the bytes it will read.
-			recordApproval: () =>
-				revisions.approveCurrentPlan(
-					ctx,
-					"the plan was approved for implementation in a fresh session",
-				),
+			recordApproval: async () => {
+				const approval = await revisions.approveCurrentPlan(ctx, "the plan was approved for implementation in a fresh session");
+				if (!approval.ok) return approval;
+				try {
+					await taskIntegration.beforeImplement(ctx);
+					return { ...approval, taskAttachment: await taskIntegration.attachment(ctx) };
+				} catch (error) { return { ok: false as const, error: String(error) }; }
+			},
+			validateDestination: async (replacement, destination) => {
+				const reading = await revisions.read(destination);
+				if (reading.approval.kind !== "approved") throw new Error("destination plan approval is stale");
+				await taskIntegration.verify(replacement, destination, true);
+			},
 		});
 	}
 
@@ -1246,6 +1311,12 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 			return;
 		}
 		if (approved.warning) ctx.ui.notify(approved.warning, "warning");
+		const scope = lifecycle.capture();
+		try { await taskIntegration.beforeImplement(ctx); }
+		catch (error) { ctx.ui.notify(`Unable to implement: ${String(error)}`, "warning"); return; }
+		if (!scope.isCurrent()) return;
+		const latest = await revisions.read(state);
+		if (!scope.isCurrent() || !latest.digest || latest.digest !== state.approvedDigest) return;
 
 		lifecycle.nextWorkflow();
 		const previousState = state;
@@ -1441,6 +1512,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 	}
 
 	function updateUi(ctx: ExtensionContext) {
+		if (!state.taskTracking) ctx.ui.setStatus("plan-tasks", undefined);
 		updatePlanModeUi(ctx, state, viewDetail);
 	}
 

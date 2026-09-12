@@ -71,6 +71,8 @@ import {
 	tasksRootDirectory,
 } from "./store.js";
 import type { ReviewOutcome } from "./task-menus.js";
+import { bindPlanTasks, readBoundTasks, reconcilePlanTasks, planTaskDiff } from "./plan-binding.js";
+import { TASK_STATUS, sameBinding, type TasksRequest, type TasksData } from "./plan-contract.js";
 
 export const TASKS_STATE_ENTRY_TYPE = "pi-tasks-state";
 /** Enough for a real reorganisation, few enough that a runaway batch is refused. */
@@ -750,6 +752,38 @@ export class TasksController {
 
 	refreshUi(ctx: ExtensionContext): void {
 		updateTasksUi(ctx, this.uiState);
+		const set = this.loaded?.document.set;
+		if (set?.binding) this.pi.events.emit(TASK_STATUS, { version: 1, sessionId: ctx.sessionManager.getSessionId(), taskSetId: set.taskSetId, revision: set.revision, binding: set.binding, counts: countTasks(set) });
+	}
+
+	/** Trusted, versioned extension bridge; never a model-callable approval tool. */
+	async planRequest(request: TasksRequest, ctx: ExtensionContext): Promise<TasksData> {
+		const scope = this.operationScope();
+		if (request.operation === "describe") return { version: 1 };
+		const id = request.taskSetId!;
+		let loaded = await readBoundTasks(this.root, id);
+		if (scope.isStale()) throw new Error("session changed during task request");
+		if (request.operation === "bind") {
+			loaded = await bindPlanTasks({ root: this.root, taskSetId: id, binding: request.binding!, tasks: request.tasks!, now: this.now(), signal: scope.signal });
+			if (scope.isStale()) throw new Error("binding may be published; session changed before acknowledgement");
+		}
+		if (request.operation === "attach" || request.operation === "bind") {
+			if (!loaded || !sameBinding(loaded.document.set.binding, request.binding)) throw new Error("task binding does not match the plan being attached");
+			this.guard.nextAttachment();
+			this.loaded = loaded;
+			this.pendingProposals = [];
+			this.recovery = undefined;
+			this.recordAttachment(ctx, loaded);
+			if (this.attachmentWriteFailure) throw new Error(this.attachmentWriteFailure);
+			this.refreshUi(ctx);
+		}
+		if (request.operation === "get" && request.tasks) {
+			const base = loaded?.document.set ?? createTaskSet(id, this.now());
+			if (loaded && request.tasks.expectedTaskRevision !== base.revision) throw new Error(`stale tasks: expectedTaskRevision must be ${base.revision}`);
+			const next = reconcilePlanTasks(base, request.tasks, this.now());
+			return { version: 1, ...(loaded ? { set: base } : {}), diff: planTaskDiff(base, next) };
+		}
+		return { version: 1, ...(loaded ? { set: loaded.document.set, attachment: { taskSetId: loaded.document.set.taskSetId, revision: loaded.document.set.revision, digest: loaded.digest, recordedAt: this.now() } } : {}) };
 	}
 
 	// -------------------------------------------------------------------- reads
@@ -970,6 +1004,9 @@ export class TasksController {
 			);
 		}
 
+		if (set.binding && (input.mode === "propose" || !isProgressOnlyBatch(input.changes))) {
+			return fail("requires_plan_revision", "This task set is bound to a reviewed plan. Call update_plan action begin and reconcile the plan and tasks together; if plan-mode is unavailable, restore that revision owner rather than bypassing it.", { binding: set.binding, taskSetId: set.taskSetId, revision: set.revision, proposedChanges: input.changes });
+		}
 		const applied = applyTaskChanges(set, input.changes, {
 			now: this.now(),
 			hasExistingSet: true,

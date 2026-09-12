@@ -82,7 +82,9 @@ PUBLIC_PACKAGES = {
 # now has exactly one home in pi-auto-permissions. Add a pair here rather than
 # reaching for a relative import into a sibling package, and keep every
 # package-specific detail behind a parameter so the copies can stay identical.
-DUPLICATED_SOURCES: list[tuple[str, str]] = []
+DUPLICATED_SOURCES: list[tuple[str, str]] = [
+    ("packages/pi-tasks/src/plan-contract.ts", "packages/pi-plan-mode/src/plan-contract.ts"),
+]
 # Pi's own floor, so a package that advertises less is advertising a lie: a host
 # on Node 20 installs it and the extension fails to load. Every extension and
 # library package carries this exact string, plus the copy-to-create template.

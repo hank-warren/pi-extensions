@@ -25,9 +25,10 @@ export const UPDATE_TASKS_SNIPPET =
 	"Create, revise, or report progress on the phased task set";
 
 export const UPDATE_TASKS_GUIDELINES = [
+	"When get_tasks reports a plan binding, scope changes go through update_plan action begin/propose with both artifacts, not update_tasks propose/apply. Keep update_tasks apply for routine progress. If plan-mode is unavailable, report the missing revision owner; do not bypass the binding.",
 	`Use ${UPDATE_TASKS_TOOL_NAME} to change the task set. It is the task-editing interface: never tell the user to edit the task file, and never use edit or write on it.`,
 	`Report progress with ${UPDATE_TASKS_TOOL_NAME} mode "apply" as you work — start a task before you begin it, and close it with done and a summary of what you actually did.`,
-	`When the user asks to change what the work is — adding, dropping, resequencing, rewording, or reopening tasks — call ${UPDATE_TASKS_TOOL_NAME} once with mode "propose", a reason in the user's own terms, and the complete set of changes. That renders the review card the user decides on; do not apply scope changes as a series of separate calls.`,
+	`For an unbound task set, when the user asks to change what the work is — adding, dropping, resequencing, rewording, or reopening tasks — call ${UPDATE_TASKS_TOOL_NAME} once with mode "propose", a reason in the user's own terms, and the complete set of changes. That renders the review card the user decides on; do not apply scope changes as a series of separate calls.`,
 	`In ${UPDATE_TASKS_TOOL_NAME}, identify every task and phase by its exact id, and pass taskSetId and expectedRevision exactly as ${GET_TASKS_TOOL_NAME} reported them. Never infer a task from its wording, and never reuse an id you were not given.`,
 ];
 

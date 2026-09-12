@@ -2,6 +2,7 @@ import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/
 import { readPlanFile } from "./plan-file.js";
 import { digestOf } from "./revision-store.js";
 import { PLAN_STATE_SCHEMA_VERSION, type PlanModeState } from "./state.js";
+import type { TaskAttachment } from "./plan-contract.js";
 
 type NewSessionOptions = Exclude<Parameters<ExtensionCommandContext["newSession"]>[0], undefined>;
 type ReplacementContext = Parameters<NonNullable<NewSessionOptions["withSession"]>>[0];
@@ -21,9 +22,12 @@ interface FreshImplementationRequest {
 	 * just crossed deliberately.
 	 */
 	managed?: Partial<PlanModeState>;
+	taskAttachment?: TaskAttachment;
+	validateDestination?(ctx: ExtensionContext, state: PlanModeState): Promise<void>;
 }
 
 interface FreshImplementationFromStateOptions {
+	validateDestination?(ctx: ExtensionContext, state: PlanModeState): Promise<void>;
 	getState(): PlanModeState;
 	menuIsCurrent(): boolean;
 	stateEntryType: string;
@@ -39,7 +43,7 @@ interface FreshImplementationFromStateOptions {
 	 * reported a conflict for the plan it had just been given.
 	 */
 	recordApproval(): Promise<
-		| { ok: true; digest: string; revision?: number; warning?: string }
+		| { ok: true; digest: string; revision?: number; warning?: string; taskAttachment?: TaskAttachment }
 		| { ok: false; error: string }
 	>;
 }
@@ -113,7 +117,10 @@ export async function startFreshImplementationFromState(
 		planPath,
 		stateEntryType: options.stateEntryType,
 		isCurrent,
+		taskAttachment: approval.taskAttachment,
+		validateDestination: options.validateDestination,
 		managed: {
+			...(recorded.taskTracking ? { taskTracking: recorded.taskTracking } : {}),
 			schemaVersion: PLAN_STATE_SCHEMA_VERSION,
 			...(recorded.planId ? { planId: recorded.planId } : {}),
 			...(approval.revision !== undefined ? { specRevision: approval.revision } : {}),
@@ -158,6 +165,7 @@ export async function startFreshImplementationSession(
 			setup: async (sessionManager) => {
 				try {
 					sessionManager.appendCustomEntry(request.stateEntryType, destinationState);
+					if (request.taskAttachment) sessionManager.appendCustomEntry("pi-tasks-state", request.taskAttachment);
 				} catch (error: unknown) {
 					setupError = safeErrorDetail(error);
 				}
@@ -168,9 +176,10 @@ export async function startFreshImplementationSession(
 					return;
 				}
 				try {
+					await request.validateDestination?.(replacementCtx, destinationState);
 					await replacementCtx.sendUserMessage(handoff);
 					replacementCtx.ui.notify(
-						"Fresh implementation session started. Only the approved plan was transferred.",
+						request.taskAttachment ? "Fresh implementation session started. The approved plan and validated task attachment were transferred." : "Fresh implementation session started. Only the approved plan was transferred.",
 						"info",
 					);
 				} catch (error: unknown) {
