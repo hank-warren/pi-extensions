@@ -17,7 +17,6 @@
 import {
 	type AskUserParams,
 	MAX_HEADER_LENGTH,
-	MAX_QUESTIONS,
 	maxOptionsFor,
 	MIN_OPTIONS,
 	MIN_QUESTIONS,
@@ -26,6 +25,7 @@ import {
 
 type ValidationCode =
 	| "bad_question_count"
+	| "invalid_mode"
 	| "bad_option_count"
 	| "header_too_long"
 	| "empty_label"
@@ -49,10 +49,10 @@ const isReserved = (label: string): boolean =>
  */
 export function validateParams(params: AskUserParams): ValidationError | undefined {
 	const questions = params.questions;
-	if (!Array.isArray(questions) || questions.length < MIN_QUESTIONS || questions.length > MAX_QUESTIONS) {
+	if (!Array.isArray(questions) || questions.length < MIN_QUESTIONS) {
 		return {
 			code: "bad_question_count",
-			message: `questions must contain ${MIN_QUESTIONS}-${MAX_QUESTIONS} entries; received ${questions?.length ?? 0}. Group questions that belong to one decision; ask further questions in a follow-up call.`,
+			message: `questions must contain at least ${MIN_QUESTIONS} entry; received ${questions?.length ?? 0}.`,
 		};
 	}
 
@@ -71,6 +71,15 @@ export function validateParams(params: AskUserParams): ValidationError | undefin
 				code: "header_too_long",
 				message: `${where}.header is ${q.header.length} characters; the hard limit is ${MAX_HEADER_LENGTH}. Shorten it to a chip-sized tag.`,
 			};
+		}
+		if (q.mode !== undefined && q.mode !== "choice" && q.mode !== "text") {
+			return { code: "invalid_mode", message: `${where}.mode must be choice or text.` };
+		}
+		if (q.mode === "text") {
+			if (q.options !== undefined || q.multiSelect !== undefined) {
+				return { code: "invalid_mode", message: `${where}: text mode excludes options and multiSelect; omit both fields.` };
+			}
+			continue;
 		}
 		// The cap is mode-aware: checkboxes are a shortlist UI and get six, a
 		// pick-one question still gets four.

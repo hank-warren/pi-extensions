@@ -125,3 +125,21 @@ test("a multi-select answer still takes a user note", () => {
 	);
 	assert.match(result.content[0].text, /"Postgres, SQLite"\. user notes: start with Postgres\./);
 });
+
+test("partial cancellation includes committed answers and explicit unanswered questions, not approval", () => {
+	const round: AskUserParams = { questions: [...params.questions, { mode: "text", header: "Why", question: "Why this choice?" }] };
+	const result = buildResponse({ answers: [{ questionIndex: 0, question: "Which database?", answer: "Postgres", custom: false, notes: "not approved yet" }], cancelled: true }, round);
+	assert.match(result.content[0].text, /"Which database\?"="Postgres"/);
+	assert.match(result.content[0].text, /user notes: not approved yet/);
+	assert.match(result.content[0].text, /Unanswered questions: 2\. "Why this choice\?"/);
+	assert.match(result.content[0].text, /not approval to act/);
+	assert.doesNotMatch(result.content[0].text, /You can now continue/);
+	assert.equal(result.details.cancelled, true);
+});
+
+test("cancelling a fully answered review is still not submission", () => {
+	const result = buildResponse({ answers: [{ questionIndex: 0, question: "Which database?", answer: "Postgres", custom: false }], cancelled: true }, params);
+	assert.match(result.content[0].text, /all answered, but not submitted/);
+	assert.match(result.content[0].text, /not approval to act/);
+	assert.doesNotMatch(result.content[0].text, /You can now continue/);
+});

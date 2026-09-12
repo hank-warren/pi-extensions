@@ -2,11 +2,11 @@
 
 A structured questionnaire the model can put to you when it would otherwise
 guess. Instead of a free-form "which do you prefer?" in chat, you get a dialog
-with numbered options, digit hotkeys, a typed-answer escape, and Tab-to-comment.
+with numbered options, digit hotkeys, open-ended text, and notes attached to choices.
 
-> **v0.5** ships 1-4 questions per call as cycleable tabs, single- or
-> multi-select, with an optional preview pane. See
-> [the spec](../../docs/specs/pi-ask-user-question.md) §14.
+> Ask a whole round in one call: there is no question-count cap. Mix choices,
+> multi-select and text questions, navigate an overview, and optionally review
+> all answers before explicitly submitting.
 
 ## Install
 
@@ -28,12 +28,91 @@ register a tool named `ask_user_question`.
 | `n` | Attach a note to your choice, then `Enter` to send both |
 | `Tab` / `→` | Next question |
 | `Shift+Tab` / `←` | Previous question |
-| `Esc` | Decline the questionnaire (or leave note/typed-answer mode) |
+| `o` | Open the question overview (outside text/note entry) |
+| `Esc` | Decline from choices/overview; leave note/custom-answer entry; discard a native text edit into the overview |
 
 With several questions, each is a tab you can cycle through in any order;
 answering one jumps to the next unanswered question, and the call returns once
-every question has an answer. Cycling back and re-answering replaces that
-question's answer rather than recording a second one.
+every question has an answer by default. Cycling back and re-answering replaces
+that question's answer rather than recording a second one. The tab strip follows
+the current question even in narrow terminals; the overview scrolls rather than
+limiting the size of a round.
+
+### Overview and review
+
+Press `o` from a choice question to inspect the round. `↑` / `↓` select a
+question, `PageUp` / `PageDown` move eight rows, `Home` / `End` reach the first /
+last row, and `g` opens a question-number field (any number from 1 to the round's
+size). `Enter` in that field selects the question in the overview; `Enter` again
+opens it for editing. Invalid numbers stay in the field; `Esc` leaves the field.
+The overview shows answer summaries together and the highlighted question's full
+answer, each multi-select part, and note below the list. `Tab` returns to the
+current question; `Esc` cancels the round.
+
+Set **`reviewBeforeSubmit: true`** at the top level to require review. Answering
+the final question opens the review instead of submitting. Select any question
+and press `Enter` to edit it; saving returns to review. Notes and custom text
+are prefilled on revisit. Use `n` to edit an existing choice note (erase it and
+confirm to remove it). To finish, select the final **Submit round** row (`End`)
+and press `Enter`. It is inert until every question has an answer. The default,
+including `reviewBeforeSubmit: false`, retains legacy auto-submit.
+
+### Native text questions
+
+Set **`mode: "text"`** on an open-ended question, with `question` and `header`,
+and **omit `options` and `multiSelect`**. Even `options: []` or
+`multiSelect: false` is invalid in text mode. Omitted mode or `mode: "choice"`
+uses the existing choice contract.
+
+Text questions open Pi's native single-line `Input`, without fake choices or a
+custom-answer row. Cursor movement, grapheme-aware deletion, undo and Unicode
+input use Pi's input bindings. `Enter` saves a trimmed, non-empty answer;
+whitespace-only input cannot commit. Pasted line breaks and tabs become spaces
+and terminal control bytes are removed. The field scrolls around the cursor.
+`Tab` does not leave an in-progress text answer; `Esc` discards only the edit
+and opens the overview, preserving any previously committed answer. A second
+`Esc` cancels the round. Reopening the question restores its committed text.
+
+```json
+{
+  "reviewBeforeSubmit": true,
+  "questions": [
+    {
+      "question": "Which storage engine?",
+      "header": "Storage",
+      "options": [
+        { "label": "Postgres", "description": "Managed relational storage" },
+        { "label": "SQLite", "description": "Embedded storage" }
+      ]
+    },
+    {
+      "mode": "text",
+      "question": "What constraints should the design respect?",
+      "header": "Constraints"
+    }
+  ]
+}
+```
+
+Choice questions retain 2–4 authored options, or 2–6 with `multiSelect: true`.
+All headers retain the 16-character limit. Interview strategy, dependency
+reasoning and decision trees remain caller/skill policy, not tool behavior.
+
+### Results and cancellation
+
+Successful calls retain the existing model-facing envelope and
+`details: { answers, cancelled: false }`. Every answer still has
+`questionIndex`, `question`, `answer` (a string) and `custom`; native text uses
+`custom: true` with no `selected` or `preview`. Multi-select answers additionally
+carry `selected`, and choices may carry `notes` and a selected `preview`.
+
+Cancelling or aborting a partially answered round returns **committed answers
+and explicit unanswered questions in model-facing text**, with
+`details.cancelled: true`. Uncommitted edits are never answers. Cancelling final
+review is still cancellation even when every question is answered. **Neither
+cancellation nor partial answers authorize action or supply missing decisions.**
+An empty decline keeps `User declined to answer questions` unchanged. No result
+is sent before the dialog closes; reviewing is not incremental approval.
 
 ## Multi-select
 
@@ -75,7 +154,7 @@ stay visible.
 `@juicesharp/rpiv-ask-user-question`. `pi-auto-permissions` approval prompts
 keep `Tab` for notes — they are single-question and have no tabs to cycle.
 
-Every question gets an appended **`Type something.`** row for a free-text
+Every **choice** question gets an appended **`Type something.`** row for a free-text
 answer. The model is not allowed to author that row itself — reserved labels
 are rejected at runtime.
 
@@ -92,7 +171,7 @@ scrollback while you answer.
 
 ## No monkey patching
 
-Numbered options and Tab-to-comment come from `OptionSelector`, imported from
+Numbered options and inline notes come from `OptionSelector`, imported from
 [`@hank-warren/pi-permission-selector`](../pi-permission-selector) and rendered
 through `ctx.ui.custom()`. pi exposes no `setSelectorComponent` hook, so the
 only alternative would be patching pi's internal `ExtensionSelectorComponent` —
@@ -116,7 +195,8 @@ pi.events.on("hank:ask-user:blocked", ({ active }) => {
   // active === true while a human is being asked
 });
 pi.events.on("hank:ask-user:prompt", ({ questions }) => {
-  // questions[].question / .header / .multiSelect / .options[].label
+  // questions[].question / .header / .multiSelect / .mode / .options[].label
+  // Text questions emit mode: "text" and options: []; choice payloads are unchanged.
 });
 ```
 

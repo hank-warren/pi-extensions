@@ -54,6 +54,9 @@ import {
 import { OptionSelector, type SelectorOption } from "@hank-warren/pi-permission-selector/selector.ts";
 import {
 	CURSOR_MARKER,
+	Input,
+	SelectList,
+	matchesKey,
 	decodeKittyPrintable,
 	truncateToWidth,
 	visibleWidth,
@@ -99,7 +102,12 @@ const PREVIEW_MAX_ROWS = 12;
 
 /** Per-question UI state, preserved while cycling between tabs. */
 interface TabState {
-	selector: OptionSelector;
+	selector?: OptionSelector;
+	textInput?: Input;
+	lastCustomText?: string;
+	/** True only while forwarding input from the note editor to its callbacks. */
+	submittingNote?: boolean;
+	noteSeeded?: boolean;
 	customText?: string;
 	/**
 	 * In-progress bracketed paste aimed at the custom-answer field. pi-tui wraps
@@ -124,12 +132,14 @@ export class QuestionnaireDialog {
 	focused = false;
 
 	private readonly opts: DialogOptions;
-	private readonly tabs: TabState[] = [];
+	private readonly tabs = new Map<number, TabState>();
+	private overview?: SelectList;
+	private jumpInput?: Input;
+	private editingFromOverview = false;
 	private finished = false;
 
 	constructor(opts: DialogOptions) {
 		this.opts = opts;
-		for (let i = 0; i < this.session.total; i++) this.tabs.push({ selector: this.buildSelector(i) });
 	}
 
 	private get session() {
@@ -137,7 +147,30 @@ export class QuestionnaireDialog {
 	}
 
 	private get tab(): TabState {
-		return this.tabs[this.session.questionIndex];
+		const index = this.session.questionIndex;
+		let tab = this.tabs.get(index);
+		if (!tab) {
+			tab = {};
+			this.tabs.set(index, tab);
+			if (this.session.current.mode === "text") {
+				const input = new Input();
+				input.onSubmit = (value) => {
+					const text = value.trim();
+					if (!text) return;
+					this.session.recordAnswer(text, { custom: true });
+					input.setValue(text);
+					this.afterAnswer();
+				};
+				input.onEscape = () => {
+					// Discard only the uncommitted edit; a second Esc in the overview cancels.
+					input.setValue(this.session.answerAt(index)?.answer ?? "");
+					tab!.pasteBuffer = undefined;
+					this.openOverview(index);
+				};
+				tab.textInput = input;
+			} else tab.selector = this.buildSelector(index);
+		}
+		return tab;
 	}
 
 	private repaint(): void {
@@ -172,13 +205,13 @@ export class QuestionnaireDialog {
 				const labels = checked.filter((o) => !session.isCustomRow(o.value)).map((o) => o.label);
 				if (checked.some((o) => session.isCustomRow(o.value))) {
 					// Free-text mode with the other ticks held; Esc restores them.
-					this.tabs[index].pendingNotes = comment;
-					this.tabs[index].pendingSelected = labels;
-					this.tabs[index].customText = "";
+					this.tabs.get(index)!.pendingNotes = this.answerNotes(comment);
+					this.tabs.get(index)!.pendingSelected = labels;
+					this.tabs.get(index)!.customText = this.tabs.get(index)!.lastCustomText ?? "";
 					this.repaint();
 					return;
 				}
-				session.recordMultiAnswer(labels, { notes: comment });
+				session.recordMultiAnswer(labels, { notes: this.answerNotes(comment) });
 				this.afterAnswer();
 			},
 			onSelect: (option, comment) => {
@@ -186,12 +219,12 @@ export class QuestionnaireDialog {
 				if (session.isCustomRow(option.value)) {
 					// Enter free-text mode. A note typed on the sentinel row is
 					// carried across so it is not silently lost.
-					this.tabs[index].pendingNotes = comment;
-					this.tabs[index].customText = "";
+					this.tabs.get(index)!.pendingNotes = this.answerNotes(comment);
+					this.tabs.get(index)!.customText = this.tabs.get(index)!.lastCustomText ?? "";
 					this.repaint();
 					return;
 				}
-				session.recordAnswer(option.value, { notes: comment });
+				session.recordAnswer(option.value, { notes: this.answerNotes(comment) });
 				this.afterAnswer();
 			},
 			onCancel: () => this.finish(session.cancelledResult()),
@@ -199,8 +232,17 @@ export class QuestionnaireDialog {
 		});
 	}
 
-	/** Submit when everything is answered, else jump to the next gap. */
+	private answerNotes(comment?: string): string | undefined {
+		return comment ?? (this.tab.submittingNote ? undefined : this.session.answerAt(this.session.questionIndex)?.notes);
+	}
+
+	/** Submit when everything is answered, unless this round requires review. */
 	private afterAnswer(): void {
+		if (this.editingFromOverview || (this.session.isComplete() && this.session.reviewBeforeSubmit)) {
+			this.editingFromOverview = false;
+			this.openOverview(this.session.questionIndex);
+			return;
+		}
 		if (this.session.isComplete()) {
 			this.finish(this.session.result());
 			return;
@@ -227,11 +269,16 @@ export class QuestionnaireDialog {
 
 	/** True while any text-entry mode owns the keyboard. */
 	private isTyping(): boolean {
-		return this.isTypingCustom() || this.tab.selector.isCommenting();
+		return this.isTypingCustom() || this.tab.selector?.isCommenting() === true;
 	}
 
 	invalidate(): void {
-		for (const tab of this.tabs) tab.selector.invalidate();
+		for (const tab of this.tabs.values()) {
+			tab.selector?.invalidate();
+			tab.textInput?.invalidate();
+		}
+		this.overview?.invalidate();
+		this.jumpInput?.invalidate();
 	}
 
 	private style(role: string, text: string): string {
@@ -239,28 +286,136 @@ export class QuestionnaireDialog {
 		return role === "dim" ? `\x1b[2m${text}\x1b[0m` : text;
 	}
 
-	/** `✓ Database   ▸ Cache   ○ Queue` — one line, only when tabs exist. */
-	private tabStrip(): string {
-		const parts: string[] = [];
-		for (let i = 0; i < this.session.total; i++) {
-			const current = i === this.session.questionIndex;
-			const mark = this.session.isAnswered(i) ? "✓" : current ? "▸" : "○";
-			const label = `${mark} ${this.session.headerAt(i)}`;
-			parts.push(current ? this.style("accent", label) : this.style("dim", label));
+	/** Window the strip around the current tab, never truncate it off the right. */
+	private tabStrip(inner: number): string {
+		const current = this.session.questionIndex;
+		const label = (i: number) => `${this.session.isAnswered(i) ? "✓" : i === current ? "▸" : "○"} ${this.session.headerAt(i)}`;
+		let start = current;
+		let end = current;
+		let used = visibleWidth(label(current));
+		// Reserve space for the omitted-neighbour markers.
+		while (true) {
+			const candidate = start > 0 ? start - 1 : end + 1;
+			if (candidate >= this.session.total) break;
+			const size = visibleWidth(label(candidate)) + 3;
+			if (used + size + 4 > inner) break;
+			if (candidate < start) start = candidate;
+			else end = candidate;
+			used += size;
 		}
-		return parts.join("   ");
+		const parts: string[] = [];
+		for (let i = start; i <= end; i++) {
+			parts.push(i === current ? this.style("accent", label(i)) : this.style("dim", label(i)));
+		}
+		return `${start > 0 ? "‹ " : ""}${parts.join("   ")}${end < this.session.total - 1 ? " ›" : ""}`;
+	}
+
+	private openOverview(index = this.session.questionIndex): void {
+		const items = Array.from({ length: this.session.total }, (_, i) => {
+			const answer = this.session.answerAt(i);
+			return {
+				value: String(i),
+				label: `${i + 1}. ${answer ? "✓" : "○"} ${this.session.headerAt(i)}`,
+				description: answer ? `${answer.answer}${answer.notes ? ` · Note: ${answer.notes}` : ""}` : "Unanswered",
+			};
+		});
+		// A distinct final row makes submission deliberate, not another answer key.
+		if (this.session.reviewBeforeSubmit) items.push({
+			value: "submit", label: "Submit round", description: this.session.isComplete() ? "All questions answered" : "Answer every question first",
+		});
+		this.overview = new SelectList(items, 8, {
+			selectedPrefix: (t) => this.style("accent", t),
+			selectedText: (t) => this.style("accent", t),
+			description: (t) => this.style("dim", t),
+			scrollInfo: (t) => this.style("dim", t),
+			noMatch: (t) => this.style("dim", t),
+		});
+		this.overview.setSelectedIndex(index);
+		this.overview.onSelect = (item) => {
+			if (item.value === "submit") {
+				if (this.session.isComplete()) this.finish(this.session.result());
+				return;
+			}
+			this.session.goTo(Number(item.value));
+			this.overview = undefined;
+			this.editingFromOverview = this.session.reviewBeforeSubmit;
+			this.repaint();
+		};
+		this.overview.onCancel = () => this.cancel();
+		this.repaint();
+	}
+
+	private overviewLines(inner: number): string[] {
+		const lines = [this.style("accent", `${this.session.reviewBeforeSubmit ? "Review round" : "Question overview"} · ${this.session.answeredCount()}/${this.session.total} answered`), ""];
+		lines.push(...this.overview!.render(inner), "");
+		const selected = this.overview!.getSelectedItem();
+		if (selected && selected.value !== "submit") {
+			const index = Number(selected.value);
+			const answer = this.session.answerAt(index);
+			const details = [this.session.questionAt(index).question];
+			if (answer) {
+				// Show the parts independently: labels and custom text may themselves contain commas.
+				if (answer.selected) details.push(...answer.selected.map((part) => `✓ ${part}`));
+				else details.push(`Answer: ${answer.answer}`);
+				if (answer.notes) details.push(`Note: ${answer.notes}`);
+			} else details.push("Unanswered");
+			for (const detail of details) lines.push(...wrapTextWithAnsi(detail, inner));
+		}
+		if (this.jumpInput) {
+			this.jumpInput.focused = this.focused;
+			lines.push("", ...wrapTextWithAnsi(`Question number (1-${this.session.total}):`, inner), ...this.jumpInput.render(inner));
+			lines.push(...wrapTextWithAnsi("enter jump · esc back", inner));
+		} else {
+			lines.push("", ...wrapTextWithAnsi("↑↓ select · PgUp/PgDn page · Home/End · g jump · enter edit/submit · tab back · esc cancel", inner));
+		}
+		return lines;
+	}
+
+	private handleOverview(keyData: string): void {
+		if (this.jumpInput) {
+			this.jumpInput.handleInput(keyData);
+		} else if (isCharKey("g")(keyData)) {
+			const input = new Input();
+			input.onEscape = () => { this.jumpInput = undefined; };
+			input.onSubmit = (value) => {
+				if (!/^\d+$/.test(value.trim())) return;
+				const index = Number(value.trim()) - 1;
+				if (index < 0 || index >= this.session.total) return;
+				this.overview!.setSelectedIndex(index);
+				this.jumpInput = undefined;
+			};
+			this.jumpInput = input;
+		} else if (isTabKey(keyData)) {
+			this.overview = undefined;
+		} else if (matchesKey(keyData, "home")) {
+			this.overview!.setSelectedIndex(0);
+		} else if (matchesKey(keyData, "end")) {
+			this.overview!.setSelectedIndex(this.session.total);
+		} else if (matchesKey(keyData, "pageUp") || matchesKey(keyData, "pageDown")) {
+			const selected = this.overview!.getSelectedItem()!.value;
+			const index = selected === "submit" ? this.session.total : Number(selected);
+			this.overview!.setSelectedIndex(index + (matchesKey(keyData, "pageUp") ? -8 : 8));
+		} else this.overview!.handleInput(keyData);
+		this.repaint();
 	}
 
 	/** Inner content lines, before the box is drawn around them. */
 	private contentLines(inner: number): string[] {
+		if (this.overview) return this.overviewLines(inner);
 		const session = this.session;
-		const lines: string[] = [this.style("accent", session.title())];
-		if (session.total > 1) lines.push(this.tabStrip());
+		const lines: string[] = wrapTextWithAnsi(this.style("accent", session.title()), inner);
+		if (session.total > 1) lines.push(...wrapTextWithAnsi(this.tabStrip(inner), inner));
 		lines.push("");
 		lines.push(...wrapTextWithAnsi(session.current?.question ?? "", inner));
 		lines.push("");
 
 		const tab = this.tab;
+		if (tab.textInput) {
+			tab.textInput.focused = this.focused;
+			lines.push(...tab.textInput.render(inner), "");
+			lines.push(...wrapTextWithAnsi("enter save answer · esc discard edit / overview", inner));
+			return lines;
+		}
 		if (tab.customText !== undefined) {
 			// Wrap the typed answer. Without this a long answer ran past the right
 			// border and off the screen forever, because an input field renders as
@@ -276,21 +431,22 @@ export class QuestionnaireDialog {
 				lines.push(`${FIELD_INDENT}${wrapped[i]}${last ? caret : ""}`);
 			}
 			lines.push("");
-			lines.push(this.style("dim", "  enter submit · esc back to options"));
+			lines.push(...wrapTextWithAnsi(this.style("dim", "  enter submit · esc back to options"), inner));
 			return lines;
 		}
 
-		lines.push(...tab.selector.render(inner));
+		lines.push(...tab.selector!.render(inner));
 		lines.push(...this.previewLines(inner));
-		if (session.total > 1 && !tab.selector.isCommenting()) {
-			lines.push(this.style("dim", "  tab next · shift+tab prev question"));
+		if (session.total > 1 && !tab.selector!.isCommenting()) {
+			lines.push(...wrapTextWithAnsi(this.style("dim", "  tab next · shift+tab prev question"), inner));
 		}
+		if (!tab.selector!.isCommenting()) lines.push(...wrapTextWithAnsi("  o overview / jump", inner));
 		return lines;
 	}
 
 	/** Preview markdown for the highlighted row, if it carries any. */
 	private currentPreview(): string | undefined {
-		const selected = this.tab.selector.getSelected();
+		const selected = this.tab.selector?.getSelected();
 		if (!selected) return undefined;
 		return this.session.rows().find((row) => row.value === selected.value)?.preview;
 	}
@@ -340,7 +496,8 @@ export class QuestionnaireDialog {
 
 	render(width: number): string[] {
 		const cap = this.opts.maxWidth ?? width;
-		const outer = Math.max(20, Math.min(width, cap));
+		const outer = Math.max(1, Math.min(width, cap));
+		if (outer < CHROME_COLUMNS + 1) return [truncateToWidth(this.session.title(), outer, "")];
 		const inner = outer - CHROME_COLUMNS;
 		const border = (text: string) => this.style("dim", text);
 
@@ -359,7 +516,29 @@ export class QuestionnaireDialog {
 	}
 
 	handleInput(keyData: string): void {
+		if (this.finished) return;
+		if (this.overview) { this.handleOverview(keyData); return; }
 		const tab = this.tab;
+		if (tab.textInput) {
+			if (isEscapeKey(keyData)) {
+				tab.textInput.onEscape?.();
+				return;
+			}
+			// Buffer and sanitize paste before delegating to Input, whose native paste
+			// path strips newlines (joining words) and retains terminal control bytes.
+			const paste = consumePasteChunk(tab.pasteBuffer, keyData);
+			if (paste !== undefined) {
+				tab.pasteBuffer = paste.buffer;
+				if (paste.text !== undefined) tab.textInput.handleInput(`\x1b[200~${paste.text.replace(/[\x80-\x9f]/g, "")}\x1b[201~`);
+				if (paste.rest) this.handleInput(paste.rest);
+			} else tab.textInput.handleInput(keyData);
+			this.repaint();
+			return;
+		}
+		if (!this.isTyping() && isCharKey("o")(keyData)) {
+			this.openOverview();
+			return;
+		}
 
 		// Question cycling. Deliberately NOT active while typing: Tab inside the
 		// note editor means "back to options", and inside the custom-answer field
@@ -379,7 +558,26 @@ export class QuestionnaireDialog {
 		}
 
 		if (tab.customText === undefined) {
-			tab.selector.handleInput(keyData);
+			if (!tab.selector!.isCommenting() && isNoteKey(keyData)) {
+				tab.selector!.handleInput(keyData);
+				const notes = this.session.answerAt(this.session.questionIndex)?.notes;
+				if (notes && !tab.noteSeeded) tab.selector!.handleInput(`\x1b[200~${notes}\x1b[201~`);
+				tab.noteSeeded = true;
+				return;
+			}
+			const wasCommenting = tab.selector!.isCommenting();
+			// Only an actual note-editor submission can clear an existing note.
+			// Tab backs out with a retained draft; confirming a choice afterward
+			// must preserve the saved note, not treat it as an empty submission.
+			tab.submittingNote = wasCommenting;
+			try {
+				tab.selector!.handleInput(keyData);
+			} finally {
+				tab.submittingNote = false;
+				if (wasCommenting && !tab.selector!.isCommenting() && !isTabKey(keyData)) {
+					tab.noteSeeded = false;
+				}
+			}
 			return;
 		}
 
@@ -424,6 +622,7 @@ export class QuestionnaireDialog {
 			} else {
 				this.session.recordAnswer(text, { custom: true, notes: tab.pendingNotes });
 			}
+			tab.lastCustomText = text;
 			tab.customText = undefined;
 			tab.pasteBuffer = undefined;
 			tab.pendingNotes = undefined;

@@ -1,9 +1,8 @@
 /**
  * Tool parameter schema and shared types for `ask_user_question`.
  *
- * v0.2 scope (docs/specs/pi-ask-user-question.md §14): up to four questions,
- * single- or multi-select, optional per-option preview. Questions render as
- * tabs the user cycles with Tab / Shift+Tab.
+ * Choice and open-ended questions can share a round of any size.
+ * Legacy choice calls auto-submit; reviewBeforeSubmit opts into a final review.
  */
 
 import { Type } from "typebox";
@@ -20,7 +19,6 @@ const MAX_OPTIONS = 4;
  */
 const MAX_MULTI_OPTIONS = 6;
 export const MIN_QUESTIONS = 1;
-export const MAX_QUESTIONS = 4;
 
 /** Upper bound on authored options for a question, by mode. */
 export const maxOptionsFor = (multiSelect?: boolean): number =>
@@ -60,6 +58,10 @@ const OptionSchema = Type.Object({
 });
 
 const QuestionSchema = Type.Object({
+	mode: Type.Optional(Type.String({
+		enum: ["choice", "text"],
+		description: "Question mode. Omit for choices. Set text for an open-ended answer; omit options and multiSelect in text mode.",
+	})),
 	question: Type.String({
 		description:
 			"The complete question to ask the user. Should be clear, specific, and end with a question mark.",
@@ -74,20 +76,22 @@ const QuestionSchema = Type.Object({
 				"Render this question as checkboxes so the user can pick more than one option. Use it when several answers can hold at once (\"which of these should change\", \"which checks to run before merging\"); keep mutually exclusive choices single-select. Multi-select questions may have 2-6 options instead of 2-4. The user toggles rows with Space or a digit and confirms with Enter, and the answer comes back as the chosen labels joined with \", \".",
 		}),
 	),
-	options: Type.Array(OptionSchema, {
+	options: Type.Optional(Type.Array(OptionSchema, {
 		description:
 			"The available choices for this question. Must have 2-4 options (2-6 when multiSelect is true), each a distinct choice; without multiSelect they must also be mutually exclusive. The 'Type something.' row is appended automatically — do NOT author it.",
 		minItems: MIN_OPTIONS,
 		maxItems: MAX_MULTI_OPTIONS,
-	}),
+	})),
 });
 
 export const QuestionParamsSchema = Type.Object({
+	reviewBeforeSubmit: Type.Optional(Type.Boolean({
+		description: "Require explicit submission after reviewing all answers. Default false (auto-submit when every question has an answer).",
+	})),
 	questions: Type.Array(QuestionSchema, {
 		description:
-			"Questions to ask the user. 1-4 questions; the user cycles between them with Tab and answers each one.",
+			"A non-empty question round, with no question-count cap. Mix choice and text questions; the user can navigate an overview and answer each one.",
 		minItems: MIN_QUESTIONS,
-		maxItems: MAX_QUESTIONS,
 	}),
 });
 
@@ -98,14 +102,17 @@ interface OptionParams {
 }
 
 interface QuestionParams {
+	/** Omitted means choice. Text excludes options and multiSelect (validated at runtime). */
+	mode?: "choice" | "text";
 	question: string;
 	header: string;
 	/** Checkbox mode: the user may check several options. Default false. */
 	multiSelect?: boolean;
-	options: OptionParams[];
+	options?: OptionParams[];
 }
 
 export interface AskUserParams {
+	reviewBeforeSubmit?: boolean;
 	questions: QuestionParams[];
 }
 

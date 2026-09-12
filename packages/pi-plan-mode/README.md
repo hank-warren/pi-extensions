@@ -130,7 +130,7 @@ With [`@hank-warren/pi-ask-user-question`](../pi-ask-user-question) installed, P
 pi install npm:@hank-warren/pi-ask-user-question
 ```
 
-`plan_mode_question` renders through plain `ctx.ui.select` + `ctx.ui.editor`. `ask_user_question` gives the same decision points a real dialog: markdown **previews** on options, **notes** attached to a choice, several questions as **tabs** you cycle with Tab, **digit hotkeys**, and **checkbox multi-select**. It also allows 1-4 questions instead of 1-3, and 2-6 options on a multi-select question.
+`plan_mode_question` renders through plain `ctx.ui.select` + `ctx.ui.editor`. `ask_user_question` gives the same decision points a real dialog: markdown **previews** on options, **notes** attached to a choice, several questions as **tabs** you cycle with Tab, **digit hotkeys**, and **checkbox multi-select**. It also supports whole rounds without a question-count cap, native open-ended text questions, optional review-before-submit, and 2-6 options on a multi-select question. Follow the installed tool's schema for available features.
 
 Detection is by tool name at runtime, re-evaluated every turn — there is no dependency between the two packages, and installing or removing one never requires touching the other. When `ask_user_question` is present:
 
