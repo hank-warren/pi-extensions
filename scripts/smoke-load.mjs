@@ -23,6 +23,10 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { VERSION } from "@earendil-works/pi-coding-agent";
+
+const [piMajor, piMinor, piPatch] = VERSION.replace(/^v/, "").split(".").map(Number);
+const legacyCompaction = piMajor === 0 && (piMinor < 84 || (piMinor === 84 && piPatch < 4));
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -127,6 +131,14 @@ const EXPECTED_SURFACES = {
 	"./packages/pi-cliproxyapi-provider/index.ts": {
 		commands: ["cliproxyapi"],
 		handlers: ["before_provider_request"],
+	},
+	"./packages/pi-codex-compaction/index.ts": {
+		handlers: [
+			"session_start", "session_shutdown", "model_select", "context",
+			"before_provider_headers", "before_provider_request", "session_before_compact",
+			// Upstream's compatibility guard switches off when Pi owns mid-run compaction.
+			...(legacyCompaction ? ["turn_end", "session_compact", "agent_settled"] : []),
+		],
 	},
 };
 

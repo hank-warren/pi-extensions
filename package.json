@@ -35,7 +35,8 @@
       "./packages/pi-multi-login/index.ts",
       "./packages/pi-stash/index.ts",
       "./packages/pi-muxr/index.ts",
-      "./packages/pi-cliproxyapi-provider/index.ts"
+      "./packages/pi-cliproxyapi-provider/index.ts",
+      "./packages/pi-codex-compaction/index.ts"
     ],
     "skills": [
       "./packages/pi-auto-permissions/auto-permissions-setup",

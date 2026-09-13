@@ -23,6 +23,7 @@ Each package under [`packages/`](packages/) is a self-contained Pi package publi
 | [`@hank-warren/pi-stash`](packages/pi-stash) | Park an unsent prompt with `Ctrl+S`, run `/model` or anything else against an empty editor, then restore it with `Ctrl+S` — in-memory, paste-preserving, never submitted |
 | [`@hank-warren/pi-muxr`](packages/pi-muxr) | [muxr](https://github.com/hank-warren/muxr) bridge client: projects a session's active branch and live stream to the muxr mobile gateway over a capability-authenticated Unix socket. Read-only by default — no tool, no command, inert without its CLI flags; the experimental chat-write path is disabled behind three independent consent gates |
 | [`@hank-warren/pi-cliproxyapi-provider`](packages/pi-cliproxyapi-provider) | Registers one [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) instance as a Pi model provider: `/v1/models` discovery, models.dev enrichment seeded from Pi's own built-in catalog, Anthropic Messages routing for Claude and Responses routing for Codex, and `xhigh`/`max` thinking levels; forked from [`pi-cliproxyapi-provider`](https://github.com/0xRichardH/pi-cliproxyapi-provider) |
+| [`@hank-warren/pi-codex-compaction`](packages/pi-codex-compaction) | Native encrypted Codex compaction through direct Codex or CLIProxyAPI, integrated with Pi's compaction lifecycle; forked from [`@ogulcancelik/pi-codex-compaction`](https://github.com/ogulcancelik/pi-extensions/tree/main/packages/pi-codex-compaction) |
 
 ## Install
 
