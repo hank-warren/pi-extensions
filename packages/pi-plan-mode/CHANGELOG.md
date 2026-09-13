@@ -1,5 +1,11 @@
 # @hank-warren/pi-plan-mode
 
+## 1.8.1
+
+### Patch Changes
+
+- Follow the installed `ask_user_question` schema instead of imposing a stale four-question limit, and recognize cancelled rounds with partial answers as cancellation rather than approval to act. Standalone fallback behavior is unchanged.
+
 ## 1.8.0
 
 ### Minor Changes

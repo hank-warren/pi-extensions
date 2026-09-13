@@ -1,5 +1,15 @@
 # @hank-warren/pi-ask-user-question
 
+## 0.7.0
+
+### Minor Changes
+
+- Support complete questionnaire rounds with no four-question cap, a scrolling overview, paging and question-number jumps, and active-question visibility in narrow terminals.
+
+  Add native open-ended questions with `mode: "text"` and optional `reviewBeforeSubmit: true` for inspecting and editing all answers before explicit submission. Existing choice calls retain their default auto-submit behavior. Text uses Pi's single-line input with Unicode editing and sanitized paste; omit `options` and `multiSelect` in text mode.
+
+  Partial cancellation now reports committed answers and explicit unanswered questions without implying approval to act. Review preserves notes and custom answers, including when backing out of note editing with Tab before confirming a choice. Existing result fields, choice limits, headless stripping, cancellation cleanup, and event compatibility are preserved.
+
 ## 0.6.1
 
 ### Patch Changes
