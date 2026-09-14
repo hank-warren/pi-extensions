@@ -18,7 +18,6 @@ EXPECTED_EXTENSION_ENTRYPOINTS = [
     "./packages/pi-ask-user-question/index.ts",
     "./packages/pi-multi-login/index.ts",
     "./packages/pi-stash/index.ts",
-    "./packages/pi-muxr/index.ts",
     "./packages/pi-cliproxyapi-provider/index.ts",
     "./packages/pi-codex-compaction/index.ts",
 ]
@@ -27,7 +26,7 @@ EXPECTED_EXTENSION_ENTRYPOINTS = [
 # no longer loads them. pi-loop is deprecated in favour of the pi-orchestrator
 # skill package: a supervising session watching real pi sessions in Herdr panes does
 # by judgment what the loop engine did by pacing and gates.
-DEPRECATED_PACKAGES = {"packages/pi-loop"}
+DEPRECATED_PACKAGES = {"packages/pi-loop", "packages/pi-muxr"}
 # Public resources must live in inventoried packages: a top-level extensions/
 # or skills/ directory would bypass package validation and ship through the
 # aggregate repository install. Skill and hybrid *packages* are different:
