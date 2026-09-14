@@ -1,5 +1,23 @@
 # @hank-warren/pi-muxr
 
+> **Deprecated.** This package is no longer maintained and has been removed from
+> the aggregate git install of pi-extensions. There is no replacement. Published
+> versions remain available; the source and tests are retained for reference.
+
+## Remove
+
+For a standalone npm install:
+
+```bash
+pi remove npm:@hank-warren/pi-muxr
+```
+
+For a git install of pi-extensions, update the package and restart Pi to stop
+loading this extension. Remove any explicit `-e` references and `--muxr-*` launch
+flags from your launcher as well.
+
+The documentation below describes the retired integration.
+
 The [muxr](https://github.com/hank-warren/muxr) bridge client for Pi. It
 projects a session's active branch and live stream to the muxr mobile gateway
 over a capability-authenticated Unix socket.
@@ -11,7 +29,7 @@ never rewrite what Pi persists. It never touches Herdr.
 Without its CLI flags it does nothing at all: no socket, no file reads, no
 state. Loading it into an ordinary session is inert.
 
-## Install
+## Historical installation
 
 ```bash
 pi install npm:@hank-warren/pi-muxr

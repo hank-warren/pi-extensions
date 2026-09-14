@@ -279,21 +279,23 @@ test("shared test support importing node and pi modules is allowed", () => {
   assert.equal(result.status, 0, result.stderr);
 });
 
-test("a deprecated package is out of the aggregate but still published and documented", () => {
-  const backIn = validate(({ read, write }) => {
-    const root = read("package.json");
-    root.pi.extensions = [...root.pi.extensions, "./packages/pi-loop/index.ts"];
-    write("package.json", root);
-  });
-  assert.equal(backIn.status, 1);
-  assert.match(backIn.stderr, /pi-loop: deprecated package must not be in the aggregate/);
+for (const name of ["pi-loop", "pi-muxr"]) {
+  test(`${name} is out of the aggregate but still published and documented`, () => {
+    const backIn = validate(({ read, write }) => {
+      const root = read("package.json");
+      root.pi.extensions = [...root.pi.extensions, `./packages/${name}/index.ts`];
+      write("package.json", root);
+    });
+    assert.equal(backIn.status, 1);
+    assert.ok(backIn.stderr.includes(`${name}: deprecated package must not be in the aggregate`));
 
-  const undocumented = validate(({ replace }) =>
-    replace("packages/pi-loop/README.md", "> **Deprecated.**", "> Note:"),
-  );
-  assert.equal(undocumented.status, 1);
-  assert.match(undocumented.stderr, /README must open with a \*\*Deprecated\.\*\* block/);
-});
+    const undocumented = validate(({ replace }) =>
+      replace(`packages/${name}/README.md`, "> **Deprecated.**", "> Note:"),
+    );
+    assert.equal(undocumented.status, 1);
+    assert.match(undocumented.stderr, /README must open with a \*\*Deprecated\.\*\* block/);
+  });
+}
 
 test("an unapplied changeset fails validation", () => {
   // The release pull request must carry its own `npm run version-packages`

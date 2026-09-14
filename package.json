@@ -34,7 +34,6 @@
       "./packages/pi-ask-user-question/index.ts",
       "./packages/pi-multi-login/index.ts",
       "./packages/pi-stash/index.ts",
-      "./packages/pi-muxr/index.ts",
       "./packages/pi-cliproxyapi-provider/index.ts",
       "./packages/pi-codex-compaction/index.ts"
     ],
