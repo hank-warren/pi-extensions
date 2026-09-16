@@ -40,7 +40,9 @@ test("passing the legacy tool explicitly matches the default", () => {
 test("the ask_user_question prompt carries that tool's own bounds", () => {
 	const prompt = buildPlanModePrompt(ASK_USER_QUESTION_TOOL);
 	assert.deepEqual(mentioned(prompt), [ASK_USER_QUESTION_TOOL]);
-	assert.match(prompt, /Ask 1-4 concise questions with 2-4 meaningful options each/);
+	assert.match(prompt, /Group related concise questions into a round/);
+	assert.ok(!prompt.includes("1-4"), "do not impose a stale question-count cap");
+	assert.match(prompt, /2-4 meaningful options each/);
 	assert.match(prompt, /2-6 options when the question sets multiSelect/);
 	assert.ok(!prompt.includes("1-3 concise questions"), "the legacy bounds must not leak");
 });

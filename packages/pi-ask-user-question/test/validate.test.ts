@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { Check } from "typebox/value";
+import { QuestionParamsSchema } from "../tool/schema.ts";
 import type { AskUserParams } from "../tool/schema.ts";
 import { validateParams } from "../tool/validate.ts";
 
@@ -24,8 +26,8 @@ test("zero questions is rejected", () => {
 	assert.equal(validateParams({ questions: [] })?.code, "bad_question_count");
 });
 
-test("up to four questions are accepted", () => {
-	for (const count of [1, 2, 3, 4]) {
+test("whole rounds have no question-count cap", () => {
+	for (const count of [1, 2, 3, 4, 5, 25, 1000]) {
 		const params = ok();
 		while (params.questions.length < count) {
 			params.questions.push({ ...params.questions[0], header: `Q${params.questions.length}` });
@@ -34,13 +36,6 @@ test("up to four questions are accepted", () => {
 	}
 });
 
-test("more than four questions is rejected", () => {
-	const params = ok();
-	while (params.questions.length < 5) {
-		params.questions.push({ ...params.questions[0], header: `Q${params.questions.length}` });
-	}
-	assert.equal(validateParams(params)?.code, "bad_question_count");
-});
 
 test("fewer than two options is rejected", () => {
 	const params = ok();
@@ -89,7 +84,7 @@ test("the option-count message names the mode and its range", () => {
 
 test("preview is allowed alongside multiSelect", () => {
 	const params = withOptions(6, true);
-	params.questions[0].options[0].preview = "```ts\nconst a = 1;\n```";
+	params.questions[0].options![0].preview = "```ts\nconst a = 1;\n```";
 	assert.equal(validateParams(params), undefined);
 });
 
@@ -109,14 +104,14 @@ test("a header of exactly 16 characters is accepted", () => {
 
 test("a long label is accepted", () => {
 	const params = ok();
-	params.questions[0].options[0].label = "x".repeat(200);
+	params.questions[0].options![0].label = "x".repeat(200);
 	assert.equal(validateParams(params), undefined);
 });
 
 test("an empty or whitespace-only label is rejected", () => {
 	for (const label of ["", "   "]) {
 		const params = ok();
-		params.questions[0].options[0].label = label;
+		params.questions[0].options![0].label = label;
 		assert.equal(validateParams(params)?.code, "empty_label", `expected ${JSON.stringify(label)} to be rejected`);
 	}
 });
@@ -124,14 +119,14 @@ test("an empty or whitespace-only label is rejected", () => {
 test("reserved labels are rejected in any casing or spacing", () => {
 	for (const label of ["Other", "OTHER", " other ", "Type something.", "type something"]) {
 		const params = ok();
-		params.questions[0].options[0].label = label;
+		params.questions[0].options![0].label = label;
 		assert.equal(validateParams(params)?.code, "reserved_label", `expected ${label} to be reserved`);
 	}
 });
 
 test("duplicate labels within a question are rejected", () => {
 	const params = ok();
-	params.questions[0].options[1].label = "postgres";
+	params.questions[0].options![1].label = "postgres";
 	assert.equal(validateParams(params)?.code, "duplicate_label");
 });
 
@@ -148,4 +143,38 @@ test("empty question text and empty headers are rejected", () => {
 test("validation never throws on malformed input", () => {
 	assert.doesNotThrow(() => validateParams({} as AskUserParams));
 	assert.doesNotThrow(() => validateParams({ questions: [{}] } as unknown as AskUserParams));
+});
+
+test("text mode accepts no options and can share a large round with choices", () => {
+	const params = ok();
+	params.questions.push(...Array.from({ length: 20 }, (_, i) => ({
+		mode: "text" as const, header: `Text${i}`, question: "What matters?",
+	})));
+	params.reviewBeforeSubmit = true;
+	assert.equal(validateParams(params), undefined);
+});
+
+test("text mode excludes even empty options or explicitly false multiSelect", () => {
+	for (const extra of [{ options: [] }, { options: ok().questions[0].options }, { multiSelect: true }, { multiSelect: false }]) {
+		assert.equal(validateParams({ questions: [{ mode: "text", header: "H", question: "Q?", ...extra }] })?.code, "invalid_mode");
+	}
+});
+
+test("choice mode still requires options and invalid modes fail closed", () => {
+	assert.equal(validateParams({ questions: [{ mode: "choice", header: "H", question: "Q?" }] })?.code, "bad_option_count");
+	const params = ok();
+	params.questions[0].mode = "choice";
+	assert.equal(validateParams(params), undefined);
+	params.questions[0].mode = "unknown" as never;
+	assert.equal(validateParams(params)?.code, "invalid_mode");
+});
+
+
+test("the advertised JSON schema accepts old calls and unbounded mixed rounds", () => {
+	assert.ok(Check(QuestionParamsSchema, ok()));
+	const params: AskUserParams = { reviewBeforeSubmit: true, questions: Array.from({ length: 1000 }, (_, i) => i % 2 ? ok().questions[0] : { mode: "text", header: "Text", question: "Explain?" }) };
+	assert.ok(Check(QuestionParamsSchema, params));
+	assert.equal(validateParams(params), undefined);
+	assert.equal(Check(QuestionParamsSchema, { ...params, reviewBeforeSubmit: "true" }), false);
+	assert.equal(Check(QuestionParamsSchema, { questions: [{ mode: "bad", header: "Text", question: "Explain?" }] }), false);
 });

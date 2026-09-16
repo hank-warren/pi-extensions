@@ -36,14 +36,29 @@ function buildAnswerSegment(a: QuestionAnswer): string {
 }
 
 /**
- * Map a questionnaire outcome to the tool envelope. Cancelled and
- * zero-answers both collapse to DECLINE_MESSAGE so the model sees one
- * canonical "didn't answer" signal regardless of cause.
+ * Empty declines retain the legacy envelope. Partial cancellations report
+ * committed answers without implying permission to act or a submitted round.
  */
 export function buildResponse(
 	result: QuestionnaireResult | null | undefined,
 	params: AskUserParams,
 ): ToolResult {
+	if (result?.cancelled && result.answers.length > 0) {
+		const byIndex = new Map(result.answers.map((answer) => [answer.questionIndex, answer]));
+		const committed: string[] = [];
+		const unanswered: string[] = [];
+		params.questions.forEach((question, index) => {
+			const answer = byIndex.get(index);
+			if (answer) committed.push(buildAnswerSegment(answer));
+			else unanswered.push(`${index + 1}. ${JSON.stringify(question.question)}`);
+		});
+		return buildToolResult([
+			"Questionnaire cancelled; the round was not submitted. Cancellation or abort is not approval to act.",
+			`Committed answers before cancellation: ${committed.join(" ")}`,
+			`Unanswered questions: ${unanswered.length ? unanswered.join("; ") : "none (all answered, but not submitted)"}.`,
+			"Do not infer answers to unanswered questions or treat these partial results as authorization.",
+		].join("\n"), result);
+	}
 	if (!result || result.cancelled) {
 		return buildToolResult(DECLINE_MESSAGE, {
 			answers: result?.answers ?? [],
@@ -52,9 +67,10 @@ export function buildResponse(
 		});
 	}
 
+	const byIndex = new Map(result.answers.map((answer) => [answer.questionIndex, answer]));
 	const segments: string[] = [];
 	for (let i = 0; i < params.questions.length; i++) {
-		const answer = result.answers.find((a) => a.questionIndex === i);
+		const answer = byIndex.get(i);
 		if (answer) segments.push(buildAnswerSegment(answer));
 	}
 	if (segments.length === 0) {
