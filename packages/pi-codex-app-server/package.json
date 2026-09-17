@@ -1,0 +1,71 @@
+{
+  "name": "@hank-warren/pi-codex-app-server",
+  "version": "0.1.0",
+  "description": "Expose Pi through the Codex app-server and ChatGPT Remote Control protocols: drive Pi sessions from the ChatGPT mobile app or any Codex client (fork of pi-codex-app-server)",
+  "type": "module",
+  "license": "Apache-2.0",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "codex",
+    "app-server",
+    "remote-control",
+    "chatgpt"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hank-warren/pi-extensions.git",
+    "directory": "packages/pi-codex-app-server"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "bin": {
+    "pi-codex-app-server": "./bin/pi-codex-app-server.ts"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "bin",
+    "src",
+    "scripts",
+    "drizzle",
+    "vendor/openai-codex-app-server-protocol/UPSTREAM.md",
+    "vendor/openai-codex-app-server-protocol/typescript",
+    "vendor/openai-codex-app-server-protocol/json-schema/ClientNotification.json",
+    "vendor/openai-codex-app-server-protocol/json-schema/ClientRequest.json",
+    "vendor/openai-codex-app-server-protocol/json-schema/JSONRPCMessage.json",
+    "vendor/openai-codex-app-server-protocol/json-schema/ServerNotification.json",
+    "vendor/openai-codex-app-server-protocol/json-schema/ServerRequest.json",
+    "docs",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "dependencies": {
+    "@logtape/logtape": "^2.3.2",
+    "@logtape/redaction": "^2.3.2",
+    "ajv": "^8.17.1",
+    "commander": "^15.0.0",
+    "drizzle-orm": "1.0.0-rc.4",
+    "es-toolkit": "^1.39.10",
+    "json-rpc-2.0": "^1.7.1",
+    "qrcode": "^1.5.4",
+    "ws": "^8.18.3",
+    "zod": "^4.4.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "devDependencies": {
+    "@types/qrcode": "^1.5.6",
+    "@types/ws": "^8.18.1",
+    "json-schema-faker": "^0.5.9"
+  }
+}

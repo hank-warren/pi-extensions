@@ -116,6 +116,12 @@ const EXPECTED_SURFACES = {
 			...(legacyCompaction ? ["turn_end", "session_compact", "agent_settled"] : []),
 		],
 	},
+	// Autostart is off by default in this fork, so loading the extension only
+	// registers surfaces: no daemon is spawned and no relay socket is opened.
+	"./packages/pi-codex-app-server/index.ts": {
+		commands: ["codex-server"],
+		handlers: ["session_start", "session_shutdown"],
+	},
 };
 
 const CATEGORIES = ["tools", "commands", "handlers", "flags", "shortcuts"];

@@ -20,6 +20,7 @@ EXPECTED_EXTENSION_ENTRYPOINTS = [
     "./packages/pi-stash/index.ts",
     "./packages/pi-cliproxyapi-provider/index.ts",
     "./packages/pi-codex-compaction/index.ts",
+    "./packages/pi-codex-app-server/index.ts",
 ]
 # Deprecated packages stay in PUBLIC_PACKAGES (published, tested, packable)
 # but are left out of the aggregate above, so a git install of this repository
@@ -74,7 +75,14 @@ PUBLIC_PACKAGES = {
     "packages/pi-muxr": "@hank-warren/pi-muxr",
     "packages/pi-cliproxyapi-provider": "@hank-warren/pi-cliproxyapi-provider",
     "packages/pi-codex-compaction": "@hank-warren/pi-codex-compaction",
+    "packages/pi-codex-app-server": "@hank-warren/pi-codex-app-server",
 }
+# Every package here is MIT unless it carries someone else's copyleft-adjacent
+# terms. pi-codex-app-server forks an Apache-2.0 project and vendors an
+# Apache-2.0 protocol snapshot from openai/codex; relabelling that MIT would
+# misstate the terms on code this repository did not write. Add an entry only
+# with the upstream LICENSE in the package to back it up.
+PACKAGE_LICENSES = {"packages/pi-codex-app-server": "Apache-2.0"}
 # Sources deliberately duplicated byte-for-byte instead of shared through a
 # package dependency, because sharing them would cost far more than copying
 # them. Empty since pi-herdr-auto-title was removed: `guardian-transport.ts`
@@ -232,8 +240,9 @@ def main() -> int:
             errors.append(f"{rel_dir}: package name must be {expected_name!r}")
         if pkg.get("private") is True:
             errors.append(f"{rel_dir}: public package must not be private")
-        if pkg.get("license") != "MIT":
-            errors.append(f"{rel_dir}: public package must be MIT licensed")
+        expected_license = PACKAGE_LICENSES.get(rel_dir, "MIT")
+        if pkg.get("license") != expected_license:
+            errors.append(f"{rel_dir}: public package must be {expected_license} licensed")
         if not (pkg_dir / "LICENSE").is_file():
             errors.append(f"{rel_dir}: missing LICENSE file")
         if not (pkg_dir / "README.md").is_file():

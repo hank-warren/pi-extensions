@@ -24,6 +24,7 @@ Each package under [`packages/`](packages/) is a self-contained Pi package publi
 | [`@hank-warren/pi-muxr`](packages/pi-muxr) | **Deprecated**, no replacement; not loaded by the git install of this repo. Retired [muxr](https://github.com/hank-warren/muxr) mobile gateway bridge client; source and tests retained for reference |
 | [`@hank-warren/pi-cliproxyapi-provider`](packages/pi-cliproxyapi-provider) | Registers one [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) instance as a Pi model provider: `/v1/models` discovery, models.dev enrichment seeded from Pi's own built-in catalog, Anthropic Messages routing for Claude and Responses routing for Codex, and `xhigh`/`max` thinking levels; forked from [`pi-cliproxyapi-provider`](https://github.com/0xRichardH/pi-cliproxyapi-provider) |
 | [`@hank-warren/pi-codex-compaction`](packages/pi-codex-compaction) | Native encrypted Codex compaction through direct Codex or CLIProxyAPI, integrated with Pi's compaction lifecycle; forked from [`@ogulcancelik/pi-codex-compaction`](https://github.com/ogulcancelik/pi-extensions/tree/main/packages/pi-codex-compaction) |
+| [`@hank-warren/pi-codex-app-server`](packages/pi-codex-app-server) | Serves Pi over the Codex app-server protocol, so the Codex CLI, Codex IDE extensions and the ChatGPT mobile app's Remote Control drive real Pi sessions; `/codex-server` starts, inspects and pairs the daemon, and autostart is off so the host decides when one runs; forked from [`pi-codex-app-server`](https://github.com/Lqm1/pi-codex-app-server) (Apache-2.0) |
 
 ## Install
 
