@@ -1,6 +1,6 @@
 {
   "name": "@hank-warren/pi-stats",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "A compact /stats dashboard for all-time Pi token usage, including persisted subagents.",
   "type": "module",
   "keywords": [

@@ -1,5 +1,11 @@
 # @hank-warren/pi-stats
 
+## 0.4.2
+
+### Patch Changes
+
+- Label the month the heatmap grid ends in. The axis keyed each month change off its column's Monday and dropped a label that no longer fit at the right edge, so the current month was missing from the axis on 56% of days. Columns are now named for the month holding their Thursday, and the rightmost label is clamped left instead of dropped.
+
 ## 0.4.1
 
 ### Patch Changes
