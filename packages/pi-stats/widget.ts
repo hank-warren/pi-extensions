@@ -76,6 +76,45 @@ function localDay(time: number): string {
 	return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
+/**
+ * The heatmap's month label row: one character per week column, `weeks` wide.
+ *
+ * A column belongs to the month holding its Thursday, so it is named for whichever month
+ * owns four or more of its seven days. Labels are placed right to left because only the
+ * right edge is constrained: each one sits at its month's first column unless its
+ * neighbour crowds it, and shifts left just enough to stay clear.
+ */
+export function monthAxis(start: Date, weeks: number): string {
+	const monthOf = (week: number): number => {
+		const thursday = new Date(start);
+		thursday.setDate(thursday.getDate() + week * 7 + 3);
+		return thursday.getMonth();
+	};
+	/** Three characters plus a space, so neighbouring labels never touch. */
+	const spacing = 4;
+
+	const boundaries: { column: number; month: number }[] = [];
+	for (let week = 0; week < weeks; week++) {
+		const month = monthOf(week);
+		if (month !== monthOf(week - 1)) boundaries.push({ column: week, month });
+	}
+	// A grid too short to leave its month has no boundary to label, so name it after its
+	// last column like every other grid.
+	if (boundaries.length === 0) boundaries.push({ column: 0, month: monthOf(weeks - 1) });
+
+	const placed: { column: number; month: number }[] = [];
+	let rightmost = weeks - 3;
+	for (let index = boundaries.length - 1; index >= 0 && rightmost >= 0; index--) {
+		const column = Math.min(boundaries[index]!.column, rightmost);
+		placed.unshift({ column, month: boundaries[index]!.month });
+		rightmost = column - spacing;
+	}
+
+	let row = "";
+	for (const { column, month } of placed) row = row.padEnd(column, " ") + MONTHS[month]!;
+	return row.padEnd(weeks, " ").slice(0, weeks);
+}
+
 function padRight(value: string, width: number): string {
 	const clipped = truncateToWidth(value, Math.max(0, width), "");
 	return clipped + " ".repeat(Math.max(0, width - visibleWidth(clipped)));
@@ -424,22 +463,7 @@ export class StatsWidget implements Component {
 		const gap = Math.max(1, width - visibleWidth(heading) - visibleWidth(legend) - 1);
 		const lines = [`${heading}${" ".repeat(gap)}${theme.fg("dim", legend)}`];
 
-		let months = " ".repeat(HEATMAP_LABEL_WIDTH);
-		let lastLabel = -4;
-		for (let week = 0; week < weeks; week++) {
-			const date = new Date(start);
-			date.setDate(date.getDate() + week * 7);
-			const previous = new Date(date);
-			previous.setDate(previous.getDate() - 7);
-			if ((week === 0 || date.getMonth() !== previous.getMonth()) && week - lastLabel >= 4 && week + 3 <= weeks) {
-				months += MONTHS[date.getMonth()]!;
-				lastLabel = week;
-				week += 2;
-			} else {
-				months += " ";
-			}
-		}
-		lines.push(theme.fg("dim", months));
+		lines.push(theme.fg("dim", " ".repeat(HEATMAP_LABEL_WIDTH) + monthAxis(start, weeks)));
 
 		for (let weekday = 0; weekday < 7; weekday++) {
 			const label = weekday === 0 ? "Mon" : weekday === 2 ? "Wed" : weekday === 4 ? "Fri" : "   ";
