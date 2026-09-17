@@ -79,12 +79,10 @@ function localDay(time: number): string {
 /**
  * The heatmap's month label row: one character per week column, `weeks` wide.
  *
- * A column belongs to the month holding its Thursday — ISO 8601's tiebreak, which names
- * each column for whichever month owns four or more of its seven days. Keying off the
- * Monday instead pushes a month that starts mid-week onto its second column, which is how
- * the label for the month the grid ends in used to end up too close to the right edge to
- * be drawn at all. That label is the one the reader needs most, so it is placed first,
- * clamped left until its three characters fit, and wins any collision clamping causes.
+ * A column belongs to the month holding its Thursday, so it is named for whichever month
+ * owns four or more of its seven days. Labels are placed right to left because only the
+ * right edge is constrained: each one sits at its month's first column unless its
+ * neighbour crowds it, and shifts left just enough to stay clear.
  */
 export function monthAxis(start: Date, weeks: number): string {
 	const monthOf = (week: number): number => {
@@ -95,28 +93,26 @@ export function monthAxis(start: Date, weeks: number): string {
 	/** Three characters plus a space, so neighbouring labels never touch. */
 	const spacing = 4;
 
-	const last = { column: Math.max(0, Math.min(weeks - 3, lastBoundary(weeks, monthOf))), month: monthOf(weeks - 1) };
-	const placed = [last];
-	for (let week = 0; week + 3 <= weeks; week++) {
+	const boundaries: { column: number; month: number }[] = [];
+	for (let week = 0; week < weeks; week++) {
 		const month = monthOf(week);
-		if (month === monthOf(week - 1)) continue;
-		const previous = placed.at(-2);
-		if (previous && week - previous.column < spacing) continue;
-		if (last.column - week < spacing) continue;
-		placed.splice(placed.length - 1, 0, { column: week, month });
+		if (month !== monthOf(week - 1)) boundaries.push({ column: week, month });
+	}
+	// A grid too short to leave its month has no boundary to label, so name it after its
+	// last column like every other grid.
+	if (boundaries.length === 0) boundaries.push({ column: 0, month: monthOf(weeks - 1) });
+
+	const placed: { column: number; month: number }[] = [];
+	let rightmost = weeks - 3;
+	for (let index = boundaries.length - 1; index >= 0 && rightmost >= 0; index--) {
+		const column = Math.min(boundaries[index]!.column, rightmost);
+		placed.unshift({ column, month: boundaries[index]!.month });
+		rightmost = column - spacing;
 	}
 
 	let row = "";
 	for (const { column, month } of placed) row = row.padEnd(column, " ") + MONTHS[month]!;
 	return row.padEnd(weeks, " ").slice(0, weeks);
-}
-
-/** The column that starts the month the grid ends in, or column 0 if the grid never leaves it. */
-function lastBoundary(weeks: number, monthOf: (week: number) => number): number {
-	for (let week = weeks - 1; week > 0; week--) {
-		if (monthOf(week) !== monthOf(week - 1)) return week;
-	}
-	return 0;
 }
 
 function padRight(value: string, width: number): string {

@@ -168,20 +168,56 @@ function gridStart(today: Date, weeks = 53): Date {
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const labelsIn = (axis: string): string[] => axis.match(/[A-Z][a-z]{2}/g) ?? [];
 
+/** The month owning four or more of a column's seven days, counted rather than derived. */
+function majorityMonth(start: Date, column: number): number {
+	const tally = new Map<number, number>();
+	for (let day = 0; day < 7; day++) {
+		const date = new Date(start);
+		date.setDate(date.getDate() + column * 7 + day);
+		tally.set(date.getMonth(), (tally.get(date.getMonth()) ?? 0) + 1);
+	}
+	return [...tally].sort((a, b) => b[1] - a[1])[0]![0];
+}
+
+/** The columns that open a month, i.e. every month whose first column is inside the grid. */
+function monthOpenings(start: Date, weeks: number): number[] {
+	const openings: number[] = [];
+	for (let column = 0; column < weeks; column++) {
+		if (majorityMonth(start, column) !== majorityMonth(start, column - 1)) openings.push(column);
+	}
+	return openings;
+}
+
 test("month axis always labels the month the last column belongs to", () => {
 	// The bug: a month starting mid-week was detected one column late, and a label that no
 	// longer fit was dropped rather than nudged left, so the current month was missing from
-	// the axis on 56% of days. Sweep a full year and require the majority rule every day.
-	for (let day = 0; day < 365; day++) {
+	// the axis on 56% of days. Sweep three years, including the 2028 leap year.
+	for (let day = 0; day < 1095; day++) {
 		const today = new Date(2026, 0, 1, 12);
 		today.setDate(today.getDate() + day);
 		const start = gridStart(today);
-		// A column belongs to whichever month owns four or more of its seven days, which is
-		// the month holding its Thursday.
-		const thursday = new Date(start);
-		thursday.setDate(thursday.getDate() + 52 * 7 + 3);
 		const axis = monthAxis(start, 53);
-		assert.equal(labelsIn(axis).at(-1), MONTH_NAMES[thursday.getMonth()], `axis ends wrong on ${today.toDateString()}: ${axis}`);
+		assert.equal(labelsIn(axis).at(-1), MONTH_NAMES[majorityMonth(start, 52)], `axis ends wrong on ${today.toDateString()}: ${axis}`);
+	}
+});
+
+test("month axis labels every month that opens inside the grid", () => {
+	// Pinning only the last label is not enough: clamping it left used to evict its
+	// neighbour, leaving a five-column hole that silently mis-dates a whole month of cells.
+	for (const weeks of [12, 30, 53]) {
+		for (let day = 0; day < 1095; day += 3) {
+			const today = new Date(2026, 0, 1, 12);
+			today.setDate(today.getDate() + day);
+			const start = gridStart(today, weeks);
+			const axis = monthAxis(start, weeks);
+			const openings = monthOpenings(start, weeks);
+			const labels = labelsIn(axis);
+			assert.equal(labels.length, openings.length, `${openings.length} months open on ${today.toDateString()}: ${axis}`);
+			assert.deepEqual(labels, openings.map((column) => MONTH_NAMES[majorityMonth(start, column)]), `labels name the months that open: ${axis}`);
+			// A label may shift left to clear its neighbour, but never past its own column.
+			const columns = [...axis.matchAll(/[A-Z][a-z]{2}/g)].map((match) => match.index);
+			for (const [index, column] of columns.entries()) assert.ok(column <= openings[index]!, `label ${index} sits at or left of its month: ${axis}`);
+		}
 	}
 });
 
@@ -199,6 +235,8 @@ test("month axis fits the grid and keeps its labels apart", () => {
 	// The reported case: Sep 1 2026 falls on a Tuesday, so its column starts in August and
 	// the first September Monday lands at column 51 of 53 — too late to fit, and dropped.
 	assert.equal(monthAxis(gridStart(new Date(2026, 8, 17, 12)), 53), "  Oct  Nov Dec Jan  Feb Mar Apr  May Jun Jul  Aug Sep");
+	// A grid that ends just after New Year keeps December between November and January.
+	assert.equal(monthAxis(gridStart(new Date(2026, 0, 1, 12)), 53), "Jan  Feb Mar Apr May  Jun Jul Aug Sep Oct Nov Dec Jan");
 });
 
 test("keeps dropped columns visible as labelled continuation values", () => {
