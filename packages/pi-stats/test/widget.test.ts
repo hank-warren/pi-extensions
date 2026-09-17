@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { StatsWidget, formatCost, formatTokens } from "../widget.ts";
+import { StatsWidget, formatCost, formatTokens, monthAxis } from "../widget.ts";
 import type { ModelStats, ProjectStats, StatsRange, StatsSnapshot, ToolStats, UsageTotals } from "../types.ts";
 
 const theme = {
@@ -153,6 +153,52 @@ test("heatmap fills the available width with empty weeks instead of shrinking to
 	assert.equal(weekRow(200), 53);
 	// The narrowest width that still draws a heatmap keeps every column inside the row.
 	assert.ok(weekRow(72) + 6 <= 72);
+});
+
+/** The grid the widget draws for a given day: 53 columns ending on that week's Sunday. */
+function gridStart(today: Date, weeks = 53): Date {
+	const end = new Date(today);
+	end.setHours(12, 0, 0, 0);
+	end.setDate(end.getDate() + (6 - ((end.getDay() + 6) % 7)));
+	const start = new Date(end);
+	start.setDate(start.getDate() - weeks * 7 + 1);
+	return start;
+}
+
+const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const labelsIn = (axis: string): string[] => axis.match(/[A-Z][a-z]{2}/g) ?? [];
+
+test("month axis always labels the month the last column belongs to", () => {
+	// The bug: a month starting mid-week was detected one column late, and a label that no
+	// longer fit was dropped rather than nudged left, so the current month was missing from
+	// the axis on 56% of days. Sweep a full year and require the majority rule every day.
+	for (let day = 0; day < 365; day++) {
+		const today = new Date(2026, 0, 1, 12);
+		today.setDate(today.getDate() + day);
+		const start = gridStart(today);
+		// A column belongs to whichever month owns four or more of its seven days, which is
+		// the month holding its Thursday.
+		const thursday = new Date(start);
+		thursday.setDate(thursday.getDate() + 52 * 7 + 3);
+		const axis = monthAxis(start, 53);
+		assert.equal(labelsIn(axis).at(-1), MONTH_NAMES[thursday.getMonth()], `axis ends wrong on ${today.toDateString()}: ${axis}`);
+	}
+});
+
+test("month axis fits the grid and keeps its labels apart", () => {
+	for (const weeks of [12, 30, 53]) {
+		for (let day = 0; day < 365; day += 7) {
+			const today = new Date(2026, 0, 1, 12);
+			today.setDate(today.getDate() + day);
+			const axis = monthAxis(gridStart(today, weeks), weeks);
+			assert.equal(axis.length, weeks, `axis is ${weeks} columns wide`);
+			assert.doesNotMatch(axis, /[A-Z][a-z]{2}[A-Z]/, `labels stay a space apart: ${axis}`);
+			assert.ok(labelsIn(axis).length >= 2, `axis is labelled: ${axis}`);
+		}
+	}
+	// The reported case: Sep 1 2026 falls on a Tuesday, so its column starts in August and
+	// the first September Monday lands at column 51 of 53 — too late to fit, and dropped.
+	assert.equal(monthAxis(gridStart(new Date(2026, 8, 17, 12)), 53), "  Oct  Nov Dec Jan  Feb Mar Apr  May Jun Jul  Aug Sep");
 });
 
 test("keeps dropped columns visible as labelled continuation values", () => {
