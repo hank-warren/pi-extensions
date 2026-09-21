@@ -1,5 +1,11 @@
 # @hank-warren/pi-codex-compaction
 
+## 0.1.1
+
+### Patch Changes
+
+- Normalize tool call ids longer than the Responses API's 64-character limit by hashing them instead of truncating, so shared prefixes stay distinct and `function_call`/`function_call_output` pairs (including synthesized orphan outputs) remain matched. Ports upstream ogulcancelik/pi-extensions@bf71a26.
+
 ## 0.1.0
 
 ### Minor Changes
