@@ -1,6 +1,6 @@
 # pi-codex-compaction
 
-> **Fork.** Based on [`@ogulcancelik/pi-codex-compaction` 0.1.5](https://github.com/ogulcancelik/pi-extensions/tree/451e49da38e117f11f4b8e622c2bc432444f8a3a/packages/pi-codex-compaction) by Can Celik (MIT). Adds CLIProxyAPI support while retaining direct Codex compaction and upstream checkpoint compatibility. Do not load this fork and the upstream package together: both would handle the same compaction lifecycle.
+> **Fork.** Based on [`@ogulcancelik/pi-codex-compaction` 0.1.5](https://github.com/ogulcancelik/pi-extensions/tree/bf71a268ae30f445f4032d95f7ab36558464a05a/packages/pi-codex-compaction) by Can Celik (MIT). Adds CLIProxyAPI support while retaining direct Codex compaction and upstream checkpoint compatibility. Do not load this fork and the upstream package together: both would handle the same compaction lifecycle.
 
 Native OpenAI Codex compaction integrated into Pi's existing `/compact`, context-threshold, and overflow-recovery lifecycle. Instead of summarizing older messages as text, the extension requests an opaque encrypted checkpoint and stores it in Pi's compaction entry.
 
