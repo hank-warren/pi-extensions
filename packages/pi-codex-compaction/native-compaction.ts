@@ -146,6 +146,11 @@ function normalizedItemId(value: string | undefined): string | undefined {
 	return sanitized.startsWith("fc_") ? sanitized : `fc_${sanitized}`.slice(0, 64);
 }
 
+// Hash overlong call IDs to satisfy the 64-character limit without truncation collisions or broken result pairing.
+function normalizedCallId(value: string): string {
+	return value.length <= 64 ? value : `call_${shortHash(value)}`;
+}
+
 function textSignature(value: unknown): { id?: string; phase?: "commentary" | "final_answer" } {
 	if (typeof value !== "string" || !value) return {};
 	try {
@@ -260,7 +265,8 @@ function messagesToResponseItems(model: Model<any>, messages: Message[], tools: 
 					continue;
 				}
 				if (block.type === "toolCall" && typeof block.id === "string") {
-					const [callId, rawItemId] = block.id.split("|");
+					const [rawCallId, rawItemId] = block.id.split("|");
+					const callId = normalizedCallId(rawCallId);
 					const itemId = isSameProviderAndApi ? normalizedItemId(rawItemId) : undefined;
 					pendingToolCalls.set(block.id, callId);
 					items.push({
@@ -273,7 +279,8 @@ function messagesToResponseItems(model: Model<any>, messages: Message[], tools: 
 				}
 			}
 		} else if (message.role === "toolResult" && typeof message.toolCallId === "string") {
-			const [callId] = message.toolCallId.split("|");
+			const [rawCallId] = message.toolCallId.split("|");
+			const callId = normalizedCallId(rawCallId);
 			pendingToolCalls.delete(message.toolCallId);
 			items.push({ type: "function_call_output", call_id: callId, output: toolResultOutput(message, model) });
 
