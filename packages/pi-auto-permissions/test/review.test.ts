@@ -8,6 +8,8 @@ import {
 	buildGuardianPolicySection,
 	buildReviewEnvelope,
 	collectReviewEvidence,
+	DEFAULT_EVIDENCE_CAPS,
+	FULL_REBUILD_KEEP_TOOL_RECORDS,
 	parsePermissionVerdict,
 	parsePrefilterVerdict,
 	PREFILTER_INSTRUCTION,
@@ -449,6 +451,15 @@ describe("evidence pruning", () => {
 		// 0 disables; keeping >= count leaves everything verbatim.
 		assert.deepEqual(applyFullRebuildEviction(records, 0), records);
 		assert.deepEqual(applyFullRebuildEviction(records, 3), records);
+	});
+
+	test("pins the hardcoded evidence pruning limits", () => {
+		assert.deepEqual(DEFAULT_EVIDENCE_CAPS, {
+			toolRecordMaxChars: 500,
+			assistantRecordMaxChars: 1000,
+			compactionRecordMaxChars: 4000,
+		});
+		assert.equal(FULL_REBUILD_KEEP_TOOL_RECORDS, 60);
 	});
 
 	test("applyFullRebuildEviction leaves CUSTOM records verbatim and uncounted", async () => {

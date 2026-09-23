@@ -10,13 +10,6 @@ import { DEFAULT_RULES } from "../default-rules.ts";
 import type { Gate } from "../gates.ts";
 import { scratchDir } from "./support/temp-dir.ts";
 
-const PRUNING_DEFAULTS = {
-	toolRecordMaxChars: 500,
-	assistantRecordMaxChars: 1000,
-	compactionRecordMaxChars: 4000,
-	fullRebuildKeepToolRecords: 60,
-} as const;
-
 function configFile(value: unknown): string {
 	const dir = scratchDir("pi-auto-permissions-");
 	const path = join(dir, "config.json");
@@ -35,7 +28,6 @@ describe("auto permissions config", () => {
 			projectInstructions: false,
 			userAnswerTools: [],
 			userMessageTypes: [],
-			...PRUNING_DEFAULTS,
 		});
 		assert.deepEqual(config.evaluationLog, {
 			enabled: false,
@@ -157,7 +149,6 @@ describe("auto permissions config", () => {
 			projectInstructions: true,
 			userAnswerTools: [],
 			userMessageTypes: [],
-			...PRUNING_DEFAULTS,
 		});
 		assert.deepEqual(config.ui, { enabled: true, resultDisplayMs: 5000, placement: "toolRow" });
 		assert.equal(config.rules.length, 1);
@@ -172,7 +163,6 @@ describe("auto permissions config", () => {
 			projectInstructions: false,
 			userAnswerTools: ["ask_user_question", "plan_review"],
 			userMessageTypes: [],
-			...PRUNING_DEFAULTS,
 		});
 	});
 
@@ -200,26 +190,20 @@ describe("auto permissions config", () => {
 		}
 	});
 
-	test("accepts custom evidence pruning knobs, including 0 to disable", () => {
+	test("legacy pruning knobs in reviewEvidence are ignored, even malformed", () => {
 		const path = configFile({
-			reviewEvidence: { toolRecordMaxChars: 0, assistantRecordMaxChars: 2500, compactionRecordMaxChars: 8000, fullRebuildKeepToolRecords: 100 },
+			reviewEvidence: {
+				toolRecordMaxChars: 10,
+				assistantRecordMaxChars: -1,
+				compactionRecordMaxChars: "500",
+				fullRebuildKeepToolRecords: "x",
+			},
 		});
-		const evidence = loadAutoPermissionsConfig(path).reviewEvidence;
-		assert.equal(evidence.toolRecordMaxChars, 0);
-		assert.equal(evidence.assistantRecordMaxChars, 2500);
-		assert.equal(evidence.compactionRecordMaxChars, 8000);
-		assert.equal(evidence.fullRebuildKeepToolRecords, 100);
-	});
-
-	test("rejects malformed evidence pruning knobs", () => {
-		for (const bad of [-1, 1.5, "500", true, 1_000_001]) {
-			const path = configFile({ reviewEvidence: { toolRecordMaxChars: bad } });
-			assert.throws(
-				() => loadAutoPermissionsConfig(path),
-				(error: unknown) => error instanceof Error
-					&& error.message.includes("reviewEvidence.toolRecordMaxChars must be an integer between 0 and 1000000"),
-			);
-		}
+		assert.deepEqual(loadAutoPermissionsConfig(path).reviewEvidence, {
+			projectInstructions: false,
+			userAnswerTools: [],
+			userMessageTypes: [],
+		});
 	});
 
 	test("rejects malformed user answer tools", () => {

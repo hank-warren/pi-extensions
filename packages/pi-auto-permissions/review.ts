@@ -40,6 +40,14 @@ export interface EvidenceCaps {
   compactionRecordMaxChars: number;
 }
 
+export const DEFAULT_EVIDENCE_CAPS: EvidenceCaps = {
+  toolRecordMaxChars: 500,
+  assistantRecordMaxChars: 1000,
+  compactionRecordMaxChars: 4000,
+};
+
+export const FULL_REBUILD_KEEP_TOOL_RECORDS = 60;
+
 const TRUNCATION_HEAD_SHARE = 0.7;
 
 /**

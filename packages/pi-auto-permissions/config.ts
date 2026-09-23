@@ -64,12 +64,6 @@ export interface AutoPermissionsConfig {
      * authorization. Naming the types keeps that an explicit choice.
      */
     userMessageTypes: string[];
-    /** Per-record caps at evidence creation; 0 disables. User records are never truncated. */
-    toolRecordMaxChars: number;
-    assistantRecordMaxChars: number;
-    compactionRecordMaxChars: number;
-    /** On full envelope rebuilds, collapse all but the newest N tool records; 0 disables. */
-    fullRebuildKeepToolRecords: number;
   };
   evaluationLog: {
     enabled: boolean;
@@ -264,17 +258,6 @@ function resolvePrompt(
   return { prompt, source: { kind: "file", path: resolved } };
 }
 
-const EVIDENCE_PRUNING_DEFAULTS = {
-  toolRecordMaxChars: 500,
-  assistantRecordMaxChars: 1000,
-  compactionRecordMaxChars: 4000,
-  fullRebuildKeepToolRecords: 60,
-} as const;
-
-function resolvePruningKnob(evidence: Record<string, unknown>, name: keyof typeof EVIDENCE_PRUNING_DEFAULTS): number {
-  return boundedInteger(evidence[name], EVIDENCE_PRUNING_DEFAULTS[name], 0, 1_000_000, `reviewEvidence.${name}`);
-}
-
 function resolveReviewEvidence(raw: Record<string, unknown>): AutoPermissionsConfig["reviewEvidence"] {
   const evidence = objectBlock(raw.reviewEvidence, "reviewEvidence") ?? {};
   const projectInstructions = optionalBoolean(evidence.projectInstructions, "reviewEvidence.projectInstructions");
@@ -284,10 +267,6 @@ function resolveReviewEvidence(raw: Record<string, unknown>): AutoPermissionsCon
     projectInstructions: projectInstructions === true,
     userAnswerTools,
     userMessageTypes,
-    toolRecordMaxChars: resolvePruningKnob(evidence, "toolRecordMaxChars"),
-    assistantRecordMaxChars: resolvePruningKnob(evidence, "assistantRecordMaxChars"),
-    compactionRecordMaxChars: resolvePruningKnob(evidence, "compactionRecordMaxChars"),
-    fullRebuildKeepToolRecords: resolvePruningKnob(evidence, "fullRebuildKeepToolRecords"),
   };
 }
 

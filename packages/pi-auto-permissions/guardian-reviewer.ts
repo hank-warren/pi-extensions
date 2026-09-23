@@ -19,13 +19,14 @@ import {
   buildGuardianPolicySection,
   buildReviewEnvelope,
   collectReviewEvidence,
+  DEFAULT_EVIDENCE_CAPS,
+  FULL_REBUILD_KEEP_TOOL_RECORDS,
   INJECTED_USER_MESSAGE_SYSTEM_PROMPT,
   OVERRIDE_FEEDBACK_SYSTEM_PROMPT,
   parsePermissionVerdict,
   parsePrefilterVerdict,
   PREFILTER_INSTRUCTION,
   SUBAGENT_CONTEXT_SYSTEM_PROMPT,
-  type EvidenceCaps,
   type PermissionVerdict,
   type ReviewEvidenceRecord,
 } from "./review.js";
@@ -81,12 +82,6 @@ function reviewerFingerprint(
     baseUrl: model.baseUrl,
     reasoning,
     systemPrompt,
-    evidencePruning: [
-      config.reviewEvidence.toolRecordMaxChars,
-      config.reviewEvidence.assistantRecordMaxChars,
-      config.reviewEvidence.compactionRecordMaxChars,
-      config.reviewEvidence.fullRebuildKeepToolRecords,
-    ],
     userAnswerTools: config.reviewEvidence.userAnswerTools.length
       ? [...config.reviewEvidence.userAnswerTools].sort()
       : undefined,
@@ -238,14 +233,6 @@ export function createGuardianReviewer(
     for (const sessionId of sessionIds) cleanupReviewerSession(sessionId);
   }
 
-  function evidenceCaps(config: AutoPermissionsConfig): EvidenceCaps {
-    return {
-      toolRecordMaxChars: config.reviewEvidence.toolRecordMaxChars,
-      assistantRecordMaxChars: config.reviewEvidence.assistantRecordMaxChars,
-      compactionRecordMaxChars: config.reviewEvidence.compactionRecordMaxChars,
-    };
-  }
-
   /**
    * The stable evidence stream for one scope: the session's finalized records
    * with the user's own permission decisions interleaved. Built the same way
@@ -259,7 +246,7 @@ export function createGuardianReviewer(
         ctx.sessionManager.buildContextEntries(),
         target.toolCallId,
         config.reviewEvidence.userAnswerTools,
-        evidenceCaps(config),
+        DEFAULT_EVIDENCE_CAPS,
         config.reviewEvidence.userMessageTypes,
       ),
       deps.overrides.list(),
@@ -376,7 +363,7 @@ export function createGuardianReviewer(
       timestamp: Date.now(),
     });
 
-    const fullEvidence = () => applyFullRebuildEviction(evidence, config.reviewEvidence.fullRebuildKeepToolRecords);
+    const fullEvidence = () => applyFullRebuildEviction(evidence, FULL_REBUILD_KEEP_TOOL_RECORDS);
 
     // Stage one: an optional stateless single-token prefilter at minimal
     // reasoning. SAFE approves; REVIEW and every failure fall through to the
