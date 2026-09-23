@@ -451,6 +451,24 @@ describe("evidence pruning", () => {
 		assert.deepEqual(applyFullRebuildEviction(records, 3), records);
 	});
 
+	test("applyFullRebuildEviction leaves CUSTOM records verbatim and uncounted", async () => {
+		const { applyFullRebuildEviction } = await import("../review.ts");
+		const custom = { key: "c1", source: "tool" as const, text: "CUSTOM subagent-notify: done, error" };
+		const records = [
+			custom,
+			{ key: "t1", source: "tool" as const, text: 'TOOL bash {"command":"old"} → success' },
+			{ key: "c2", source: "tool" as const, text: "CUSTOM plan-note: middle" },
+			{ key: "t2", source: "tool" as const, text: 'TOOL bash {"command":"new"} → error' },
+		];
+		const evicted = applyFullRebuildEviction(records, 1);
+		assert.equal(evicted[0].text, custom.text);
+		assert.equal(evicted[1].text, "TOOL bash → success");
+		assert.equal(evicted[2].text, "CUSTOM plan-note: middle");
+		assert.equal(evicted[3].text, 'TOOL bash {"command":"new"} → error');
+		assert.deepEqual(applyFullRebuildEviction(records, 0), records);
+		assert.deepEqual(applyFullRebuildEviction(records, 2), records);
+	});
+
 	test("an allowlisted injected message is user-source; everything else is capped tool-source", () => {
 		// An extension that anchors an objective with appendCustomMessageEntry
 		// reaches the model as a user message, but the session entry is a

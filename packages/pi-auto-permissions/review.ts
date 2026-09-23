@@ -67,8 +67,9 @@ export function truncateEvidenceText(text: string, maxChars: number): string {
 const COLLAPSED_TOOL_PATTERN = /^TOOL (\S+)/;
 
 /**
- * Collapse all but the newest keepLastToolRecords tool records to bare
- * one-liners. Apply only when building a full reviewer envelope (no lineage
+ * Collapse all but the newest keepLastToolRecords TOOL call records to bare
+ * one-liners. CUSTOM injected records are left verbatim and never counted:
+ * they carry the motive evidence. Apply only when building a full reviewer envelope (no lineage
  * base): mid-lineage the evidence list must stay append-only or the delta
  * cache would be invalidated, but on a full rebuild the cache is already
  * gone, so pruning is free. Keys are preserved so future delta turns still
@@ -81,13 +82,14 @@ export function applyFullRebuildEviction(
   if (keepLastToolRecords <= 0) return [...records];
   const toolIndexes: number[] = [];
   for (let index = 0; index < records.length; index++) {
-    if (records[index].source === "tool") toolIndexes.push(index);
+    const record = records[index];
+    if (record.source === "tool" && COLLAPSED_TOOL_PATTERN.test(record.text)) toolIndexes.push(index);
   }
   if (toolIndexes.length <= keepLastToolRecords) return [...records];
   const evict = new Set(toolIndexes.slice(0, toolIndexes.length - keepLastToolRecords));
   return records.map((record, index) => {
     if (!evict.has(index)) return record;
-    const name = COLLAPSED_TOOL_PATTERN.exec(record.text)?.[1] ?? "call";
+    const name = COLLAPSED_TOOL_PATTERN.exec(record.text)![1];
     const status = record.text.trimEnd().endsWith("error") ? "error" : "success";
     return { ...record, text: `TOOL ${name} → ${status}` };
   });
