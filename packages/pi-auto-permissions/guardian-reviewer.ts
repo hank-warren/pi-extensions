@@ -522,7 +522,7 @@ export function createGuardianReviewer(
   function recordReviewerUsage(config: AutoPermissionsConfig, model: { provider: string; id: string }, usage: unknown, subagent: boolean, label: "guardian" | "prefilter" | "setup" = "guardian"): void {
     if (!config.usageLog.enabled) return;
     try {
-      appendUsageRecord(config.usageLog.path, buildUsageLogRecord(model.provider, model.id, usage, label, "auto-permissions", subagent));
+      appendUsageRecord(config.usageLog.path, buildUsageLogRecord(model.provider, model.id, usage, label, subagent));
     } catch {
       // Usage accounting is optional and must never block a permission decision.
     }

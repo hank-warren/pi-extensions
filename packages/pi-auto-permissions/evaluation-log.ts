@@ -1,5 +1,4 @@
-import { chmodSync, mkdirSync, appendFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { appendJsonlRecord } from "./jsonl-sidecar.js";
 import type { PermissionDecision, ReviewEvidenceRecord } from "./review.js";
 
 export const PROMPT_FEEDBACK_OPTIONS = {
@@ -113,7 +112,5 @@ export function expectedDecisionForChoice(
 }
 
 export function appendPromptEvaluation(path: string, record: EvaluationRecord): void {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  appendFileSync(path, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
-  chmodSync(path, 0o600);
+  appendJsonlRecord(path, record);
 }

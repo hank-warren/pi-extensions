@@ -1,9 +1,6 @@
-import { appendFileSync, chmodSync, mkdirSync, readFileSync, renameSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { dirname } from "node:path";
-
-/** Rotate once the sidecar grows past this size; one previous generation is kept. */
-const DENIAL_LOG_ROTATE_BYTES = 16 * 1024 * 1024;
+import { appendJsonlRecord, SIDECAR_ROTATE_BYTES } from "./jsonl-sidecar.js";
 
 /** The two ways a review can end without the command running. */
 export type DenialVerdict = "revise" | "block";
@@ -58,20 +55,8 @@ export function buildDenialRecord(input: {
   };
 }
 
-function rotateIfLarge(path: string): void {
-  try {
-    if (statSync(path).size < DENIAL_LOG_ROTATE_BYTES) return;
-    renameSync(path, `${path}.1`);
-  } catch {
-    // A missing or unrotatable sidecar simply keeps appending.
-  }
-}
-
 export function appendDenialRecord(path: string, record: DenialRecord): void {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  rotateIfLarge(path);
-  appendFileSync(path, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
-  chmodSync(path, 0o600);
+  appendJsonlRecord(path, record, SIDECAR_ROTATE_BYTES);
 }
 
 /**

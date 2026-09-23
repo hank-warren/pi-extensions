@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, test } from "node:test";
-import { mkdtempSync, rmSync, statSync, writeFileSync, appendFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -9,6 +9,7 @@ import {
 	readRecentDenials,
 	type DenialRecord,
 } from "../denial-log.ts";
+import { SIDECAR_ROTATE_BYTES } from "../jsonl-sidecar.ts";
 
 const tempDirs: string[] = [];
 
@@ -73,5 +74,18 @@ describe("denial log", () => {
 		const path = tempPath();
 		writeFileSync(path, `${JSON.stringify({ v: 1, command: "x" })}\n`, "utf8");
 		assert.deepEqual(readRecentDenials(path, 10), []);
+	});
+
+	test("rotates one generation once the sidecar reaches the cap", () => {
+		const path = tempPath();
+		writeFileSync(path, "");
+		truncateSync(path, SIDECAR_ROTATE_BYTES);
+		const denial = record("after-rotation");
+		appendDenialRecord(path, denial);
+
+		assert.ok(existsSync(`${path}.1`), "previous generation is retained");
+		const lines = readFileSync(path, "utf8").trim().split("\n");
+		assert.equal(lines.length, 1);
+		assert.deepEqual(JSON.parse(lines[0]!) as DenialRecord, denial);
 	});
 });

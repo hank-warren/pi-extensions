@@ -53,6 +53,7 @@
     "subagent-context.ts",
     "evaluation-log.ts",
     "gates.ts",
+    "jsonl-sidecar.ts",
     "override-evidence.ts",
     "review.ts",
     "review-queue.ts",

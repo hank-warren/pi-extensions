@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OptionSelector } from "@hank-warren/pi-permission-selector/selector.ts";
@@ -13,6 +13,7 @@ import {
   shouldOfferStandingApproval,
   type PromptEvaluationRecord,
 } from "../evaluation-log.ts";
+import { SIDECAR_ROTATE_BYTES } from "../jsonl-sidecar.ts";
 
 const tempDirs: string[] = [];
 
@@ -135,4 +136,17 @@ test("appends private JSONL evaluation records", () => {
   assert.equal(lines[1].expectedDecision, "ask_user");
   assert.equal(lines[2].expectedDecision, "ask_user");
   assert.equal(statSync(path).mode & 0o777, 0o600);
+});
+
+test("the evaluation log never rotates", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-auto-permissions-evals-"));
+  tempDirs.push(dir);
+  const path = join(dir, "review-evals.jsonl");
+  writeFileSync(path, "");
+  truncateSync(path, SIDECAR_ROTATE_BYTES);
+  const entry = record("approve", "allow_unnecessary");
+  appendPromptEvaluation(path, entry);
+
+  assert.ok(!existsSync(`${path}.1`));
+  assert.equal(statSync(path).size, SIDECAR_ROTATE_BYTES + Buffer.byteLength(`${JSON.stringify(entry)}\n`));
 });
