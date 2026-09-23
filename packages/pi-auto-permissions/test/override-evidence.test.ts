@@ -47,19 +47,6 @@ describe("override evidence records", () => {
 		assert.ok(overrideEvidenceRecord(override(0, { choice: "block" })).text.includes("unless a later user statement contradicts"));
 	});
 
-	test("renders standing approvals with a distinct prefix and global comparable scope", () => {
-		const result = overrideEvidenceRecord(override(9, {
-			standing: {
-				grantedAt: "2026-08-20T12:00:00.000Z",
-				project: "/work/acme",
-				gateGroup: "ssh",
-			},
-		}));
-		assert.ok(result.text.startsWith('USER (standing permission override, granted 2026-08-20 in "/work/acme"):'));
-		assert.match(result.text, /comparable actions in any project/);
-		assert.match(result.text, /materially higher risk class/);
-	});
-
 	test("very long commands are truncated in the override text", () => {
 		const long = "x".repeat(5000);
 		const text = overrideEvidenceRecord(override(0, { command: long, reviewerReason: long })).text;

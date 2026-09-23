@@ -5,7 +5,6 @@ export const PROMPT_FEEDBACK_OPTIONS = {
   allowUnnecessary: "Allow — asking was unnecessary",
   allowAppropriate: "Allow — asking was appropriate",
   block: "Block — asking was appropriate",
-  allowStanding: "Allow and stop asking about comparable commands",
 } as const;
 
 export type PromptEvaluationUserChoice = "allow_unnecessary" | "allow_appropriate" | "block";
@@ -13,29 +12,16 @@ export type PromptEvaluationUserChoice = "allow_unnecessary" | "allow_appropriat
 export interface PromptChoiceClassification {
   allowsExecution: boolean;
   userChoice?: PromptEvaluationUserChoice;
-  standingApproval?: boolean;
 }
 
-export function shouldOfferStandingApproval(
-  decisionSource: "guardian" | "review_failure",
-  standingApprovalsEnabled: boolean,
-): boolean {
-  return decisionSource === "guardian" && standingApprovalsEnabled;
-}
-
-export function permissionPromptOptions(
-  evaluationLoggingEnabled: boolean,
-  offerStandingApproval = false,
-): string[] {
-  const options = evaluationLoggingEnabled
+export function permissionPromptOptions(evaluationLoggingEnabled: boolean): string[] {
+  return evaluationLoggingEnabled
     ? [
       PROMPT_FEEDBACK_OPTIONS.allowUnnecessary,
       PROMPT_FEEDBACK_OPTIONS.block,
       PROMPT_FEEDBACK_OPTIONS.allowAppropriate,
     ]
     : ["Allow", "Block"];
-  if (offerStandingApproval) options.push(PROMPT_FEEDBACK_OPTIONS.allowStanding);
-  return options;
 }
 
 export interface PromptEvaluationRecord {
@@ -69,9 +55,6 @@ export function classifyPromptChoice(choice: string | undefined): PromptChoiceCl
   }
   if (choice === PROMPT_FEEDBACK_OPTIONS.allowAppropriate) {
     return { allowsExecution: true, userChoice: "allow_appropriate" };
-  }
-  if (choice === PROMPT_FEEDBACK_OPTIONS.allowStanding) {
-    return { allowsExecution: true, userChoice: "allow_unnecessary", standingApproval: true };
   }
   if (choice === PROMPT_FEEDBACK_OPTIONS.block) {
     return { allowsExecution: false, userChoice: "block" };

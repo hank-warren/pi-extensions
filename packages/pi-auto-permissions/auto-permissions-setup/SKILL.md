@@ -42,7 +42,7 @@ Use `ask_user_question`; do not replace the interview with assumptions in prose.
 
 - Classify ambiguous hosts as production, staging, development, or not theirs.
 - Confirm source-control organizations, registries, buckets, and internal domains.
-- Surface measured friction with counts and a concrete choice: “SSH status checks prompted 14 times — standing approval or a softDeny carve-out?”
+- Surface measured friction with counts and a concrete choice: “SSH status checks prompted 14 times — a guardianPolicy.allow entry or a softDeny carve-out?”
 - Ask which boundaries are absolute. User statements such as “never push outside our orgs” are candidates for `hardDeny`.
 
 Production-looking or customer-looking names are not proof, but they require classification. If a hostname matches production/customer patterns or the user says it is production or customer-facing, propose it as `softDeny`, never `environment`.

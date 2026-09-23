@@ -180,7 +180,6 @@ const MENU_ROW = {
 	timeout: 3,
 	systemPrompt: 4,
 	recentDenials: 5,
-	standingApprovals: 6,
 } as const;
 
 /** Resolve with the promise's value, or the sentinel while it is still pending. */
@@ -219,7 +218,6 @@ interface SetupOptions {
 interface Harness {
 	configPath: string;
 	denialLogPath: string;
-	standingApprovalsPath: string;
 	mock: ReturnType<typeof createMockPi>;
 	context: ReturnType<typeof createMockContext>;
 	ctx: never;
@@ -236,7 +234,6 @@ interface Harness {
 	toolCall(command: string, toolCallId?: string): Promise<BlockResult>;
 	settingsCommand(args?: string): Promise<void>;
 	denials(): DenialLine[];
-	standingApprovals(): Array<{ gate: { label: string; group: string }; command: string; reason: string; project: string }>;
 	overrideEntries(): Array<{ seq: number; overrides: Array<Record<string, unknown>> }>;
 }
 
@@ -271,7 +268,6 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 	const harness: Harness = {
 		configPath,
 		denialLogPath: join(dir, "denials.jsonl"),
-		standingApprovalsPath: join(dir, "standing-approvals.jsonl"),
 		mock,
 		context: undefined as never,
 		calls,
@@ -304,13 +300,6 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 				.split("\n")
 				.filter((line) => line.trim())
 				.map((line) => JSON.parse(line) as DenialLine);
-		},
-		standingApprovals() {
-			if (!existsSync(harness.standingApprovalsPath)) return [];
-			return readFileSync(harness.standingApprovalsPath, "utf8")
-				.split("\n")
-				.filter((line) => line.trim())
-				.map((line) => JSON.parse(line));
 		},
 		overrideEntries() {
 			return mock.entries
@@ -758,76 +747,11 @@ test("14 · session_shutdown then session_start discards the lineage and restore
 });
 
 /**
- * Stage A2: the surfaces the cases above do not reach — the standing-approval
- * ledger and the `/auto-permissions` command.
+ * Stage A2: the surface the cases above do not reach — the
+ * `/auto-permissions` command.
  */
 
 const SETUP_HANDOFF = "Use the auto-permissions-setup skill to set up my Auto Permissions policy.";
-const ALLOW_STANDING = "Allow and stop asking about comparable commands";
-
-test("16 · a standing approval is written to the ledger, kept out of the session entry, and reloaded at session_start", async () => {
-	await withExtension(
-		{
-			rules: [GUARDED_RULE],
-			completeSimple: (_call, index) =>
-				assistantResponse(
-					index === 0
-						? verdictText("ask_user", "force push rewrites history")
-						: verdictText("approve", "covered by the standing approval"),
-				),
-		},
-		async (harness) => {
-			await harness.sessionStart();
-
-			harness.answers.push(ALLOW_STANDING);
-			assert.equal(await harness.toolCall("git push --force origin main", "call-1"), undefined);
-
-			const ledger = harness.standingApprovals();
-			assert.equal(ledger.length, 1);
-			assert.deepEqual(ledger[0].gate, { label: "Git push", group: "git" });
-			assert.equal(ledger[0].command, "git push --force origin main");
-			assert.equal(ledger[0].reason, "force push rewrites history");
-			assert.deepEqual(
-				harness.overrideEntries().at(-1)?.overrides,
-				[],
-				"ledger-backed approvals are not duplicated into the session entry",
-			);
-
-			assert.equal(await harness.toolCall("git push --force origin dev", "call-2"), undefined);
-			assert.match(
-				harness.calls[1].envelope,
-				/USER \(standing permission override, granted \d{4}-\d{2}-\d{2} in .*\): allowed gated command \\"git push --force origin main\\"/u,
-			);
-
-			await harness.sessionShutdown();
-			await harness.sessionStart();
-			assert.equal(await harness.toolCall("git push --force origin qa", "call-3"), undefined);
-			assert.match(
-				harness.calls[2].envelope,
-				/USER \(standing permission override/u,
-			);
-		},
-	);
-
-	// The other half of the invariant: an infrastructure failure is not a
-	// guardian judgment, so it never offers to stop asking.
-	await withExtension(
-		{
-			rules: [GUARDED_RULE],
-			completeSimple: () => {
-				throw new Error("reviewer offline");
-			},
-		},
-		async (harness) => {
-			await harness.sessionStart();
-
-			harness.answers.push("Block");
-			await harness.toolCall("git push origin main");
-			assert.doesNotMatch(harness.prompts[0].join("\n"), /stop asking about comparable commands/u);
-			assert.deepEqual(harness.standingApprovals(), []);
-		},
-	);
-});
 
 test("17 · /auto-permissions refuses to open over an invalid config, opens over a valid one, and hands setup to the skill", async () => {
 	await withExtension({ rules: [GUARDED_RULE] }, async (harness) => {
@@ -1094,7 +1018,7 @@ test("21 · the review widget clears itself after ui.resultDisplayMs, and a shut
 	);
 });
 
-test("22 · the settings menu reverts a failed save and revokes a standing approval", async () => {
+test("22 · the settings menu reverts a failed save", async () => {
 	await withExtension(
 		{
 			rules: [GUARDED_RULE],
@@ -1126,59 +1050,6 @@ test("22 · the settings menu reverts a failed save and revokes a standing appro
 				saved.enabled,
 				undefined,
 				"the failed edit was reverted: a still-disabled `settings` would have written enabled: false",
-			);
-		},
-	);
-
-	let settingsPhase = false;
-	await withExtension(
-		{
-			rules: [GUARDED_RULE],
-			completeSimple: (_call, index) =>
-				assistantResponse(
-					index === 0
-						? verdictText("ask_user", "force push rewrites history")
-						: verdictText("approve", "covered by the standing approval"),
-				),
-			custom: async (factory, harness) => {
-				if (!settingsPhase) return answerOptionSelector(factory, harness);
-				settingsPhase = false;
-				const menu = buildMenuComponent(factory, () => {});
-				for (let row = 0; row < MENU_ROW.standingApprovals; row += 1) menu.handleInput(KEY_DOWN);
-				menu.handleInput(KEY_ENTER);
-				assert.match(menu.render(100).join("\n"), /Standing approvals/u);
-				menu.handleInput(KEY_ENTER);
-				assert.match(menu.render(100).join("\n"), /Revoke standing approval\?/u);
-				menu.handleInput(KEY_ENTER); // "Revoke"
-				return undefined;
-			},
-		},
-		async (harness) => {
-			await harness.sessionStart();
-
-			harness.answers.push(ALLOW_STANDING);
-			assert.equal(await harness.toolCall("git push --force origin main", "call-1"), undefined);
-			assert.equal(harness.standingApprovals().length, 1);
-
-			assert.equal(await harness.toolCall("git push --force origin dev", "call-2"), undefined);
-			const lineageSessionId = harness.calls[1].options.sessionId;
-			assert.match(harness.calls[1].envelope, /USER \(standing permission override/u);
-
-			settingsPhase = true;
-			await harness.settingsCommand();
-			assert.deepEqual(harness.standingApprovals(), [], "the ledger entry is gone");
-			assert.equal(harness.context.notifications.at(-1)?.message, "Standing approval revoked.");
-
-			assert.equal(await harness.toolCall("git push --force origin qa", "call-3"), undefined);
-			assert.doesNotMatch(
-				harness.calls[2].envelope,
-				/USER \(standing permission override/u,
-				"the revoked approval stops being evidence",
-			);
-			assert.notEqual(
-				harness.calls[2].options.sessionId,
-				lineageSessionId,
-				"the reviewer conversation that saw the approval is not continued",
 			);
 		},
 	);

@@ -10,7 +10,6 @@ import {
   expectedDecisionForChoice,
   permissionPromptOptions,
   PROMPT_FEEDBACK_OPTIONS,
-  shouldOfferStandingApproval,
   type PromptEvaluationRecord,
 } from "../evaluation-log.ts";
 import { SIDECAR_ROTATE_BYTES } from "../jsonl-sidecar.ts";
@@ -47,34 +46,17 @@ test("uses feedback choices only when evaluation logging is enabled", () => {
   ]);
 });
 
-test("offers standing approval only for guardian-source prompts", () => {
-  assert.equal(shouldOfferStandingApproval("guardian", true), true);
-  assert.equal(shouldOfferStandingApproval("guardian", false), false);
-  assert.equal(shouldOfferStandingApproval("review_failure", true), false);
-  assert.deepEqual(permissionPromptOptions(true, true), [
-    PROMPT_FEEDBACK_OPTIONS.allowUnnecessary,
-    PROMPT_FEEDBACK_OPTIONS.block,
-    PROMPT_FEEDBACK_OPTIONS.allowAppropriate,
-    PROMPT_FEEDBACK_OPTIONS.allowStanding,
-  ]);
-  assert.deepEqual(permissionPromptOptions(false, true), [
-    "Allow",
-    "Block",
-    PROMPT_FEEDBACK_OPTIONS.allowStanding,
-  ]);
-});
-
-test("the four-option guardian prompt renders within a narrow width", () => {
+test("the three-option labeled prompt renders within a narrow width", () => {
   const selector = new OptionSelector({
     title: "Remote command — Auto Permissions needs approval",
-    options: permissionPromptOptions(true, true).map((value) => ({ value, label: value })),
+    options: permissionPromptOptions(true).map((value) => ({ value, label: value })),
     onSelect: () => {},
     onCancel: () => {},
     requestRender: () => {},
   });
   const width = 44;
   const lines = selector.render(width).map((line) => line.replace(/\x1b\[[0-9;]*m/g, ""));
-  assert.ok(lines.some((line) => line.includes("comparable")), "the standing option remains visible after wrapping");
+  assert.ok(lines.some((line) => line.includes("asking was appropriate")), "the labeled options remain visible after wrapping");
   assert.ok(lines.every((line) => line.length <= width), JSON.stringify(lines));
 });
 
@@ -101,11 +83,6 @@ test("classifies prompt choices and maps feedback to expected guardian decisions
   assert.deepEqual(classifyPromptChoice(PROMPT_FEEDBACK_OPTIONS.block), {
     allowsExecution: false,
     userChoice: "block",
-  });
-  assert.deepEqual(classifyPromptChoice(PROMPT_FEEDBACK_OPTIONS.allowStanding), {
-    allowsExecution: true,
-    userChoice: "allow_unnecessary",
-    standingApproval: true,
   });
   assert.equal(classifyPromptChoice(undefined), undefined);
   assert.equal(classifyPromptChoice("unexpected"), undefined);

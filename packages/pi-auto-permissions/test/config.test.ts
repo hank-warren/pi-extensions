@@ -37,10 +37,6 @@ describe("auto permissions config", () => {
 			enabled: true,
 			path: join(tmpdir(), "usage.jsonl"),
 		});
-		assert.deepEqual(config.standingApprovals, {
-			enabled: true,
-			path: join(tmpdir(), "standing-approvals.jsonl"),
-		});
 		assert.deepEqual(config.ui, { enabled: true, resultDisplayMs: 2500 });
 	});
 
@@ -91,27 +87,10 @@ describe("auto permissions config", () => {
 		}
 	});
 
-	test("keeps standing approvals on by default and allows opting out or relocating them", () => {
-		const defaults = configFile({});
-		assert.deepEqual(loadAutoPermissionsConfig(defaults).standingApprovals, {
-			enabled: true,
-			path: join(dirname(defaults), "standing-approvals.jsonl"),
-		});
-
-		const disabled = configFile({ standingApprovals: { enabled: false } });
-		assert.equal(loadAutoPermissionsConfig(disabled).standingApprovals.enabled, false);
-
-		const relocated = configFile({ standingApprovals: { path: "logs/standing.jsonl" } });
-		assert.deepEqual(loadAutoPermissionsConfig(relocated).standingApprovals, {
-			enabled: true,
-			path: join(dirname(relocated), "logs", "standing.jsonl"),
-		});
-	});
-
-	test("rejects malformed standing approvals configuration", () => {
-		for (const standingApprovals of [true, [], { enabled: "yes" }, { path: "" }]) {
-			const path = configFile({ standingApprovals });
-			assert.throws(() => loadAutoPermissionsConfig(path), /standingApprovals/);
+	test("ignores a legacy standingApprovals key of any shape", () => {
+		for (const standingApprovals of [{ enabled: true, path: "x.jsonl" }, true, [], { enabled: "yes" }, { path: "" }]) {
+			const config = loadAutoPermissionsConfig(configFile({ standingApprovals }));
+			assert.equal(Object.hasOwn(config, "standingApprovals"), false);
 		}
 	});
 

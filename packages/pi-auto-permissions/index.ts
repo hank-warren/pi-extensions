@@ -15,7 +15,6 @@ import {
   classifyPromptChoice,
   expectedDecisionForChoice,
   permissionPromptOptions,
-  shouldOfferStandingApproval,
   type PromptEvaluationUserChoice,
 } from "./evaluation-log.js";
 import type { Gate } from "./gates.js";
@@ -266,10 +265,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
           pi,
           ctx,
           `${gate.label} — Auto Permissions needs approval\n\n${detail}\n\n${command}`,
-          permissionPromptOptions(
-            config.evaluationLog.enabled,
-            shouldOfferStandingApproval(decisionSource, config.standingApprovals.enabled),
-          ),
+          permissionPromptOptions(config.evaluationLog.enabled),
           promptSignal,
         );
       } catch (error) {
@@ -284,7 +280,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
       // user-source evidence. review_failure prompts are excluded: their
       // "concern" is an infrastructure error, not a guardian judgment.
       if (decisionSource === "guardian" && classification) {
-        overrides.recordPromptDecision(scope, classification, detail, reviewer.lastEvidenceKey);
+        overrides.recordPromptDecision(gate, command, classification, detail, reviewer.lastEvidenceKey);
       }
       if (classification?.userChoice) {
         logPromptEvaluation(scope, detail, evaluationContext, decisionSource, classification.userChoice);
@@ -402,12 +398,10 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     } catch {
       // Reported by currentConfig; the first bash call fails closed.
     }
-    overrides.resetForSession();
     if (config) warnAboutMissingReviewerProvider(ctx, config);
 
     reviewer.startSession(ctx.cwd);
     overrides.restore(ctx.sessionManager.getBranch());
     trustedGroups = ctx.isProjectTrusted() ? loadTrustedGroups(ctx.cwd) : new Set();
-    if (config) overrides.loadStanding(config, ctx);
   });
 }

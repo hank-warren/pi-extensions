@@ -70,11 +70,6 @@ export interface AutoPermissionsConfig {
     enabled: boolean;
     path: string;
   };
-  /** User-granted comparable-command approvals, shared across projects. Default on. */
-  standingApprovals: {
-    enabled: boolean;
-    path: string;
-  };
   rules: Gate[];
   /**
    * Review every bash command that matches no rule under the generic
@@ -265,7 +260,7 @@ function resolveReviewEvidence(raw: Record<string, unknown>): AutoPermissionsCon
   };
 }
 
-type SidecarKey = "evaluationLog" | "usageLog" | "denialLog" | "standingApprovals";
+type SidecarKey = "evaluationLog" | "usageLog" | "denialLog";
 
 function resolveSidecar(
   raw: Record<string, unknown>,
@@ -351,7 +346,6 @@ export function loadAutoPermissionsConfig(path = autoPermissionsConfigPath()): A
     evaluationLog: resolveSidecar(raw, "evaluationLog", "review-evals.jsonl", false, path),
     usageLog: resolveSidecar(raw, "usageLog", "usage.jsonl", true, path),
     denialLog: resolveSidecar(raw, "denialLog", "denials.jsonl", true, path),
-    standingApprovals: resolveSidecar(raw, "standingApprovals", "standing-approvals.jsonl", true, path),
     rules,
     reviewAllShell: raw.reviewAllShell === true,
     guardianPolicy: resolveGuardianPolicy(raw),

@@ -18,18 +18,14 @@ import {
   buildSettingItems,
   createDenialsSubmenu,
   createModelSubmenu,
-  createStandingApprovalsSubmenu,
   createTimeoutSubmenu,
   type DenialsSubmenuHost,
   type DenialSummary,
-  type StandingApprovalsSubmenuHost,
-  type StandingApprovalSummary,
   type MenuModel,
   type ReviewerSettings,
   type SettingChange,
   type SubmenuHost,
 } from "./settings-menu.js";
-import { readStandingApprovals, revokeStandingApproval } from "./standing-overrides.js";
 
 /**
  * What `/auto-permissions setup` says on the user's behalf. Named after the
@@ -75,7 +71,6 @@ export function registerSettingsCommand(
       const path = autoPermissionsConfigPath();
       let settings: ReviewerSettings;
       let denialLog: AutoPermissionsConfig["denialLog"];
-      let standingApprovalsConfig: AutoPermissionsConfig["standingApprovals"];
       try {
         const config = loadAutoPermissionsConfig(path);
         settings = {
@@ -84,7 +79,6 @@ export function registerSettingsCommand(
           systemPromptSource: config.systemPromptSource,
         };
         denialLog = config.denialLog;
-        standingApprovalsConfig = config.standingApprovals;
       } catch (error) {
         // Editing a file we cannot validate is the one way this writer could
         // quietly make things worse, so refuse rather than open.
@@ -142,34 +136,6 @@ export function registerSettingsCommand(
         }
       };
 
-      const standingApprovalSummaries = (): StandingApprovalSummary[] => {
-        if (!standingApprovalsConfig.enabled) return [];
-        try {
-          return readStandingApprovals(standingApprovalsConfig.path).map((record, index) => ({
-            id: `${index}:${record.ts}:${record.gate.label}`,
-            record,
-          }));
-        } catch {
-          return [];
-        }
-      };
-
-      const revokeApproval = (approval: StandingApprovalSummary): void => {
-        try {
-          if (!revokeStandingApproval(standingApprovalsConfig.path, approval.record)) {
-            ctx.ui.notify("That standing approval is no longer in the ledger.", "warning");
-            return;
-          }
-          const config = loadAutoPermissionsConfig(path);
-          overrides.loadStanding(config, ctx);
-          reviewer.discardLineage();
-          ctx.ui.notify("Standing approval revoked.", "info");
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          ctx.ui.notify(`Could not revoke standing approval: ${message}`, "warning");
-        }
-      };
-
       /**
        * Closes the settings dialog. Assigned when `ctx.ui.custom` builds the
        * component, so it is only ever called from inside the dialog it closes.
@@ -213,13 +179,6 @@ export function registerSettingsCommand(
           selectTheme: getSelectListTheme(),
           requestRender: () => tui.requestRender(),
         };
-        const standingHost: StandingApprovalsSubmenuHost = {
-          standingApprovals: standingApprovalSummaries,
-          revokeStandingApproval: revokeApproval,
-          settingsTheme: getSettingsListTheme(),
-          selectTheme: getSelectListTheme(),
-          requestRender: () => tui.requestRender(),
-        };
         const list = new SettingsList(
           buildSettingItems(
             settings,
@@ -227,13 +186,9 @@ export function registerSettingsCommand(
               reviewerModel: createModelSubmenu(host),
               timeout: createTimeoutSubmenu(host),
               ...(denialLog.enabled ? { recentDenials: createDenialsSubmenu(denialsHost) } : {}),
-              ...(standingApprovalsConfig.enabled
-                ? { standingApprovals: createStandingApprovalsSubmenu(standingHost) }
-                : {}),
             },
             undefined,
             denialLog.enabled ? recentDenials().length : undefined,
-            standingApprovalsConfig.enabled ? standingApprovalSummaries().length : undefined,
           ),
           10,
           host.settingsTheme,

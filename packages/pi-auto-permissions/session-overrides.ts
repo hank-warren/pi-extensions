@@ -1,15 +1,8 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { AutoPermissionsConfig } from "./config.js";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { PromptChoiceClassification } from "./evaluation-log.js";
+import type { Gate } from "./gates.js";
 import { PERMISSION_OVERRIDE_CHOICES, type PermissionOverride } from "./override-evidence.js";
-import type { ReviewScope } from "./review-scope.js";
 import type { DenialSummary } from "./settings-menu.js";
-import {
-  grantStandingApproval,
-  readStandingApprovals,
-  STANDING_APPROVAL_LIMIT,
-  standingApprovalsToPermissionOverrides,
-} from "./standing-overrides.js";
 
 /**
  * Overrides persist as custom session entries,
@@ -22,37 +15,32 @@ export interface SessionOverrides {
   /** The override records, live, for merging into reviewer evidence. */
   list(): readonly PermissionOverride[];
   restore(branch: readonly unknown[]): void;
-  loadStanding(config: AutoPermissionsConfig, ctx: ExtensionContext): void;
   recordPromptDecision(
-    scope: ReviewScope,
+    gate: Pick<Gate, "label">,
+    command: string,
     classification: PromptChoiceClassification,
     detail: string,
     anchorKey: string | undefined,
   ): void;
   allowRetry(denial: DenialSummary, anchorKey: string | undefined): void;
-  resetForSession(): void;
 }
 
 /**
  * The user's own permission decisions for this session: the override records
  * the guardian is shown as user-source evidence.
  *
- * One owner, because the pieces are one fact seen three ways — the in-memory
- * record, the session entry that survives a resume, and (for standing
- * approvals) the cross-project ledger.
+ * One owner, because the pieces are one fact seen two ways — the in-memory
+ * record and the session entry that survives a resume.
  */
 export function createSessionOverrides(pi: ExtensionAPI): SessionOverrides {
   const permissionOverrides: PermissionOverride[] = [];
   let overrideSeq = 0;
-  let standingApprovalCapNotified = false;
 
   function persist(): void {
     try {
       pi.appendEntry(OVERRIDES_ENTRY_TYPE, {
         seq: overrideSeq,
-        overrides: permissionOverrides
-          .filter((override) => !override.standing)
-          .map((override) => ({ ...override })),
+        overrides: permissionOverrides.map((override) => ({ ...override })),
       });
     } catch {
       // Persistence is best-effort; the in-memory records still apply now.
@@ -108,12 +96,6 @@ export function createSessionOverrides(pi: ExtensionAPI): SessionOverrides {
     persist();
   }
 
-  /** Drop matching ledger-backed evidence in place; the array is shared by reference. */
-  function removeStanding(matches: (override: PermissionOverride) => boolean): void {
-    const kept = permissionOverrides.filter((override) => !override.standing || !matches(override));
-    permissionOverrides.splice(0, permissionOverrides.length, ...kept);
-  }
-
   return {
     list: () => permissionOverrides,
 
@@ -123,66 +105,21 @@ export function createSessionOverrides(pi: ExtensionAPI): SessionOverrides {
       restoreOverrides(branch);
     },
 
-    /** Replace only ledger-backed evidence; session prompt decisions stay put. */
-    loadStanding(config: AutoPermissionsConfig, ctx: ExtensionContext): void {
-      removeStanding(() => true);
-      if (!config.standingApprovals.enabled) return;
-      try {
-        const records = readStandingApprovals(config.standingApprovals.path);
-        permissionOverrides.push(...standingApprovalsToPermissionOverrides(records));
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        ctx.ui.notify(`Could not load standing Auto Permissions approvals: ${message}`, "warning");
-      }
-    },
-
     /**
      * Feed the user's decision back to the guardian as session-scoped
      * user-source evidence. Only the caller knows whether the prompt came from
      * a guardian judgment, which is the one case this may be called for.
      */
     recordPromptDecision(
-      scope: ReviewScope,
+      gate: Pick<Gate, "label">,
+      command: string,
       classification: PromptChoiceClassification,
       detail: string,
       anchorKey: string | undefined,
     ): void {
-      const { ctx, config, gate, command } = scope;
       const overrideChoice = classification.userChoice ?? (classification.allowsExecution ? "allow" as const : undefined);
       if (!overrideChoice) return;
-      let recordedStanding = false;
-      if (classification.standingApproval && config.standingApprovals.enabled) {
-        try {
-          const { evicted, override } = grantStandingApproval(
-            config.standingApprovals.path,
-            {
-              gate: { label: gate.label, group: gate.group },
-              command,
-              project: ctx.cwd,
-              reason: detail,
-            },
-            overrideSeq++,
-            anchorKey,
-          );
-          removeStanding(
-            (existing) => existing.standing?.gateGroup === gate.group && existing.command === command,
-          );
-          permissionOverrides.push(override);
-          recordedStanding = true;
-          if (evicted > 0 && !standingApprovalCapNotified) {
-            standingApprovalCapNotified = true;
-            ctx.ui.notify(
-              `Standing approvals reached ${STANDING_APPROVAL_LIMIT} entries; the oldest approval was removed.`,
-              "warning",
-            );
-          }
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          ctx.ui.notify(`Could not save standing approval: ${message}`, "warning");
-        }
-      }
-      if (recordedStanding) persist();
-      else addOverride(gate.label, command, detail, overrideChoice, anchorKey);
+      addOverride(gate.label, command, detail, overrideChoice, anchorKey);
     },
 
     /**
@@ -204,10 +141,6 @@ export function createSessionOverrides(pi: ExtensionAPI): SessionOverrides {
       } catch {
         // The override itself is already in force; the nudge is best-effort.
       }
-    },
-
-    resetForSession(): void {
-      standingApprovalCapNotified = false;
     },
   };
 }

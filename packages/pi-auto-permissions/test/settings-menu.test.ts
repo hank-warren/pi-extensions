@@ -8,11 +8,9 @@ import {
 	buildSettingItems,
 	denialItem,
 	RECENT_DENIALS_ID,
-	STANDING_APPROVALS_ID,
 	filterModelItems,
 	formatTimeout,
 	parseTimeoutInput,
-	standingApprovalItem,
 	systemPromptValue,
 	type MenuModel,
 	type ReviewerSettings,
@@ -260,41 +258,6 @@ describe("submenu-owned rows", () => {
 		assert.equal(applySettingChange(settings(), "reviewerModel", "anthropic/claude-sonnet-4-6").kind, "ignored");
 		assert.equal(applySettingChange(settings(), "timeoutMs", "45s").kind, "ignored");
 		assert.equal(applySettingChange(settings(), "systemPrompt", "whatever").kind, "ignored");
-	});
-});
-
-describe("standing approvals row", () => {
-	const settings = { enabled: true, systemPromptSource: { kind: "builtin" } } as const;
-
-	test("appears only when its submenu is wired, with the count as its value", () => {
-		const submenu = (() => { throw new Error("unused"); }) as never;
-		const withApprovals = buildSettingItems(settings, { standingApprovals: submenu }, "/home/u", undefined, 4);
-		const row = withApprovals.find((item) => item.id === STANDING_APPROVALS_ID);
-		assert.ok(row);
-		assert.equal(row.currentValue, "4");
-		assert.equal(row.label, "Standing approvals");
-
-		const without = buildSettingItems(settings, {}, "/home/u");
-		assert.equal(without.some((item) => item.id === STANDING_APPROVALS_ID), false);
-	});
-
-	test("standingApprovalItem identifies the gate, date, project, and bounded command", () => {
-		const item = standingApprovalItem({
-			id: "s1",
-			record: {
-				v: 1,
-				ts: "2026-08-25T00:00:00Z",
-				gate: { label: "Remote command", group: "ssh" },
-				command: `ssh prod.example uptime ${"x".repeat(100)}`,
-				scope: "comparable",
-				project: "/work/acme",
-				reason: "target was not authorized",
-			},
-		});
-		assert.equal(item.value, "s1");
-		assert.ok(item.label.length <= 70);
-		assert.ok(item.label.endsWith("…"));
-		assert.equal(item.description, "Remote command · granted 2026-08-25 · /work/acme");
 	});
 });
 

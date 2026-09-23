@@ -27,7 +27,6 @@ import {
   type ReviewerConfig,
   type SystemPromptSource,
 } from "./config.js";
-import type { StandingApprovalRecord } from "./standing-overrides.js";
 
 const ENABLED_ID = "enabled";
 const REVIEWER_MODEL_ID = "reviewerModel";
@@ -35,7 +34,6 @@ const THINKING_LEVEL_ID = "reasoningEffort";
 const TIMEOUT_ID = "timeoutMs";
 const SYSTEM_PROMPT_ID = "systemPrompt";
 export const RECENT_DENIALS_ID = "recentDenials";
-export const STANDING_APPROVALS_ID = "standingApprovals";
 
 export const ON = "on";
 export const OFF = "off";
@@ -141,7 +139,6 @@ export interface SettingSubmenus {
   reviewerModel?: SettingItem["submenu"];
   timeout?: SettingItem["submenu"];
   recentDenials?: SettingItem["submenu"];
-  standingApprovals?: SettingItem["submenu"];
 }
 
 /** Build the `/auto-permissions` rows for a settings snapshot. */
@@ -150,7 +147,6 @@ export function buildSettingItems(
   submenus: SettingSubmenus = {},
   home: string = homedir(),
   denialCount?: number,
-  standingApprovalCount?: number,
 ): SettingItem[] {
   return [
     {
@@ -194,15 +190,6 @@ export function buildSettingItems(
         description: "Recently denied or revised commands. Select one to allow it on retry.",
         currentValue: denialCount === undefined ? "" : String(denialCount),
         submenu: submenus.recentDenials,
-      }]
-      : []),
-    ...(submenus.standingApprovals
-      ? [{
-        id: STANDING_APPROVALS_ID,
-        label: "Standing approvals",
-        description: "Comparable-command approvals shared across projects. Select one to revoke it.",
-        currentValue: standingApprovalCount === undefined ? "" : String(standingApprovalCount),
-        submenu: submenus.standingApprovals,
       }]
       : []),
   ];
@@ -566,120 +553,6 @@ class DenialsSubmenu implements Component {
 
 export function createDenialsSubmenu(host: DenialsSubmenuHost): NonNullable<SettingItem["submenu"]> {
   return (_currentValue, done) => new DenialsSubmenu(host, done);
-}
-
-export interface StandingApprovalSummary {
-  id: string;
-  record: StandingApprovalRecord;
-}
-
-export interface StandingApprovalsSubmenuHost {
-  standingApprovals(): StandingApprovalSummary[];
-  revokeStandingApproval(approval: StandingApprovalSummary): void;
-  settingsTheme: SettingsListTheme;
-  selectTheme: SelectListTheme;
-  requestRender(): void;
-}
-
-export function standingApprovalItem(approval: StandingApprovalSummary): SelectItem {
-  const command = approval.record.command.length > COMMAND_LABEL_MAX
-    ? `${approval.record.command.slice(0, COMMAND_LABEL_MAX - 1)}…`
-    : approval.record.command;
-  return {
-    value: approval.id,
-    label: command,
-    description: `${approval.record.gate.label} · granted ${approval.record.ts.slice(0, 10)} · ${approval.record.project}`,
-  };
-}
-
-class StandingApprovalsSubmenu implements Component {
-  private readonly approvals: StandingApprovalSummary[];
-  private list: SelectList;
-  private selected?: StandingApprovalSummary;
-
-  constructor(
-    private readonly host: StandingApprovalsSubmenuHost,
-    private readonly done: (value?: string) => void,
-  ) {
-    this.approvals = host.standingApprovals();
-    this.list = this.buildApprovalList();
-  }
-
-  private buildApprovalList(): SelectList {
-    const items = this.approvals.length
-      ? this.approvals.map(standingApprovalItem)
-      : [{ value: "", label: "(no standing approvals)", description: "Comparable-command approvals will appear here." }];
-    const list = new SelectList(items, 10, this.host.selectTheme);
-    list.onCancel = () => this.done(undefined);
-    list.onSelect = (item) => {
-      const approval = this.approvals.find((candidate) => candidate.id === item.value);
-      if (!approval) {
-        this.done(undefined);
-        return;
-      }
-      this.selected = approval;
-      this.list = this.buildConfirmList();
-      this.host.requestRender();
-    };
-    return list;
-  }
-
-  private buildConfirmList(): SelectList {
-    const list = new SelectList(
-      [
-        {
-          value: "revoke",
-          label: "Revoke",
-          description: "Removes this approval from the user-scoped standing ledger.",
-        },
-        { value: "back", label: "Back" },
-      ],
-      10,
-      this.host.selectTheme,
-    );
-    const back = () => {
-      this.selected = undefined;
-      this.list = this.buildApprovalList();
-      this.host.requestRender();
-    };
-    list.onCancel = back;
-    list.onSelect = (item) => {
-      if (item.value !== "revoke" || !this.selected) {
-        back();
-        return;
-      }
-      this.host.revokeStandingApproval(this.selected);
-      this.done(undefined);
-    };
-    return list;
-  }
-
-  invalidate(): void {
-    this.list.invalidate();
-  }
-
-  render(width: number): string[] {
-    const title = this.selected
-      ? `  Revoke standing approval?  ${truncateToWidth(this.selected.record.command, Math.max(1, width - 30))}`
-      : "  Standing approvals";
-    return [
-      truncateToWidth(this.host.settingsTheme.hint(title), width),
-      "",
-      ...this.list.render(width),
-      "",
-      truncateToWidth(this.host.settingsTheme.hint("  Enter to select · Esc to go back"), width),
-    ];
-  }
-
-  handleInput(data: string): void {
-    this.list.handleInput(data);
-  }
-}
-
-export function createStandingApprovalsSubmenu(
-  host: StandingApprovalsSubmenuHost,
-): NonNullable<SettingItem["submenu"]> {
-  return (_currentValue, done) => new StandingApprovalsSubmenu(host, done);
 }
 
 export function createTimeoutSubmenu(host: SubmenuHost): NonNullable<SettingItem["submenu"]> {

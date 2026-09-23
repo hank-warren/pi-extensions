@@ -57,7 +57,6 @@
     "review.ts",
     "review-queue.ts",
     "session-environment.ts",
-    "standing-overrides.ts",
     "usage-log.ts",
     "widget-status.ts",
     "classify.ts",

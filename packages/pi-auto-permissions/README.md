@@ -57,7 +57,7 @@ git commit -m "Fix the Failing Retry Test and Update Documentation"
 
 If the conversation never authorized a commit, an interactive Pi session asks the user before running it. A non-interactive session blocks it.
 
-Permissions are contextual by default. Each command is judged against the current conversation and the exact action being proposed; the user may explicitly promote one guardian-approved prompt decision into a revocable standing approval for comparable commands.
+Permissions are contextual by default. Each command is judged against the current conversation and the exact action being proposed.
 
 ## Install
 
@@ -222,7 +222,6 @@ The reviewer settings that change most often are editable from a settings menu i
 | Thinking level | `reviewer.reasoningEffort` |
 | Review timeout | `reviewer.timeoutMs`, entered as `30s` or `45000ms` |
 | System prompt | read-only: the resolved path of the active `systemPromptFile`, or whether the built-in or an inline prompt is in use |
-| Standing approvals | count plus a picker for revoking user-scoped comparable-command approvals |
 | Recent denials | read-only view of the denial log with **Allow on retry**; shown while `denialLog` is enabled (the default) |
 
 Saves are applied immediately — the config is re-read on every guarded command, so there is nothing to restart, in this session or any other. The menu is a narrow writer: it merges only the keys above into whatever is on disk, so rules, prompts, evidence settings and log paths stay exactly as you wrote them and remain file-only. A config that fails validation is never rewritten; the menu reports the error and refuses to open.
@@ -319,29 +318,6 @@ Every denial also emits a `pi.events` event — `auto-permissions:denied` with `
 
 Permission overrides also persist as custom session entries, so a resumed session keeps the user's earlier allow decisions and standing block constraints instead of forgetting them.
 
-## Standing approvals
-
-A prompt caused by a guardian `ask_user` verdict includes **Allow and stop asking about comparable commands**. Choosing it executes the current command and appends a user-scoped record to `standing-approvals.jsonl` beside the config:
-
-```json
-{"v":1,"ts":"…","gate":{"label":"…","group":"…"},"command":"…","scope":"comparable","project":"…","reason":"…"}
-```
-
-At the next session start, these records become `USER (standing permission override, granted … in …):` evidence for the guardian. The guardian still reviews every mechanically guarded command: a comparable action may approve silently, while an action of a materially higher risk class remains uncovered and can still prompt. The origin project is context, not a scope limit, and later user statements or blocks take precedence.
-
-The ledger is mode `0600`, keeps the newest 200 valid records, and reports once when adding a record evicts the oldest. It is on by default; relocate or disable it with:
-
-```json
-{
-  "standingApprovals": {
-    "enabled": true,
-    "path": "./standing-approvals.jsonl"
-  }
-}
-```
-
-Use `/auto-permissions` → **Standing approvals** to select and revoke a record. Revocation takes effect immediately in that session; other already-running sessions drop it at their next session start. Review-infrastructure-failure prompts never offer standing trust, cancelled prompts write nothing, and deny rules never reach a prompt at all.
-
 ## Prompted-review evaluation log
 
 Auto Permissions can append a private JSONL regression record whenever the guardian asks for confirmation and the user gives explicit feedback:
@@ -357,14 +333,13 @@ Auto Permissions can append a private JSONL regression record whenever the guard
 
 The path defaults to `review-evals.jsonl` beside the Auto Permissions config and resolves relative to that config. The file is created with mode `0600` and rotates to `review-evals.jsonl.1` once it passes 64 MiB, keeping one previous generation, so older rows are discarded. Writing is best effort: a failing log never blocks or changes a permission decision.
 
-When logging is enabled, prompted reviews offer the three labeling choices plus the standing option on guardian-sourced prompts:
+When logging is enabled, prompted reviews offer the three labeling choices:
 
 - **Allow — asking was unnecessary** executes the command and records `userChoice: "allow_unnecessary"` with `expectedDecision: "approve"`.
 - **Block — asking was appropriate** remains the second choice, blocks the command, and records `userChoice: "block"` with `expectedDecision: "ask_user"`. (A block always affirms the prompt: the guardian has no reject verdict — its only non-approve outcomes are asking you or bouncing the command back to the agent as `revise` — so the only true rejection in the system is yours at this prompt.)
 - **Allow — asking was appropriate** executes the command and records `userChoice: "allow_appropriate"` with `expectedDecision: "ask_user"`.
-- **Allow and stop asking about comparable commands** executes the command, writes the standing ledger, and records the evaluation label as `userChoice: "allow_unnecessary"`. This fourth choice appears only when the prompt came from a guardian verdict, never when review infrastructure failed.
 
-When logging is disabled, the prompt retains the normal **Allow** and **Block** choices, and **Allow and stop asking about comparable commands** still appears on guardian-sourced prompts when standing approvals are enabled — the standing ledger does not depend on evaluation logging. Prompts from Pi or other extensions are unchanged.
+When logging is disabled, the prompt retains the normal **Allow** and **Block** choices. Prompts from Pi or other extensions are unchanged.
 
 Each version 2 record contains the collected user request, exact command, compact reviewer evidence, guardian reason, gate and session metadata, raw user choice, and both labels used for evaluation. The guardian's `actualDecision` is `ask_user`. Automatic-review failures are identified separately with `decisionSource: "review_failure"`. Existing version 1 records can remain in the same JSONL file.
 

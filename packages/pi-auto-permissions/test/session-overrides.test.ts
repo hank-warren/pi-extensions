@@ -1,32 +1,20 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { createMockPi } from "../../../test/support/mock-pi.ts";
-import { loadAutoPermissionsConfig } from "../config.ts";
-import type { ReviewScope } from "../review-scope.ts";
 import { createSessionOverrides } from "../session-overrides.ts";
 
 const OVERRIDES_ENTRY_TYPE = "auto-permissions-overrides";
-
-function scope(): ReviewScope {
-  return {
-    ctx: { cwd: "/work", ui: { notify() {} } } as never,
-    config: loadAutoPermissionsConfig(join(tmpdir(), "missing-session-overrides-config.json")),
-    gate: { pattern: /git push/, level: "guarded", group: "git", label: "Push" },
-    command: "git push origin main",
-    target: {} as never,
-  };
-}
+const GATE = { label: "Push" };
+const COMMAND = "git push origin main";
 
 function overrideEntries(mock: ReturnType<typeof createMockPi>) {
   return mock.entries.filter((entry) => entry.customType === OVERRIDES_ENTRY_TYPE);
 }
 
-test("a non-standing prompt decision persists exactly once", () => {
+test("a prompt decision persists exactly once", () => {
   const mock = createMockPi();
   const overrides = createSessionOverrides(mock.pi);
-  overrides.recordPromptDecision(scope(), { allowsExecution: true, userChoice: "allow_appropriate" }, "risky", "k1");
+  overrides.recordPromptDecision(GATE, COMMAND, { allowsExecution: true, userChoice: "allow_appropriate" }, "risky", "k1");
 
   assert.equal(overrideEntries(mock).length, 1);
   assert.deepEqual(overrides.list(), [{
@@ -42,7 +30,7 @@ test("a non-standing prompt decision persists exactly once", () => {
 test("a decision with no override choice persists nothing", () => {
   const mock = createMockPi();
   const overrides = createSessionOverrides(mock.pi);
-  overrides.recordPromptDecision(scope(), { allowsExecution: false }, "risky", undefined);
+  overrides.recordPromptDecision(GATE, COMMAND, { allowsExecution: false }, "risky", undefined);
 
   assert.equal(overrideEntries(mock).length, 0);
   assert.equal(overrides.list().length, 0);
