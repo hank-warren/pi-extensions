@@ -3,7 +3,11 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { existsSync, readFileSync } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
 import { join } from "node:path";
-import type { AutoPermissionsConfig } from "./config.js";
+import {
+  DEFAULT_REVIEWER_REASONING_EFFORT,
+  DEFAULT_REVIEWER_TIMEOUT_MS,
+  type AutoPermissionsConfig,
+} from "./config.js";
 import { resolveGuardianCompleteSimple } from "./guardian-transport.js";
 import { isOpenAICodexModel } from "./openai-codex-transport.js";
 import { detectSubagentContext } from "./subagent-context.js";
@@ -68,7 +72,7 @@ function reviewerFingerprint(
   model: { provider?: string; id?: string; api?: string; baseUrl?: string },
   config: AutoPermissionsConfig,
   systemPrompt: string,
-  projectTrusted: boolean,
+  reasoning: string,
 ): string {
   return JSON.stringify({
     mainSessionId,
@@ -76,9 +80,8 @@ function reviewerFingerprint(
     model: model.id,
     api: model.api,
     baseUrl: model.baseUrl,
-    reasoning: config.reviewer?.reasoningEffort ?? "low",
+    reasoning,
     systemPrompt,
-    projectInstructionsTrusted: config.reviewEvidence.projectInstructions ? projectTrusted : undefined,
     evidencePruning: [
       config.reviewEvidence.toolRecordMaxChars,
       config.reviewEvidence.assistantRecordMaxChars,
@@ -297,6 +300,8 @@ export function createGuardianReviewer(
         : "the active model";
       throw new Error(`review model not found: ${requested}`);
     }
+    const reasoning = config.reviewer?.reasoningEffort ?? DEFAULT_REVIEWER_REASONING_EFFORT;
+    const timeoutMs = config.reviewer?.timeoutMs ?? DEFAULT_REVIEWER_TIMEOUT_MS;
 
     const mainSessionId = ctx.sessionManager.getSessionId();
     const projectTrusted = ctx.isProjectTrusted();
@@ -334,7 +339,7 @@ export function createGuardianReviewer(
       ...(config.reviewEvidence.userMessageTypes.length ? [INJECTED_USER_MESSAGE_SYSTEM_PROMPT] : []),
     ].join("\n\n");
     const systemPrompt = buildReviewerSystemPrompt(policyPrompt, projectInstructions);
-    const fingerprint = reviewerFingerprint(mainSessionId, model, config, systemPrompt, projectTrusted);
+    const fingerprint = reviewerFingerprint(mainSessionId, model, config, systemPrompt, reasoning);
     const evidence = collectEvidence(scope);
     const evidenceKeys = evidence.map((record) => record.key);
     const budget = reviewContextBudget(model.contextWindow);
@@ -449,7 +454,7 @@ export function createGuardianReviewer(
     const sessionId = base?.sessionId ?? reviewerSessionId(model);
     const attemptGeneration = reviewerGeneration;
     activeReviewerSessionId = sessionId;
-    const timeoutSignal = AbortSignal.timeout(config.reviewer?.timeoutMs ?? 30_000);
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
     const lifecycleSignal = reviewerLifecycleController.signal;
     const reviewSignal = AbortSignal.any([
       timeoutSignal,
@@ -463,7 +468,7 @@ export function createGuardianReviewer(
         model,
         systemPrompt,
         messages,
-        reasoning: config.reviewer?.reasoningEffort ?? "low",
+        reasoning,
         sessionId,
         signal: reviewSignal,
         guard: () => {
