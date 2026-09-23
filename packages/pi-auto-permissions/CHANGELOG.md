@@ -1,5 +1,29 @@
 # @hank-warren/pi-auto-permissions
 
+## 0.17.0
+
+### Minor Changes
+
+- Simplify the extension and remove features that were never used. Permission is now granted only by the config you write and by what the user says in the current session.
+
+  Breaking changes:
+
+  - The `convention` rule level and the `request_override` tool are removed. A legacy `"level": "convention"` rule still loads, as a `deny` rule: it blocks without review, and `.pi/trusted-ops` can no longer lift it.
+  - The standing-approvals ledger is removed, along with the "Allow and stop asking about comparable commands" prompt option and the settings-menu row. Prompt decisions stay session-scoped and still survive `--continue`. Use `guardianPolicy.allow` for durable trust.
+  - The reviewer `prefilter` stage is removed. Every guarded command gets the full guardian review.
+  - `ui.placement: "toolRow"` is removed. Review status always renders in the widget above the editor.
+  - The approval prompt's pulsing indicator is now a static warning-colored `●`.
+  - The `reviewEvidence` pruning limits (`toolRecordMaxChars`, `assistantRecordMaxChars`, `compactionRecordMaxChars`, `fullRebuildKeepToolRecords`) are no longer configurable. They are fixed at their defaults.
+
+  Configs that still set `standingApprovals`, `reviewer.prefilter`, `ui.placement` or the pruning keys load without error, and those keys are ignored. Existing reviewer lineages rebuild once after upgrade.
+
+  Fixes:
+
+  - `review-evals.jsonl` now rotates to `review-evals.jsonl.1` at 64 MiB, keeping one previous generation.
+  - A full-rebuild tool eviction no longer rewrites injected `CUSTOM` records as `TOOL call → success`.
+  - Saving `/auto-permissions` settings keeps every hand-written `reviewer` key.
+  - Stale README and settings-menu text is corrected. The Enabled row now says that turning it off disables all gating, deny rules included.
+
 ## 0.16.2
 
 ### Patch Changes
