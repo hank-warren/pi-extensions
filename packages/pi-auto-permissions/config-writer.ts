@@ -77,17 +77,16 @@ export function patchAutoPermissionsConfig(path: string, patch: ConfigPatch): vo
     else merged.enabled = false;
   }
   if (patch.reviewer !== undefined) {
-    // Preserve file-only reviewer keys the menu does not edit (prefilter):
-    // this writer must never silently drop what the human wrote by hand.
+    // Preserve every file-only reviewer key the menu does not edit: this writer must never silently drop what the human wrote by hand.
     const existingReviewer = merged.reviewer && typeof merged.reviewer === "object" && !Array.isArray(merged.reviewer)
       ? merged.reviewer as Record<string, unknown>
       : {};
     merged.reviewer = {
+      ...existingReviewer,
       provider: patch.reviewer.provider,
       model: patch.reviewer.model,
       reasoningEffort: patch.reviewer.reasoningEffort,
       timeoutMs: patch.reviewer.timeoutMs,
-      ...(existingReviewer.prefilter !== undefined ? { prefilter: existingReviewer.prefilter } : {}),
     };
   }
 

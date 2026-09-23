@@ -123,10 +123,10 @@ describe("config writer", () => {
 		assert.equal(existsSync(path), true);
 	});
 
-	test("a reviewer patch preserves the hand-written prefilter key", () => {
+	test("a reviewer patch preserves every hand-written reviewer key", () => {
 		const path = fixtureFile({
 			...FIXTURE,
-			reviewer: { ...FIXTURE.reviewer, prefilter: true },
+			reviewer: { ...FIXTURE.reviewer, prefilter: true, note: "x" },
 		});
 		patchAutoPermissionsConfig(path, {
 			reviewer: { provider: "openai-codex", model: "gpt-5.6-luna", reasoningEffort: "high", timeoutMs: 45_000 },
@@ -139,7 +139,9 @@ describe("config writer", () => {
 			reasoningEffort: "high",
 			timeoutMs: 45_000,
 			prefilter: true,
+			note: "x",
 		});
+		assert.doesNotThrow(() => loadAutoPermissionsConfig(path));
 		assert.equal(loadAutoPermissionsConfig(path).reviewer?.prefilter, true);
 	});
 
