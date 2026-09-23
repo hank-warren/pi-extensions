@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { afterEach, describe, test } from "node:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync, appendFileSync } from "node:fs";
+import { describe, test } from "node:test";
+import { existsSync, readFileSync, statSync, truncateSync, writeFileSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -10,18 +10,11 @@ import {
 	type DenialRecord,
 } from "../denial-log.ts";
 import { SIDECAR_ROTATE_BYTES } from "../jsonl-sidecar.ts";
-
-const tempDirs: string[] = [];
+import { scratchDir } from "./support/temp-dir.ts";
 
 function tempPath(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-ap-denials-"));
-	tempDirs.push(dir);
-	return join(dir, "denials.jsonl");
+	return join(scratchDir("pi-ap-denials-"), "denials.jsonl");
 }
-
-afterEach(() => {
-	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
 
 function record(command: string, verdict: DenialRecord["verdict"] = "block"): DenialRecord {
 	return buildDenialRecord({

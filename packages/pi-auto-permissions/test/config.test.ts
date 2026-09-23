@@ -1,13 +1,14 @@
 // Converted from the vendored package's bun:test suite (config.test.ts) to
 // node:test so the repo test suite needs no bun toolchain.
 import assert from "node:assert/strict";
-import { afterEach, describe, test } from "node:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { describe, test } from "node:test";
+import { writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { expandRules, loadAutoPermissionsConfig } from "../config.ts";
 import { DEFAULT_RULES } from "../default-rules.ts";
 import type { Gate } from "../gates.ts";
+import { scratchDir } from "./support/temp-dir.ts";
 
 const PRUNING_DEFAULTS = {
 	toolRecordMaxChars: 500,
@@ -16,19 +17,12 @@ const PRUNING_DEFAULTS = {
 	fullRebuildKeepToolRecords: 60,
 } as const;
 
-const tempDirs: string[] = [];
-
 function configFile(value: unknown): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-auto-permissions-"));
-	tempDirs.push(dir);
+	const dir = scratchDir("pi-auto-permissions-");
 	const path = join(dir, "config.json");
 	writeFileSync(path, JSON.stringify(value), "utf8");
 	return path;
 }
-
-afterEach(() => {
-	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
 
 describe("auto permissions config", () => {
 	test("uses the built-in ruleset when the config is missing", () => {
@@ -409,8 +403,7 @@ describe("auto permissions config", () => {
 	});
 
 	test("loads a prompt file relative to the config", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-auto-permissions-"));
-		tempDirs.push(dir);
+		const dir = scratchDir("pi-auto-permissions-");
 		writeFileSync(join(dir, "prompt.md"), "review carefully\n", "utf8");
 		const path = join(dir, "config.json");
 		writeFileSync(path, JSON.stringify({ systemPromptFile: "./prompt.md" }), "utf8");

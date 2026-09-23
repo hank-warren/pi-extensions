@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { test } from "node:test";
+import { existsSync, readFileSync, statSync, truncateSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   appendUsageRecord,
@@ -10,17 +9,10 @@ import {
   type UsageLogRecord,
 } from "../usage-log.ts";
 import { SIDECAR_ROTATE_BYTES } from "../jsonl-sidecar.ts";
-
-const tempDirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
+import { scratchDir } from "./support/temp-dir.ts";
 
 function tempDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), "auto-permissions-usage-"));
-  tempDirs.push(dir);
-  return dir;
+  return scratchDir("auto-permissions-usage-");
 }
 
 const piAiUsage = {

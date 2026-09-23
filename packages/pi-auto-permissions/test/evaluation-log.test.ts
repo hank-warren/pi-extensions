@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, truncateSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { test } from "node:test";
+import { existsSync, readFileSync, statSync, truncateSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { OptionSelector } from "@hank-warren/pi-permission-selector/selector.ts";
 import {
@@ -14,12 +13,7 @@ import {
   type PromptEvaluationRecord,
 } from "../evaluation-log.ts";
 import { SIDECAR_ROTATE_BYTES } from "../jsonl-sidecar.ts";
-
-const tempDirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
+import { scratchDir } from "./support/temp-dir.ts";
 
 function record(
   expectedDecision: "approve" | "ask_user",
@@ -121,8 +115,7 @@ test("classifies prompt choices and maps feedback to expected guardian decisions
 });
 
 test("appends private JSONL evaluation records", () => {
-  const dir = mkdtempSync(join(tmpdir(), "pi-auto-permissions-evals-"));
-  tempDirs.push(dir);
+  const dir = scratchDir("pi-auto-permissions-evals-");
   const path = join(dir, "nested", "review-evals.jsonl");
 
   appendPromptEvaluation(path, record("approve", "allow_unnecessary"));
@@ -139,8 +132,7 @@ test("appends private JSONL evaluation records", () => {
 });
 
 test("the evaluation log never rotates", () => {
-  const dir = mkdtempSync(join(tmpdir(), "pi-auto-permissions-evals-"));
-  tempDirs.push(dir);
+  const dir = scratchDir("pi-auto-permissions-evals-");
   const path = join(dir, "review-evals.jsonl");
   writeFileSync(path, "");
   truncateSync(path, SIDECAR_ROTATE_BYTES);

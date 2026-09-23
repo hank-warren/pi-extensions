@@ -1,20 +1,12 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { test } from "node:test";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { appendJsonlRecord } from "../jsonl-sidecar.ts";
-
-const tempDirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
+import { scratchDir } from "./support/temp-dir.ts";
 
 function tempDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), "pi-ap-sidecar-"));
-  tempDirs.push(dir);
-  return dir;
+  return scratchDir("pi-ap-sidecar-");
 }
 
 test("rotates one generation once the file reaches the threshold", () => {

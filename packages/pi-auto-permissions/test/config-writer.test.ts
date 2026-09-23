@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { afterEach, describe, test } from "node:test";
-import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { describe, test } from "node:test";
+import { chmodSync, existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadAutoPermissionsConfig } from "../config.ts";
 import { detectIndent, patchAutoPermissionsConfig } from "../config-writer.ts";
+import { scratchDir } from "./support/temp-dir.ts";
 
 const FIXTURE = {
 	systemPromptFile: "system-prompt.md",
@@ -18,12 +18,8 @@ const FIXTURE = {
 	somethingAFutureVersionAdded: { keep: true },
 } as const;
 
-const tempDirs: string[] = [];
-
 function tempDir(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-auto-permissions-writer-"));
-	tempDirs.push(dir);
-	return dir;
+	return scratchDir("pi-auto-permissions-writer-");
 }
 
 function fixtureFile(value: unknown = FIXTURE, indent: string | number = 2): string {
@@ -38,13 +34,6 @@ function fixtureFile(value: unknown = FIXTURE, indent: string | number = 2): str
 function read(path: string): Record<string, unknown> {
 	return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
 }
-
-afterEach(() => {
-	for (const dir of tempDirs.splice(0)) {
-		chmodSync(dir, 0o700);
-		rmSync(dir, { recursive: true, force: true });
-	}
-});
 
 describe("config writer", () => {
 	test("patches only the reviewer block", () => {
