@@ -295,13 +295,13 @@ describe("permission verdicts", () => {
 });
 
 describe("gate matching", () => {
-	test("distinguishes guarded commands from conventions", () => {
+	test("distinguishes guarded commands from deny rules", () => {
 		const rules = [
 			{ pattern: /git push/i, level: "guarded", group: "git", label: "Push" },
-			{ pattern: /pip install/i, level: "convention", group: "pip", label: "pip", message: "Use uv" },
+			{ pattern: /pip install/i, level: "deny", group: "pip", label: "pip", message: "Use uv" },
 		] as const;
 		assert.equal(findGates("git push origin main", rules)[0]?.level, "guarded");
-		assert.equal(findGates("pip install requests", rules)[0]?.level, "convention");
+		assert.equal(findGates("pip install requests", rules)[0]?.level, "deny");
 		assert.equal(findGates("git status", rules)[0], undefined);
 	});
 

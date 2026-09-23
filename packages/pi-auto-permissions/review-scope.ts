@@ -13,9 +13,9 @@ export interface ReviewTarget {
 
 /**
  * Everything one gated command is judged against, built once per `tool_call`
- * (and per `request_override`) and passed whole to the display, the reviewer,
- * the denial log and the approval prompt — so those five never disagree about
- * which command, gate or config they are talking about.
+ * and passed whole to the display, the reviewer, the denial log and the
+ * approval prompt — so they never disagree about which command, gate or
+ * config they are talking about.
  */
 export interface ReviewScope {
   ctx: ExtensionContext;

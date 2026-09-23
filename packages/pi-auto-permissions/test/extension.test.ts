@@ -22,14 +22,6 @@ import { initTheme } from "@earendil-works/pi-coding-agent";
 import autoPermissionsExtension from "../index.ts";
 import { builtinTool, createCustomSelectorHarness, createMockContext, createMockPi } from "../../../test/support/mock-pi.ts";
 
-type ToolExecute = (
-	toolCallId: string,
-	params: Record<string, unknown>,
-	signal: AbortSignal | undefined,
-	onUpdate: undefined,
-	ctx: unknown,
-) => Promise<{ content: Array<{ text: string }>; details: { success?: boolean; command?: string } }>;
-
 type EventHandler = (...args: unknown[]) => unknown;
 
 type BlockResult = { block: true; reason: string } | undefined;
@@ -83,13 +75,6 @@ const GUARDED_RULE = {
 	level: "guarded",
 	group: "git",
 	label: "Git push",
-};
-const CONVENTION_RULE = {
-	pattern: "^npm install",
-	level: "convention",
-	group: "npm",
-	label: "Package install",
-	message: "Use npm ci in this repository.",
 };
 
 function verdictText(decision: "approve" | "revise" | "ask_user", reason: string): string {
@@ -249,7 +234,6 @@ interface Harness {
 	sessionStart(): Promise<void>;
 	sessionShutdown(): Promise<void>;
 	toolCall(command: string, toolCallId?: string): Promise<BlockResult>;
-	requestOverride(command: string, reason: string): ReturnType<ToolExecute>;
 	settingsCommand(args?: string): Promise<void>;
 	denials(): DenialLine[];
 	standingApprovals(): Array<{ gate: { label: string; group: string }; command: string; reason: string; project: string }>;
@@ -308,13 +292,6 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 			const handler = mock.events.get("tool_call")?.[0] as EventHandler | undefined;
 			assert.ok(handler, "the extension registers a tool_call handler");
 			return (await handler({ toolName: "bash", toolCallId, input: { command } }, harness.ctx)) as BlockResult;
-		},
-		requestOverride(command: string, reason: string) {
-			const execute = mock.tools.find((tool) => tool.name === "request_override")?.execute as
-				| ToolExecute
-				| undefined;
-			assert.ok(execute, "request_override must be registered");
-			return execute("override-1", { command, reason }, undefined, undefined, harness.ctx);
 		},
 		async settingsCommand(args = "") {
 			const command = mock.commands.get("auto-permissions");
@@ -409,7 +386,7 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 }
 
 test("1 · a command no rule matches runs without calling the reviewer", async () => {
-	await withExtension({ rules: [GUARDED_RULE, CONVENTION_RULE] }, async (harness) => {
+	await withExtension({ rules: [GUARDED_RULE] }, async (harness) => {
 		await harness.sessionStart();
 
 		assert.equal(await harness.toolCall("echo hello"), undefined);
@@ -420,10 +397,9 @@ test("1 · a command no rule matches runs without calling the reviewer", async (
 	});
 });
 
-test("2 · a deny rule wins over convention and guarded rules that matched earlier in config order", async () => {
+test("2 · a deny rule wins over a guarded rule that matched earlier in config order", async () => {
 	const rules = [
 		{ pattern: "danger", level: "guarded", group: "first", label: "Guarded first" },
-		{ pattern: "danger", level: "convention", group: "second", label: "Convention second", message: "Use the wrapper." },
 		{ pattern: "danger", level: "deny", group: "third", label: "Deny last", message: "Never run this." },
 	];
 	await withExtension({ rules }, async (harness) => {
@@ -447,29 +423,26 @@ test("2 · a deny rule wins over convention and guarded rules that matched earli
 	});
 });
 
-test("3 · a convention block activates request_override, and an allowed override lets the same command through", async () => {
-	await withExtension({ rules: [CONVENTION_RULE] }, async (harness) => {
+test("3 · a legacy convention rule blocks as deny without review, and trusted-ops cannot lift it", async () => {
+	const rules = [{
+		pattern: "^npm install",
+		level: "convention",
+		group: "npm",
+		label: "Package install",
+		message: "Use npm ci in this repository.",
+	}];
+	await withExtension({ rules, trustedOps: ["npm"], projectTrusted: true }, async (harness) => {
 		await harness.sessionStart();
-		assert.deepEqual(harness.mock.setActiveToolsCalls, [], "the override tool stays out of the active set until it is useful");
 
 		const blocked = await harness.toolCall("npm install left-pad");
 		assert.ok(blocked?.block);
-		assert.match(blocked.reason, /^Convention violation: Package install/u);
-		assert.match(blocked.reason, /Use npm ci in this repository\./u);
-		assert.match(blocked.reason, /call `request_override` with the exact command/u);
+		assert.match(blocked.reason, /^Blocked by policy: Package install/u);
+		assert.match(blocked.reason, /This is a deny rule/u);
 		assert.equal(harness.denied.length, 1);
-		assert.equal(harness.denied[0].decisionSource, "convention");
-		assert.deepEqual(harness.mock.setActiveToolsCalls, [["bash", "request_override"]]);
-		assert.deepEqual(harness.calls, [], "a convention rule never reaches the guardian");
-
-		harness.answers.push("Allow for this session");
-		const granted = await harness.requestOverride("npm install left-pad", "vendored package, npm ci cannot see it");
-		assert.equal(granted.details.success, true);
-		assert.equal(granted.details.command, "npm install left-pad");
-		assert.match(harness.prompts[0].join("\n"), /Convention override: Package install/u);
-
-		assert.equal(await harness.toolCall("npm install left-pad"), undefined);
-		assert.equal(harness.denied.length, 1, "the allowed command records no second denial");
+		assert.equal(harness.denied[0].decisionSource, "deny");
+		assert.deepEqual(harness.calls, [], "a legacy convention rule never reaches the guardian");
+		assert.deepEqual(harness.mock.setActiveToolsCalls, []);
+		assert.equal(harness.mock.tools.some((tool) => tool.name === "request_override"), false);
 	});
 });
 
@@ -735,7 +708,7 @@ test("13 · a legacy reviewer.prefilter key is ignored", async () => {
 test("14 · session_shutdown then session_start discards the lineage and restores the session's decisions", async () => {
 	await withExtension(
 		{
-			rules: [GUARDED_RULE, CONVENTION_RULE],
+			rules: [GUARDED_RULE],
 			completeSimple: () => assistantResponse(verdictText("approve", "fine")),
 		},
 		async (harness) => {
@@ -751,32 +724,22 @@ test("14 · session_shutdown then session_start discards the lineage and restore
 			);
 
 			await harness.sessionShutdown();
-			harness.branch.push(
-				{
-					type: "custom",
-					customType: "auto-permissions-overrides",
-					data: {
-						seq: 4,
-						overrides: [
-							{
-								seq: 3,
-								gateLabel: "Git push",
-								command: "git push --force origin main",
-								reviewerReason: "force push rewrites history",
-								choice: "allow",
-							},
-						],
-					},
+			harness.branch.push({
+				type: "custom",
+				customType: "auto-permissions-overrides",
+				data: {
+					seq: 4,
+					overrides: [
+						{
+							seq: 3,
+							gateLabel: "Git push",
+							command: "git push --force origin main",
+							reviewerReason: "force push rewrites history",
+							choice: "allow",
+						},
+					],
 				},
-				{
-					type: "message",
-					message: {
-						role: "toolResult",
-						toolName: "request_override",
-						details: { success: true, command: "npm install left-pad" },
-					},
-				},
-			);
+			});
 			await harness.sessionStart();
 
 			assert.equal(await harness.toolCall("git push origin main", "call-3"), undefined);
@@ -788,12 +751,6 @@ test("14 · session_shutdown then session_start discards the lineage and restore
 			assert.match(
 				harness.calls[2].envelope,
 				/USER \(permission override\): allowed gated command \\"git push --force origin main\\"/u,
-			);
-
-			assert.equal(
-				await harness.toolCall("npm install left-pad", "call-4"),
-				undefined,
-				"the session's granted convention overrides are rebuilt from the branch",
 			);
 			assert.deepEqual(harness.denied, []);
 		},

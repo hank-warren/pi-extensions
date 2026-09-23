@@ -19,12 +19,8 @@ import {
 const OVERRIDES_ENTRY_TYPE = "auto-permissions-overrides";
 
 export interface SessionOverrides {
-  /** Commands a `request_override` grant cleared for the rest of this session. */
-  readonly allowedConventionCommands: ReadonlySet<string>;
   /** The override records, live, for merging into reviewer evidence. */
   list(): readonly PermissionOverride[];
-  allowConvention(command: string): void;
-  activateOverrideTool(): void;
   restore(branch: readonly unknown[]): void;
   loadStanding(config: AutoPermissionsConfig, ctx: ExtensionContext): void;
   recordPromptDecision(
@@ -38,32 +34,17 @@ export interface SessionOverrides {
 }
 
 /**
- * The user's own permission decisions for this session: the exception grants
- * that let a convention-blocked command run, and the override records the
- * guardian is shown as user-source evidence.
+ * The user's own permission decisions for this session: the override records
+ * the guardian is shown as user-source evidence.
  *
  * One owner, because the pieces are one fact seen three ways — the in-memory
  * record, the session entry that survives a resume, and (for standing
  * approvals) the cross-project ledger.
  */
 export function createSessionOverrides(pi: ExtensionAPI): SessionOverrides {
-  const allowedConventionCommands = new Set<string>();
   const permissionOverrides: PermissionOverride[] = [];
   let overrideSeq = 0;
   let standingApprovalCapNotified = false;
-  let overrideToolActivated = false;
-
-  function reconcileOverrideTool(): void {
-    if (typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;
-    const active = pi.getActiveTools();
-    const present = active.includes("request_override");
-    if (overrideToolActivated === present) return;
-    pi.setActiveTools(
-      overrideToolActivated
-        ? [...active, "request_override"]
-        : active.filter((name) => name !== "request_override"),
-    );
-  }
 
   function persist(): void {
     try {
@@ -134,29 +115,12 @@ export function createSessionOverrides(pi: ExtensionAPI): SessionOverrides {
   }
 
   return {
-    allowedConventionCommands,
     list: () => permissionOverrides,
-    allowConvention(command: string): void {
-      allowedConventionCommands.add(command);
-    },
-    activateOverrideTool(): void {
-      overrideToolActivated = true;
-      reconcileOverrideTool();
-    },
 
     restore(branch: readonly unknown[]): void {
       // Restore prompt decisions from the branch: a resumed session keeps its
       // allows and standing block constraints.
       restoreOverrides(branch);
-      for (const entry of branch as Array<{
-        type?: string;
-        message?: { role?: string; toolName?: string; details?: unknown };
-      }>) {
-        if (entry.type !== "message" || entry.message?.role !== "toolResult") continue;
-        if (entry.message.toolName !== "request_override") continue;
-        const details = entry.message.details as { success?: boolean; command?: string } | undefined;
-        if (details?.success && details.command) allowedConventionCommands.add(details.command);
-      }
     },
 
     /** Replace only ledger-backed evidence; session prompt decisions stay put. */
@@ -243,10 +207,7 @@ export function createSessionOverrides(pi: ExtensionAPI): SessionOverrides {
     },
 
     resetForSession(): void {
-      overrideToolActivated = false;
-      reconcileOverrideTool();
       standingApprovalCapNotified = false;
-      allowedConventionCommands.clear();
     },
   };
 }

@@ -32,7 +32,6 @@ export function promptSelect(
   title: string,
   values: string[],
   signal: AbortSignal,
-  opts: { allowComment: boolean },
 ): Promise<string | undefined> {
   return ctx.ui.custom<string | undefined>((tui, theme, _keybindings, done) => {
     let finished = false;
@@ -46,7 +45,7 @@ export function promptSelect(
     const selector = new OptionSelector({
       title: `${theme.fg("warning", theme.bold("●"))} ${title}`,
       options: values.map((value) => ({ value, label: value })),
-      allowComment: opts.allowComment,
+      allowComment: true,
       theme,
       onSelect: (option, comment) => {
         if (comment) {

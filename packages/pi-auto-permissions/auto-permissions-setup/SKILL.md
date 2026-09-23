@@ -63,7 +63,7 @@ Use these meanings precisely:
 - `softDeny`: blocks unless an allow entry covers the action or the user names the exact operation and target. For production/customer targets, use wording like: “Do not perform mutating operations against HOST unless the user names the exact operation and instance.”
 - `hardDeny`: unconditional policy boundary. Propose it only for boundaries the user states absolutely.
 
-Never propose editing `rules`. Never write `.pi/trusted-ops` unless the user explicitly asks. If asked, explain that a trusted group only bypasses matching guarded/convention rules and may be a no-op under a catch-all rule or when no matching group exists.
+Never propose editing `rules`. Never write `.pi/trusted-ops` unless the user explicitly asks. If asked, explain that a trusted group only bypasses matching guarded rules and may be a no-op under a catch-all rule or when no matching group exists.
 
 ## 4. Apply only after confirmation
 

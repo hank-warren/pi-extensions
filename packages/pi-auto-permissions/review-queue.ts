@@ -4,8 +4,8 @@
  * Two guarded commands issued in the same assistant turn used to open two
  * reviewer conversations at once, which raced for the same widget/bash review
  * row and let the second verdict land against the first command's display. The
- * queue serializes the *decisions* only: denies, convention blocks, trusted
- * commands and already-approved execution never enter it.
+ * queue serializes the *decisions* only: denies, trusted commands and
+ * already-approved execution never enter it.
  *
  * Every acquirer releases in a `finally`, and a release that throws (or is
  * never observed) must not poison later requests — so the tail is always a

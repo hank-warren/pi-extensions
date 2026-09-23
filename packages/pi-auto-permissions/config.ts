@@ -182,13 +182,15 @@ function compileRule(value: unknown, index: number): Gate {
   if (!pattern || !group || !label) throw new Error(`rules[${index}] requires pattern, group, and label`);
   const flags = input.flags === undefined ? "i" : input.flags;
   if (typeof flags !== "string") throw new Error(`rules[${index}].flags must be a string`);
-  const level: GateLevel = input.level === undefined ? "guarded" : input.level as GateLevel;
-  if (level !== "guarded" && level !== "convention" && level !== "deny") {
-    throw new Error(`rules[${index}].level must be guarded, convention, or deny`);
+  const rawLevel = input.level === undefined ? "guarded" : input.level;
+  if (rawLevel !== "guarded" && rawLevel !== "deny" && rawLevel !== "convention") {
+    throw new Error(`rules[${index}].level must be guarded or deny`);
   }
+  // The retired convention level blocked without review; deny keeps that.
+  const level: GateLevel = rawLevel === "convention" ? "deny" : rawLevel;
   const message = optionalString(input.message, `rules[${index}].message`);
-  if ((level === "convention" || level === "deny") && !message) {
-    throw new Error(`rules[${index}].message is required for ${level} rules`);
+  if (level === "deny" && !message) {
+    throw new Error(`rules[${index}].message is required for deny rules`);
   }
 
   return {

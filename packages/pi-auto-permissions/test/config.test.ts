@@ -330,8 +330,18 @@ describe("auto permissions config", () => {
 		const path = configFile({ rules: [{ pattern: "x", level: "hard", group: "g", label: "L" }] });
 		assert.throws(
 			() => loadAutoPermissionsConfig(path),
-			/rules\[0\]\.level must be guarded, convention, or deny/,
+			/rules\[0\]\.level must be guarded or deny/,
 		);
+	});
+
+	test("loads a legacy convention rule as a deny rule, still requiring its message", () => {
+		const path = configFile({ rules: [{ pattern: "x", level: "convention", group: "g", label: "L", message: "m" }] });
+		const config = loadAutoPermissionsConfig(path);
+		assert.equal(config.rules[0].level, "deny");
+		assert.equal(config.rules[0].message, "m");
+
+		const missingMessage = configFile({ rules: [{ pattern: "x", level: "convention", group: "g", label: "L" }] });
+		assert.throws(() => loadAutoPermissionsConfig(missingMessage), /message is required/);
 	});
 
 	test("activates the built-in ruleset when the rules key is absent", () => {

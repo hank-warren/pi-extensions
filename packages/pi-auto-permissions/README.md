@@ -124,22 +124,22 @@ Rule fields are:
 
 - `pattern`: JavaScript regular expression source
 - `flags`: optional regular expression flags, defaulting to `i`
-- `level`: `guarded` for guardian review, `convention` for an overridable policy block, or `deny` for a hard block
+- `level`: `guarded` for guardian review, or `deny` for a hard block
 - `group`: policy group used by trusted-project bypasses
 - `label`: short description shown during review
-- `message`: optional feedback; required for convention and deny rules
+- `message`: optional feedback; required for deny rules
 
-A convention rule blocks directly with its configured feedback instead of asking the guardian. The agent can call `request_override` for a legitimate one-session exception. Overrides require user confirmation and cannot bypass guarded rules.
+A deny rule is a hard policy boundary: it blocks immediately with its message, is evaluated before every other level, and nothing lifts it — not a trusted group, not user approval at a prompt. Reserve it for operations that should never happen in an agent session (disabling agent oversight, deleting critical paths), and use `guarded` where a human judgment call is legitimate.
 
-A deny rule is a hard policy boundary: it blocks immediately with its message, is evaluated before every other level, and nothing lifts it — not `request_override`, not a trusted group, not user approval at a prompt. Reserve it for operations that should never happen in an agent session (disabling agent oversight, deleting critical paths), and use `guarded` where a human judgment call is legitimate.
+When several rules match one command, the most severe level wins (deny, then guarded) regardless of their order in the list.
 
-When several rules match one command, the most severe level wins (deny, then convention, then guarded) regardless of their order in the list.
+A legacy `"level": "convention"` rule still loads, as a deny rule: it blocks without review, and `.pi/trusted-ops` cannot lift it.
 
 Set `enabled` to `false` to disable the extension. Invalid configuration fails closed and blocks Bash calls until corrected.
 
 ### Review every shell command
 
-Set `"reviewAllShell": true` to review every bash command that matches no rule under a generic `shell command` gate (group `all-shell`), the analogue of Claude Code's `classifyAllShell`. The rules then act as a severity layer on top of blanket coverage: deny rules still block outright, convention rules still block with feedback, and everything else — named by a rule or not — goes to the guardian. The trade is one guardian call per command; pair it with a cheap reviewer model. A command whose matching group is listed in `.pi/trusted-ops` was explicitly waved through and is not re-captured by the blanket gate; trusting `all-shell` itself opts a project out of blanket review while keeping the ruleset live. Lineage caching and the evaluation log apply to `all-shell` reviews unchanged.
+Set `"reviewAllShell": true` to review every bash command that matches no rule under a generic `shell command` gate (group `all-shell`), the analogue of Claude Code's `classifyAllShell`. The rules then act as a severity layer on top of blanket coverage: deny rules still block outright, and everything else — named by a rule or not — goes to the guardian. The trade is one guardian call per command; pair it with a cheap reviewer model. A command whose matching group is listed in `.pi/trusted-ops` was explicitly waved through and is not re-captured by the blanket gate; trusting `all-shell` itself opts a project out of blanket review while keeping the ruleset live. Lineage caching and the evaluation log apply to `all-shell` reviews unchanged.
 
 ## Define trusted infrastructure
 
@@ -305,7 +305,7 @@ The allowlist matches what you wrote: a bare name such as `ask_user_question` ma
 
 ## Denial log and retry
 
-Every non-approved outcome — a guardian revise, a user block at the prompt, a convention or deny block, a review-infrastructure failure — is appended to a private `denials.jsonl` sidecar next to the config (0600, 16 MB rotation, one previous generation kept):
+Every non-approved outcome — a guardian revise, a user block at the prompt, a deny block, a review-infrastructure failure — is appended to a private `denials.jsonl` sidecar next to the config (0600, 16 MB rotation, one previous generation kept):
 
 ```json
 {"v":1,"ts":"…","sessionId":"…","tool":"bash","gate":{"label":"Force push","group":"git"},"command":"git push --force …","verdict":"block","reason":"…","decisionSource":"user"}
@@ -429,7 +429,7 @@ git
 gh
 ```
 
-Group names come from your configured rules. A trusted group bypasses guarded review and convention blocks for that group, so use it only in projects you control. Deny rules are never bypassed: `.pi/trusted-ops` is a project-scoped file, and a checked-in file must not be able to disarm a hard policy boundary.
+Group names come from your configured rules. A trusted group bypasses guarded review for that group, so use it only in projects you control. Deny rules are never bypassed: `.pi/trusted-ops` is a project-scoped file, and a checked-in file must not be able to disarm a hard policy boundary.
 
 ## Subagent sessions
 

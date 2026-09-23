@@ -1,7 +1,6 @@
 import { createReviewQueue } from "./review-queue.js";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadAutoPermissionsConfig, type AutoPermissionsConfig } from "./config.js";
@@ -20,7 +19,7 @@ import {
   type PromptEvaluationUserChoice,
 } from "./evaluation-log.js";
 import type { Gate } from "./gates.js";
-import { classifyCommand, untrustedMatches } from "./classify.js";
+import { classifyCommand } from "./classify.js";
 import type { ReviewEvidenceRecord } from "./review.js";
 import { promptSelect, setHerdrBlocked } from "./prompt-select.js";
 import { createReviewDisplay } from "./review-display.js";
@@ -69,12 +68,7 @@ function loadTrustedGroups(cwd: string): Set<string> {
 }
 
 function denyReason(gate: Gate): string {
-  return `Blocked by policy: ${gate.label}\n\n${gate.message ?? "This operation is denied by rule."}\n\nThis is a deny rule: it cannot be overridden with request_override, trusted groups, or user approval. Choose a different approach.`;
-}
-
-function conventionReason(gate: Gate): string {
-  const reason = `Convention violation: ${gate.label}\n\n${gate.message ?? "Use the configured project tooling."}`;
-  return `${reason}\n\nIf this is a legitimate edge case, explain why and call \`request_override\` with the exact command.`;
+  return `Blocked by policy: ${gate.label}\n\n${gate.message ?? "This operation is denied by rule."}\n\nThis is a deny rule: it cannot be overridden by trusted groups or user approval. Choose a different approach.`;
 }
 
 function reviewCancelledResult(): BlockResult {
@@ -277,7 +271,6 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
             shouldOfferStandingApproval(decisionSource, config.standingApprovals.enabled),
           ),
           promptSignal,
-          { allowComment: true },
         );
       } catch (error) {
         if (!lifecycleStale() && !reviewCancelled(signal)) throw error;
@@ -327,7 +320,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     }
     if (!config.enabled) return;
     const target: ReviewTarget = { toolName: event.toolName, toolCallId: event.toolCallId };
-    const classified = classifyCommand(command, config, trustedGroups, overrides.allowedConventionCommands);
+    const classified = classifyCommand(command, config, trustedGroups);
     if (classified.kind === "pass") return;
     const gate = classified.gate;
     const scope: ReviewScope = { ctx, config, gate, command, target };
@@ -337,15 +330,6 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
         source: "deny",
         reason: gate.message ?? gate.label,
         block: denyReason(gate),
-      });
-    }
-    if (classified.kind === "convention") {
-      if (ctx.hasUI) overrides.activateOverrideTool();
-      return settle(scope, {
-        verdict: "block",
-        source: "convention",
-        reason: gate.message ?? gate.label,
-        block: conventionReason(gate),
       });
     }
 
@@ -402,95 +386,6 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
       releaseReviewSlot();
     }
   });
-
-  pi.registerTool({
-    name: "request_override",
-    executionMode: "sequential",
-    label: "Request Override",
-    description: "Request a one-session exception for a command that violates a tooling convention. This cannot bypass guarded commands or deny rules.",
-    parameters: Type.Object({
-      command: Type.String({ description: "Exact command to allow" }),
-      reason: Type.String({ description: "Why the convention does not apply" }),
-    }),
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      let config: AutoPermissionsConfig;
-      try {
-        config = currentConfig(ctx);
-      } catch (error) {
-        return {
-          content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
-          details: { success: false },
-        };
-      }
-      const matches = untrustedMatches(params.command, config, trustedGroups);
-      if (matches.some((gate) => gate.level === "deny")) {
-        return {
-          content: [{ type: "text", text: "The command matches a deny rule, which is a hard policy boundary. Deny rules cannot be bypassed with request_override; choose a different approach." }],
-          details: { success: false },
-        };
-      }
-      if (!matches.length || matches.some((gate) => gate.level === "guarded")) {
-        return {
-          content: [{ type: "text", text: "The command is not a convention violation. Guarded commands cannot be bypassed with request_override." }],
-          details: { success: false },
-        };
-      }
-      const gate = matches[0];
-      const lifecycleSignal = reviewer.lifecycleSignal;
-      const lifecycleStale = () => reviewer.isStale(lifecycleSignal);
-      const promptSignal = withLifecycle(signal, lifecycleSignal);
-      const cancelled = () => ({
-        content: [{ type: "text" as const, text: "Override cancelled." }],
-        details: { success: false },
-      });
-      if (lifecycleStale() || reviewCancelled(signal)) return cancelled();
-      if (!ctx.hasUI) {
-        return {
-          content: [{ type: "text", text: "Cannot request an override without an interactive UI." }],
-          details: { success: false },
-        };
-      }
-
-      setHerdrBlocked(pi, true, gate.label);
-      try {
-        let choice: string | undefined;
-        try {
-          // The override prompt never had Tab-to-comment (the monkey patch only
-          // enabled it on titles matching /needs approval/i), so keep parity.
-          choice = await promptSelect(
-            pi,
-            ctx,
-            `Convention override: ${gate.label}\n\n${params.reason}\n\n${params.command}`,
-            ["Allow for this session", "Keep blocked"],
-            promptSignal,
-            { allowComment: false },
-          );
-        } catch (error) {
-          if (!lifecycleStale() && !reviewCancelled(signal)) throw error;
-          return cancelled();
-        }
-        if (lifecycleStale() || reviewCancelled(signal)) return cancelled();
-        if (choice === "Allow for this session") {
-          overrides.allowConvention(params.command);
-          return {
-            content: [{ type: "text", text: `Override granted for this session:\n  ${params.command}` }],
-            details: { success: true, command: params.command },
-          };
-        }
-        return {
-          content: [{ type: "text", text: gate.message ?? "Use the configured project tooling." }],
-          details: { success: false },
-        };
-      } finally {
-        if (!lifecycleStale()) setHerdrBlocked(pi, false);
-      }
-    },
-  });
-
-  // The override schema is useful only after a convention denial has named an
-  // exact command. It is kept registered for replay and narrowed out of the
-  // active set at session_start — never here, because Pi refuses action methods
-  // during extension loading.
 
   registerSettingsCommand(pi, { overrides, reviewer });
 
