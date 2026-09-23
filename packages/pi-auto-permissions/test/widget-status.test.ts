@@ -1,13 +1,22 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
-  PLAIN_PALETTE,
   reviewFrameIntervalMs,
   reviewStatusFrame,
   reviewStatusLines,
   WAITING_FRAME_INTERVAL_MS,
   WAITING_FRAMES,
+  type ReviewLinePalette,
 } from "../widget-status.js";
+
+const PLAIN_PALETTE: ReviewLinePalette = {
+  header: (text) => text,
+  muted: (text) => text,
+  warning: (text) => text,
+  success: (text) => text,
+  accent: (text) => text,
+  error: (text) => text,
+};
 
 const REVIEWER = "openai-codex/gpt-5.6-luna";
 

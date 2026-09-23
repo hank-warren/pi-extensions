@@ -70,15 +70,6 @@ export interface ReviewLinePalette {
   error: (text: string) => string;
 }
 
-export const PLAIN_PALETTE: ReviewLinePalette = {
-  header: (text) => text,
-  muted: (text) => text,
-  warning: (text) => text,
-  success: (text) => text,
-  accent: (text) => text,
-  error: (text) => text,
-};
-
 /**
  * Render the widget content: one status line, plus a dim detail line only
  * when a guardian reason is present. The command is intentionally omitted —

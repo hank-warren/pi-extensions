@@ -519,7 +519,7 @@ export function createGuardianReviewer(
    * Reviewer calls never reach the session transcript, so their usage is invisible to
    * tooling that reads session files. Record content-free counters in a sidecar instead.
    */
-  function recordReviewerUsage(config: AutoPermissionsConfig, model: { provider: string; id: string }, usage: unknown, subagent: boolean, label: "guardian" | "prefilter" | "setup" = "guardian"): void {
+  function recordReviewerUsage(config: AutoPermissionsConfig, model: { provider: string; id: string }, usage: unknown, subagent: boolean, label: "guardian" | "prefilter" = "guardian"): void {
     if (!config.usageLog.enabled) return;
     try {
       appendUsageRecord(config.usageLog.path, buildUsageLogRecord(model.provider, model.id, usage, label, subagent));

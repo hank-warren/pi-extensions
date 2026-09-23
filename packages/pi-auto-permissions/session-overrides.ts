@@ -25,10 +25,7 @@ export interface SessionOverrides {
   list(): readonly PermissionOverride[];
   allowConvention(command: string): void;
   activateOverrideTool(): void;
-  reconcileOverrideTool(): void;
-  persist(): void;
   restore(branch: readonly unknown[]): void;
-  removeStanding(matches: (override: PermissionOverride) => boolean): void;
   loadStanding(config: AutoPermissionsConfig, ctx: ExtensionContext): void;
   recordPromptDecision(
     scope: ReviewScope,
@@ -131,13 +128,10 @@ export function createSessionOverrides(pi: ExtensionAPI): SessionOverrides {
     allowConvention(command: string): void {
       allowedConventionCommands.add(command);
     },
-    reconcileOverrideTool,
     activateOverrideTool(): void {
       overrideToolActivated = true;
       reconcileOverrideTool();
     },
-    persist,
-    removeStanding,
 
     restore(branch: readonly unknown[]): void {
       // Restore prompt decisions from the branch: a resumed session keeps its

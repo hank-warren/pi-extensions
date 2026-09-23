@@ -72,10 +72,8 @@ function denyReason(gate: Gate): string {
   return `Blocked by policy: ${gate.label}\n\n${gate.message ?? "This operation is denied by rule."}\n\nThis is a deny rule: it cannot be overridden with request_override, trusted groups, or user approval. Choose a different approach.`;
 }
 
-function conventionReason(gate: Gate, command: string): string {
-  let reason = `Convention violation: ${gate.label}\n\n${gate.message ?? "Use the configured project tooling."}`;
-  const suggestion = gate.suggest?.(command);
-  if (suggestion && suggestion !== command) reason += `\n\nSuggested command:\n  ${suggestion}`;
+function conventionReason(gate: Gate): string {
+  const reason = `Convention violation: ${gate.label}\n\n${gate.message ?? "Use the configured project tooling."}`;
   return `${reason}\n\nIf this is a legitimate edge case, explain why and call \`request_override\` with the exact command.`;
 }
 
@@ -347,7 +345,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
         verdict: "block",
         source: "convention",
         reason: gate.message ?? gate.label,
-        block: conventionReason(gate, command),
+        block: conventionReason(gate),
       });
     }
 

@@ -2,7 +2,7 @@
 // node:test so the repo test suite needs no bun toolchain.
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { findGate, findGates } from "../gates.ts";
+import { findGates } from "../gates.ts";
 import {
 	AUTO_PERMISSIONS_SYSTEM_PROMPT,
 	buildGuardianPolicySection,
@@ -300,15 +300,15 @@ describe("gate matching", () => {
 			{ pattern: /git push/i, level: "guarded", group: "git", label: "Push" },
 			{ pattern: /pip install/i, level: "convention", group: "pip", label: "pip", message: "Use uv" },
 		] as const;
-		assert.equal(findGate("git push origin main", rules)?.level, "guarded");
-		assert.equal(findGate("pip install requests", rules)?.level, "convention");
-		assert.equal(findGate("git status", rules), undefined);
+		assert.equal(findGates("git push origin main", rules)[0]?.level, "guarded");
+		assert.equal(findGates("pip install requests", rules)[0]?.level, "convention");
+		assert.equal(findGates("git status", rules)[0], undefined);
 	});
 
 	test("handles configurable stateful regular expressions repeatedly", () => {
 		const rules = [{ pattern: /git push/g, level: "guarded", group: "git", label: "Push" }] as const;
-		assert.equal(findGate("git push", rules)?.label, "Push");
-		assert.equal(findGate("git push", rules)?.label, "Push");
+		assert.equal(findGates("git push", rules)[0]?.label, "Push");
+		assert.equal(findGates("git push", rules)[0]?.label, "Push");
 	});
 
 	test("collects every matching operation in a compound command", () => {
