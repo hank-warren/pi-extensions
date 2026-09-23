@@ -216,6 +216,11 @@ export function expandRules(rawRules: readonly unknown[], defaults: readonly Gat
   return rules;
 }
 
+function resolveConfigRelativePath(value: string, configFilePath: string): string {
+  const expanded = value.startsWith("~/") ? join(homedir(), value.slice(2)) : value;
+  return isAbsolute(expanded) ? expanded : resolve(dirname(configFilePath), expanded);
+}
+
 function resolvePrompt(
   raw: Record<string, unknown>,
   path: string,
@@ -226,8 +231,7 @@ function resolvePrompt(
   if (inline) return { prompt: inline, source: { kind: "inline" } };
   if (!file) return { prompt: AUTO_PERMISSIONS_SYSTEM_PROMPT, source: { kind: "builtin" } };
 
-  const expanded = file.startsWith("~/") ? join(homedir(), file.slice(2)) : file;
-  const resolved = isAbsolute(expanded) ? expanded : resolve(dirname(path), expanded);
+  const resolved = resolveConfigRelativePath(file, path);
   const prompt = readFileSync(resolved, "utf8").trim();
   if (!prompt) throw new Error("systemPromptFile is empty");
   return { prompt, source: { kind: "file", path: resolved } };
@@ -287,46 +291,28 @@ function resolveReviewEvidence(raw: Record<string, unknown>): AutoPermissionsCon
   };
 }
 
-function resolveEvaluationLog(
-  raw: Record<string, unknown>,
-  configFilePath: string,
-): AutoPermissionsConfig["evaluationLog"] {
-  const defaultPath = resolve(dirname(configFilePath), "review-evals.jsonl");
-  if (raw.evaluationLog === undefined) return { enabled: false, path: defaultPath };
-  if (!raw.evaluationLog || typeof raw.evaluationLog !== "object" || Array.isArray(raw.evaluationLog)) {
-    throw new Error("evaluationLog must be an object");
-  }
-  const evaluationLog = raw.evaluationLog as Record<string, unknown>;
-  if (evaluationLog.enabled !== undefined && typeof evaluationLog.enabled !== "boolean") {
-    throw new Error("evaluationLog.enabled must be boolean");
-  }
-  const configuredPath = optionalString(evaluationLog.path, "evaluationLog.path");
-  if (!configuredPath) return { enabled: evaluationLog.enabled === true, path: defaultPath };
-  const expanded = configuredPath.startsWith("~/") ? join(homedir(), configuredPath.slice(2)) : configuredPath;
-  return {
-    enabled: evaluationLog.enabled === true,
-    path: isAbsolute(expanded) ? expanded : resolve(dirname(configFilePath), expanded),
-  };
-}
+type SidecarKey = "evaluationLog" | "usageLog" | "denialLog" | "standingApprovals";
 
-function resolveUsageLog(
+function resolveSidecar(
   raw: Record<string, unknown>,
+  key: SidecarKey,
+  fileName: string,
+  defaultEnabled: boolean,
   configFilePath: string,
-): AutoPermissionsConfig["usageLog"] {
-  const defaultPath = resolve(dirname(configFilePath), "usage.jsonl");
-  if (raw.usageLog === undefined) return { enabled: true, path: defaultPath };
-  if (!raw.usageLog || typeof raw.usageLog !== "object" || Array.isArray(raw.usageLog)) {
-    throw new Error("usageLog must be an object");
+): { enabled: boolean; path: string } {
+  const defaultPath = resolve(dirname(configFilePath), fileName);
+  const value = raw[key];
+  if (value === undefined) return { enabled: defaultEnabled, path: defaultPath };
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${key} must be an object`);
   }
-  const usageLog = raw.usageLog as Record<string, unknown>;
-  if (usageLog.enabled !== undefined && typeof usageLog.enabled !== "boolean") {
-    throw new Error("usageLog.enabled must be boolean");
+  const block = value as Record<string, unknown>;
+  if (block.enabled !== undefined && typeof block.enabled !== "boolean") {
+    throw new Error(`${key}.enabled must be boolean`);
   }
-  const enabled = usageLog.enabled !== false;
-  const configuredPath = optionalString(usageLog.path, "usageLog.path");
-  if (!configuredPath) return { enabled, path: defaultPath };
-  const expanded = configuredPath.startsWith("~/") ? join(homedir(), configuredPath.slice(2)) : configuredPath;
-  return { enabled, path: isAbsolute(expanded) ? expanded : resolve(dirname(configFilePath), expanded) };
+  const enabled = (block.enabled as boolean | undefined) ?? defaultEnabled;
+  const configured = optionalString(block.path, `${key}.path`);
+  return { enabled, path: configured ? resolveConfigRelativePath(configured, configFilePath) : defaultPath };
 }
 
 const GUARDIAN_POLICY_KEYS = ["environment", "allow", "softDeny", "hardDeny"] as const;
@@ -357,46 +343,6 @@ function resolveGuardianPolicy(raw: Record<string, unknown>): AutoPermissionsCon
     softDeny: resolveList("softDeny"),
     hardDeny: resolveList("hardDeny"),
   };
-}
-
-function resolveDenialLog(
-  raw: Record<string, unknown>,
-  configFilePath: string,
-): AutoPermissionsConfig["denialLog"] {
-  const defaultPath = resolve(dirname(configFilePath), "denials.jsonl");
-  if (raw.denialLog === undefined) return { enabled: true, path: defaultPath };
-  if (!raw.denialLog || typeof raw.denialLog !== "object" || Array.isArray(raw.denialLog)) {
-    throw new Error("denialLog must be an object");
-  }
-  const denialLog = raw.denialLog as Record<string, unknown>;
-  if (denialLog.enabled !== undefined && typeof denialLog.enabled !== "boolean") {
-    throw new Error("denialLog.enabled must be boolean");
-  }
-  const enabled = denialLog.enabled !== false;
-  const configuredPath = optionalString(denialLog.path, "denialLog.path");
-  if (!configuredPath) return { enabled, path: defaultPath };
-  const expanded = configuredPath.startsWith("~/") ? join(homedir(), configuredPath.slice(2)) : configuredPath;
-  return { enabled, path: isAbsolute(expanded) ? expanded : resolve(dirname(configFilePath), expanded) };
-}
-
-function resolveStandingApprovals(
-  raw: Record<string, unknown>,
-  configFilePath: string,
-): AutoPermissionsConfig["standingApprovals"] {
-  const defaultPath = resolve(dirname(configFilePath), "standing-approvals.jsonl");
-  if (raw.standingApprovals === undefined) return { enabled: true, path: defaultPath };
-  if (!raw.standingApprovals || typeof raw.standingApprovals !== "object" || Array.isArray(raw.standingApprovals)) {
-    throw new Error("standingApprovals must be an object");
-  }
-  const standingApprovals = raw.standingApprovals as Record<string, unknown>;
-  if (standingApprovals.enabled !== undefined && typeof standingApprovals.enabled !== "boolean") {
-    throw new Error("standingApprovals.enabled must be boolean");
-  }
-  const enabled = standingApprovals.enabled !== false;
-  const configuredPath = optionalString(standingApprovals.path, "standingApprovals.path");
-  if (!configuredPath) return { enabled, path: defaultPath };
-  const expanded = configuredPath.startsWith("~/") ? join(homedir(), configuredPath.slice(2)) : configuredPath;
-  return { enabled, path: isAbsolute(expanded) ? expanded : resolve(dirname(configFilePath), expanded) };
 }
 
 function resolveUi(raw: Record<string, unknown>): AutoPermissionsConfig["ui"] {
@@ -472,10 +418,10 @@ export function loadAutoPermissionsConfig(path = autoPermissionsConfigPath()): A
     systemPrompt: prompt.prompt,
     systemPromptSource: prompt.source,
     reviewEvidence: resolveReviewEvidence(raw),
-    evaluationLog: resolveEvaluationLog(raw, path),
-    usageLog: resolveUsageLog(raw, path),
-    denialLog: resolveDenialLog(raw, path),
-    standingApprovals: resolveStandingApprovals(raw, path),
+    evaluationLog: resolveSidecar(raw, "evaluationLog", "review-evals.jsonl", false, path),
+    usageLog: resolveSidecar(raw, "usageLog", "usage.jsonl", true, path),
+    denialLog: resolveSidecar(raw, "denialLog", "denials.jsonl", true, path),
+    standingApprovals: resolveSidecar(raw, "standingApprovals", "standing-approvals.jsonl", true, path),
     rules,
     reviewAllShell: raw.reviewAllShell === true,
     guardianPolicy: resolveGuardianPolicy(raw),

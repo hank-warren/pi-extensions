@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, test } from "node:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { expandRules, loadAutoPermissionsConfig } from "../config.ts";
 import { DEFAULT_RULES } from "../default-rules.ts";
@@ -58,42 +58,45 @@ describe("auto permissions config", () => {
 		assert.deepEqual(config.ui, { enabled: true, resultDisplayMs: 2500, placement: "widget" });
 	});
 
-	test("keeps the usage sidecar on by default and allows opting out or relocating it", () => {
-		const defaults = configFile({});
-		assert.deepEqual(loadAutoPermissionsConfig(defaults).usageLog, {
-			enabled: true,
-			path: join(dirname(defaults), "usage.jsonl"),
-		});
+	for (const [key, file, defaultEnabled] of [
+		["usageLog", "usage.jsonl", true],
+		["denialLog", "denials.jsonl", true],
+		["evaluationLog", "review-evals.jsonl", false],
+	] as const) {
+		test(`resolves the ${key} sidecar block`, () => {
+			const load = (value: unknown) => loadAutoPermissionsConfig(configFile(value))[key];
+			const defaults = configFile({});
+			assert.deepEqual(loadAutoPermissionsConfig(defaults)[key], {
+				enabled: defaultEnabled,
+				path: join(dirname(defaults), file),
+			});
 
-		const disabled = configFile({ usageLog: { enabled: false } });
-		assert.deepEqual(loadAutoPermissionsConfig(disabled).usageLog, {
-			enabled: false,
-			path: join(dirname(disabled), "usage.jsonl"),
-		});
+			const flipped = configFile({ [key]: { enabled: !defaultEnabled } });
+			assert.deepEqual(loadAutoPermissionsConfig(flipped)[key], {
+				enabled: !defaultEnabled,
+				path: join(dirname(flipped), file),
+			});
 
-		const relocated = configFile({ usageLog: { path: "logs/guardian-usage.jsonl" } });
-		assert.deepEqual(loadAutoPermissionsConfig(relocated).usageLog, {
-			enabled: true,
-			path: join(dirname(relocated), "logs", "guardian-usage.jsonl"),
-		});
-	});
+			const relocated = configFile({ [key]: { path: "logs/x.jsonl" } });
+			assert.deepEqual(loadAutoPermissionsConfig(relocated)[key], {
+				enabled: defaultEnabled,
+				path: join(dirname(relocated), "logs", "x.jsonl"),
+			});
 
-	test("keeps the denial log on by default and allows opting out or relocating it", () => {
-		const defaults = configFile({});
-		assert.deepEqual(loadAutoPermissionsConfig(defaults).denialLog, {
-			enabled: true,
-			path: join(dirname(defaults), "denials.jsonl"),
-		});
+			assert.deepEqual(load({ [key]: { path: "~/x.jsonl" } }), {
+				enabled: defaultEnabled,
+				path: join(homedir(), "x.jsonl"),
+			});
+			assert.deepEqual(load({ [key]: { path: "/abs/x.jsonl" } }), {
+				enabled: defaultEnabled,
+				path: "/abs/x.jsonl",
+			});
 
-		const disabled = configFile({ denialLog: { enabled: false } });
-		assert.equal(loadAutoPermissionsConfig(disabled).denialLog.enabled, false);
-
-		const relocated = configFile({ denialLog: { path: "logs/denials.jsonl" } });
-		assert.deepEqual(loadAutoPermissionsConfig(relocated).denialLog, {
-			enabled: true,
-			path: join(dirname(relocated), "logs", "denials.jsonl"),
+			for (const bad of [true, [], null, { enabled: "yes" }, { enabled: null }, { path: "" }]) {
+				assert.throws(() => load({ [key]: bad }), new RegExp(key));
+			}
 		});
-	});
+	}
 
 	test("keeps standing approvals on by default and allows opting out or relocating them", () => {
 		const defaults = configFile({});
@@ -116,20 +119,6 @@ describe("auto permissions config", () => {
 		for (const standingApprovals of [true, [], { enabled: "yes" }, { path: "" }]) {
 			const path = configFile({ standingApprovals });
 			assert.throws(() => loadAutoPermissionsConfig(path), /standingApprovals/);
-		}
-	});
-
-	test("rejects malformed denial log configuration", () => {
-		for (const denialLog of [true, [], { enabled: "yes" }, { path: "" }]) {
-			const path = configFile({ denialLog });
-			assert.throws(() => loadAutoPermissionsConfig(path), /denialLog/);
-		}
-	});
-
-	test("rejects malformed usage sidecar configuration", () => {
-		for (const usageLog of [true, [], { enabled: "yes" }, { path: "" }]) {
-			const path = configFile({ usageLog });
-			assert.throws(() => loadAutoPermissionsConfig(path), /usageLog/);
 		}
 	});
 
@@ -240,29 +229,6 @@ describe("auto permissions config", () => {
 				(error: unknown) => error instanceof Error
 					&& error.message.includes("reviewEvidence.userAnswerTools must be an array of non-empty strings"),
 			);
-		}
-	});
-
-	test("resolves an enabled evaluation log relative to the config", () => {
-		const path = configFile({ evaluationLog: { enabled: true, path: "logs/reviews.jsonl" } });
-		assert.deepEqual(loadAutoPermissionsConfig(path).evaluationLog, {
-			enabled: true,
-			path: join(path, "..", "logs/reviews.jsonl"),
-		});
-	});
-
-	test("uses a private adjacent evaluation log path by default", () => {
-		const path = configFile({ evaluationLog: { enabled: true } });
-		assert.deepEqual(loadAutoPermissionsConfig(path).evaluationLog, {
-			enabled: true,
-			path: join(path, "..", "review-evals.jsonl"),
-		});
-	});
-
-	test("rejects malformed evaluation log configuration", () => {
-		for (const evaluationLog of [true, [], { enabled: "yes" }, { path: "" }]) {
-			const path = configFile({ evaluationLog });
-			assert.throws(() => loadAutoPermissionsConfig(path));
 		}
 	});
 
