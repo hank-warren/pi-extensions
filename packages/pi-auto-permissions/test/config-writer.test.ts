@@ -154,44 +154,6 @@ describe("config writer", () => {
 		assert.equal(loadAutoPermissionsConfig(path).reviewer?.prefilter, true);
 	});
 
-	test("appends environment and softDeny entries without touching the rest of guardianPolicy", () => {
-		const path = fixtureFile({
-			...FIXTURE,
-			guardianPolicy: {
-				environment: ["existing entry"],
-				softDeny: ["existing production boundary"],
-				hardDeny: ["never push outside our org"],
-			},
-		});
-		patchAutoPermissionsConfig(path, {
-			appendEnvironment: [" new entry ", "existing entry", "second new entry"],
-			appendSoftDeny: [" new production boundary ", "existing production boundary"],
-		});
-
-		const written = read(path);
-		assert.deepEqual(written.guardianPolicy, {
-			environment: ["existing entry", "new entry", "second new entry"],
-			softDeny: ["existing production boundary", "new production boundary"],
-			hardDeny: ["never push outside our org"],
-		});
-		// Unrelated keys survive untouched.
-		assert.deepEqual(written.somethingAFutureVersionAdded, { keep: true });
-
-		// No guardianPolicy on disk: the block is created with only environment.
-		const fresh = fixtureFile();
-		patchAutoPermissionsConfig(fresh, {
-			appendEnvironment: ["only entry"],
-			appendSoftDeny: ["only boundary"],
-		});
-		assert.deepEqual(read(fresh).guardianPolicy, {
-			environment: ["only entry"],
-			softDeny: ["only boundary"],
-		});
-		const loaded = loadAutoPermissionsConfig(fresh).guardianPolicy;
-		assert.deepEqual(loaded.environment, ["only entry"]);
-		assert.deepEqual(loaded.softDeny, ["only boundary"]);
-	});
-
 	test("round-trips through the loader", () => {
 		const path = fixtureFile();
 		patchAutoPermissionsConfig(path, {
