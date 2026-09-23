@@ -175,13 +175,8 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
    * if that package is installed. Say so once per session instead of letting the
    * first guarded command fail with a bare "review model not found".
    */
-  function warnAboutMissingReviewerProvider(ctx: ExtensionContext): void {
-    let provider: string | undefined;
-    try {
-      provider = currentConfig(ctx).reviewer?.provider;
-    } catch {
-      return; // The config error was already reported by currentConfig().
-    }
+  function warnAboutMissingReviewerProvider(ctx: ExtensionContext, config: AutoPermissionsConfig): void {
+    const provider = config.reviewer?.provider;
     if (!provider || ctx.modelRegistry.getProvider(provider)) return;
 
     const message =
@@ -508,18 +503,21 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   });
 
   pi.on("session_start", async (_event, ctx) => {
+    let config: AutoPermissionsConfig | undefined;
+    try {
+      config = currentConfig(ctx);
+    } catch {
+      // Reported by currentConfig; the first bash call fails closed.
+    }
     overrides.resetForSession();
-    warnAboutMissingReviewerProvider(ctx);
+    if (config) warnAboutMissingReviewerProvider(ctx, config);
 
     reviewer.startSession(ctx.cwd);
     overrides.restore(ctx.sessionManager.getBranch());
     trustedGroups = ctx.isProjectTrusted() ? loadTrustedGroups(ctx.cwd) : new Set();
-    try {
-      const config = currentConfig(ctx);
+    if (config) {
       overrides.loadStanding(config, ctx);
       if (config.ui.placement === "toolRow") display.registerGuardedBash(ctx);
-    } catch {
-      // The first bash call will fail closed with the configuration error.
     }
   });
 }
