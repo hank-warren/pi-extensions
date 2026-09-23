@@ -2,8 +2,8 @@
  * Row model and pure edit logic behind `/auto-permissions`.
  *
  * Everything that decides *what* a row shows or what an edit means lives here,
- * free of pi's runtime, so it is testable without a TUI. index.ts owns only the
- * wiring: read config, render a SettingsList, persist through config-writer.
+ * free of pi's runtime, so it is testable without a TUI. settings-command.ts owns
+ * only the wiring: read config, render a SettingsList, persist through config-writer.
  */
 import { homedir } from "node:os";
 import {
@@ -156,7 +156,7 @@ export function buildSettingItems(
     {
       id: ENABLED_ID,
       label: "Enabled",
-      description: "Review guarded commands. Off lets every command run without guardian review.",
+      description: "Review guarded commands. Off disables all gating, including deny rules.",
       currentValue: toggleValue(settings.enabled),
       values: TOGGLE_VALUES,
     },

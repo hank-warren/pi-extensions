@@ -5,8 +5,8 @@
 > [ogulcancelik/pi-extensions#24](https://github.com/ogulcancelik/pi-extensions/issues/24) /
 > [PR #25](https://github.com/ogulcancelik/pi-extensions/pull/25). Switch back to the
 > upstream package once it ships the feature. Never install both packages at once, or
-> every Bash call is reviewed twice. The upstream `index.test.ts` harness suite is not
-> vendored; the pure config/evidence tests live in `test/`.
+> every Bash call is reviewed twice. Tests live in `test/`: pure module tests plus
+> `test/extension.test.ts`, which drives the `tool_call` pipeline through a mock `ExtensionAPI`.
 
 A context-aware permission system for Pi shell commands, with an automated guardian that checks what the user actually authorized.
 
@@ -139,7 +139,7 @@ Set `enabled` to `false` to disable the extension. Invalid configuration fails c
 
 ### Review every shell command
 
-Set `"reviewAllShell": true` to review every bash command that matches no rule under a generic `shell command` gate (group `all-shell`), the analogue of Claude Code's `classifyAllShell`. The rules then act as a severity layer on top of blanket coverage: deny rules still block outright, convention rules still block with feedback, and everything else — named by a rule or not — goes to the guardian. The trade is one guardian call per command; pair it with a cheap reviewer model. A command whose matching group is listed in `.pi/trusted-ops` was explicitly waved through and is not re-captured by the blanket gate; trusting `all-shell` itself opts a project out of blanket review while keeping the ruleset live. Loop budgets, lineage caching, and the evaluation log apply to `all-shell` reviews unchanged.
+Set `"reviewAllShell": true` to review every bash command that matches no rule under a generic `shell command` gate (group `all-shell`), the analogue of Claude Code's `classifyAllShell`. The rules then act as a severity layer on top of blanket coverage: deny rules still block outright, convention rules still block with feedback, and everything else — named by a rule or not — goes to the guardian. The trade is one guardian call per command; pair it with a cheap reviewer model. A command whose matching group is listed in `.pi/trusted-ops` was explicitly waved through and is not re-captured by the blanket gate; trusting `all-shell` itself opts a project out of blanket review while keeping the ruleset live. Lineage caching and the evaluation log apply to `all-shell` reviews unchanged.
 
 ## Define trusted infrastructure
 
@@ -223,12 +223,13 @@ The reviewer settings that change most often are editable from a settings menu i
 
 | Row | What it edits |
 | --- | --- |
-| Enabled | `enabled` — off lets every command run without guardian review |
+| Enabled | `enabled` — off disables all gating, including deny rules; every command runs unreviewed |
 | Reviewer model | `reviewer.provider` / `reviewer.model`, picked from the models you are signed in to |
 | Thinking level | `reviewer.reasoningEffort` |
 | Review timeout | `reviewer.timeoutMs`, entered as `30s` or `45000ms` |
 | System prompt | read-only: the resolved path of the active `systemPromptFile`, or whether the built-in or an inline prompt is in use |
 | Standing approvals | count plus a picker for revoking user-scoped comparable-command approvals |
+| Recent denials | read-only view of the denial log with **Allow on retry**; shown while `denialLog` is enabled (the default) |
 
 Saves are applied immediately — the config is re-read on every guarded command, so there is nothing to restart, in this session or any other. The menu is a narrow writer: it merges only the keys above into whatever is on disk, so rules, prompts, evidence settings and log paths stay exactly as you wrote them and remain file-only. A config that fails validation is never rewritten; the menu reports the error and refuses to open.
 
