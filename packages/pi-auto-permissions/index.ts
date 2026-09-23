@@ -79,6 +79,14 @@ function conventionReason(gate: Gate, command: string): string {
   return `${reason}\n\nIf this is a legitimate edge case, explain why and call \`request_override\` with the exact command.`;
 }
 
+function reviewCancelledResult(): BlockResult {
+  return { block: true, reason: "Auto Permissions review cancelled" };
+}
+
+function withLifecycle(signal: AbortSignal | undefined, lifecycle: AbortSignal): AbortSignal {
+  return signal ? AbortSignal.any([signal, lifecycle]) : lifecycle;
+}
+
 export default function autoPermissionsExtension(pi: ExtensionAPI) {
   const overrides = createSessionOverrides(pi);
   let trustedGroups = new Set<string>();
@@ -187,6 +195,14 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     return signal?.aborted === true;
   }
 
+  function cancelledAfterAwait(scope: ReviewScope, lifecycleSignal: AbortSignal): BlockResult | undefined {
+    if (reviewer.isStale(lifecycleSignal)) return reviewCancelledResult();
+    if (!reviewCancelled(scope.ctx.signal)) return undefined;
+    reviewer.discardLineage();
+    display.clear(scope);
+    return reviewCancelledResult();
+  }
+
   function logPromptEvaluation(
     scope: ReviewScope,
     detail: string,
@@ -237,8 +253,8 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     const { ctx, config, gate, command } = scope;
     const signal = ctx.signal;
     const lifecycleStale = () => reviewer.isStale(lifecycleSignal);
-    const promptSignal = signal ? AbortSignal.any([signal, lifecycleSignal]) : lifecycleSignal;
-    const cancelled = (): BlockResult => ({ block: true, reason: "Auto Permissions review cancelled" });
+    const promptSignal = withLifecycle(signal, lifecycleSignal);
+    const cancelled = reviewCancelledResult;
     if (lifecycleStale() || reviewCancelled(signal)) {
       if (!lifecycleStale()) reviewer.discardLineage();
       return cancelled();
@@ -248,7 +264,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
       return settle(scope, {
         display: "blocked",
         verdict: "block",
-        source: decisionSource === "guardian" ? "guardian" : "review_failure",
+        source: decisionSource,
         reason: detail,
         block: `${gate.label} requires user approval: ${detail}\nThis session has no interactive user to ask. Prefer an approach that avoids the gated operation, or report this blocker in your final output instead of retrying the same command.`,
       });
@@ -275,12 +291,8 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
         if (!lifecycleStale()) reviewer.discardLineage();
         return cancelled();
       }
-      if (lifecycleStale()) return cancelled();
-      if (reviewCancelled(signal)) {
-        reviewer.discardLineage();
-        display.clear(scope);
-        return cancelled();
-      }
+      const cancelledResult = cancelledAfterAwait(scope, lifecycleSignal);
+      if (cancelledResult) return cancelledResult;
       const classification = classifyPromptChoice(choice);
       // Feed the user's decision back to the guardian as session-scoped
       // user-source evidence. review_failure prompts are excluded: their
@@ -288,7 +300,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
       if (decisionSource === "guardian" && classification) {
         overrides.recordPromptDecision(scope, classification, detail, reviewer.lastEvidenceKey);
       }
-      if (config.evaluationLog.enabled && classification?.userChoice) {
+      if (classification?.userChoice) {
         logPromptEvaluation(scope, detail, evaluationContext, decisionSource, classification.userChoice);
       }
       if (classification?.allowsExecution) {
@@ -355,29 +367,23 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     // Same composite the ask path builds, so Esc and a reviewer-lifecycle reset
     // both release a queued command instead of stranding it behind a review it
     // is no longer waiting for.
-    const queueSignal = ctx.signal ? AbortSignal.any([ctx.signal, lifecycleSignal]) : lifecycleSignal;
+    const queueSignal = withLifecycle(ctx.signal, lifecycleSignal);
     let releaseReviewSlot: () => void;
     try {
       releaseReviewSlot = await guardianReviewQueue.acquire(queueSignal);
     } catch {
-      return { block: true, reason: "Auto Permissions review cancelled" };
+      return reviewCancelledResult();
     }
     try {
       if (lifecycleStale() || reviewCancelled(ctx.signal)) {
-        return { block: true, reason: "Auto Permissions review cancelled" };
+        return reviewCancelledResult();
       }
       const signal = ctx.signal;
       display.show(scope, "waiting");
       try {
         const verdict = await reviewer.review(scope, event.input as Record<string, unknown>);
-        if (lifecycleStale()) {
-          return { block: true, reason: "Auto Permissions review cancelled" };
-        }
-        if (reviewCancelled(signal)) {
-          reviewer.discardLineage();
-          display.clear(scope);
-          return { block: true, reason: "Auto Permissions review cancelled" };
-        }
+        const cancelledResult = cancelledAfterAwait(scope, lifecycleSignal);
+        if (cancelledResult) return cancelledResult;
         if (verdict.decision === "approve") {
           return settle(scope, { display: "approved", reason: verdict.reason });
         }
@@ -394,7 +400,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
       } catch (error) {
         if (lifecycleStale() || reviewCancelled(signal)) {
           if (!lifecycleStale()) display.clear(scope);
-          return { block: true, reason: "Auto Permissions review cancelled" };
+          return reviewCancelledResult();
         }
         const reason = error instanceof Error ? error.message : String(error);
         return askUser(scope, `Automatic review failed: ${reason}`, lifecycleSignal, "review_failure");
@@ -439,7 +445,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
       const gate = matches[0];
       const lifecycleSignal = reviewer.lifecycleSignal;
       const lifecycleStale = () => reviewer.isStale(lifecycleSignal);
-      const promptSignal = signal ? AbortSignal.any([signal, lifecycleSignal]) : lifecycleSignal;
+      const promptSignal = withLifecycle(signal, lifecycleSignal);
       const cancelled = () => ({
         content: [{ type: "text" as const, text: "Override cancelled." }],
         details: { success: false },
