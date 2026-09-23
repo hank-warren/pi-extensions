@@ -21,7 +21,6 @@ body:
         - pi-ask-user-question
         - pi-simplify
         - pi-multi-login
-        - pi-loop
         - pi-stash
         - "more than one / not sure"
     validations:

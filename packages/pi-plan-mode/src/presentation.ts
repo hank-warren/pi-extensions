@@ -38,9 +38,6 @@ function planCardData(value: unknown): PlanCardData | undefined {
  * the transcript while never entering model context and never costing a
  * compaction budget. The model gets a one-line `Plan saved to <path>.` from
  * `plan_mode_complete` instead, and reads the durable file when it implements.
- *
- * pi-loop's approval card is the same mechanism for the same reason
- * (`packages/pi-loop/src/presentation.ts`).
  */
 export function registerPlanModeCardRenderer(pi: ExtensionAPI): void {
 	pi.registerEntryRenderer(PLAN_CARD_ENTRY_TYPE, (entry) => {
@@ -59,15 +56,8 @@ export function registerPlanModeCardRenderer(pi: ExtensionAPI): void {
  * The one thing both surfaces render.
  *
  * The footer and the widget say the same thing in two sizes, so they are
- * formatted once. When each formatted its own they drifted — the sibling
- * pi-loop shipped a loop that read as "waiting" in the footer and "running"
- * above the editor for exactly that reason, and this is the same shape of
- * bug waiting to happen with "ready" and "implementing".
- *
- * The glyphs are the family vocabulary shared with pi-loop by convention
- * rather than by import: `◆` planning or ready, `▶` implementing. Six
- * characters do not justify a shared package; a user reading a footer
- * justifies the consistency.
+ * formatted once, so "ready" and "implementing" cannot drift between them.
+ * Glyphs: `◆` planning or ready, `▶` implementing.
  */
 type PlanModePhase = "drafting" | "revising" | "ready" | "implementing";
 

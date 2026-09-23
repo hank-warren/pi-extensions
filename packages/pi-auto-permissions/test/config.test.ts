@@ -40,7 +40,7 @@ describe("auto permissions config", () => {
 		assert.deepEqual(config.reviewEvidence, {
 			projectInstructions: false,
 			userAnswerTools: [],
-			userMessageTypes: ["loop-objective"],
+			userMessageTypes: [],
 			...PRUNING_DEFAULTS,
 		});
 		assert.deepEqual(config.evaluationLog, {
@@ -166,7 +166,7 @@ describe("auto permissions config", () => {
 		assert.deepEqual(config.reviewEvidence, {
 			projectInstructions: true,
 			userAnswerTools: [],
-			userMessageTypes: ["loop-objective"],
+			userMessageTypes: [],
 			...PRUNING_DEFAULTS,
 		});
 		assert.deepEqual(config.ui, { enabled: true, resultDisplayMs: 5000, placement: "toolRow" });
@@ -181,36 +181,26 @@ describe("auto permissions config", () => {
 		assert.deepEqual(loadAutoPermissionsConfig(path).reviewEvidence, {
 			projectInstructions: false,
 			userAnswerTools: ["ask_user_question", "plan_review"],
-			userMessageTypes: ["loop-objective"],
+			userMessageTypes: [],
 			...PRUNING_DEFAULTS,
 		});
 	});
 
-	test("trusts the loop objective by default, and lets an explicit list replace it", () => {
-		// The default has to survive a reviewEvidence block that says nothing
-		// about it: every existing config on disk is exactly that block.
+	test("trusts no injected message type by default, and accepts an explicit list", () => {
 		const inherited = configFile({ reviewEvidence: { projectInstructions: true } });
-		assert.deepEqual(
-			loadAutoPermissionsConfig(inherited).reviewEvidence.userMessageTypes,
-			["loop-objective"],
-		);
+		assert.deepEqual(loadAutoPermissionsConfig(inherited).reviewEvidence.userMessageTypes, []);
 
 		const path = configFile({
-			reviewEvidence: { userMessageTypes: [" loop-objective ", "plan-approved", "loop-objective"] },
+			reviewEvidence: { userMessageTypes: [" task-objective ", "plan-approved", "task-objective"] },
 		});
 		assert.deepEqual(
 			loadAutoPermissionsConfig(path).reviewEvidence.userMessageTypes,
-			["loop-objective", "plan-approved"],
+			["task-objective", "plan-approved"],
 		);
-
-		// An explicit empty list is opting out, not "unset" — a user who does not
-		// want the objective in the envelope has no other way to say so.
-		const none = configFile({ reviewEvidence: { userMessageTypes: [] } });
-		assert.deepEqual(loadAutoPermissionsConfig(none).reviewEvidence.userMessageTypes, []);
 	});
 
 	test("rejects malformed user message types", () => {
-		for (const userMessageTypes of ["loop-objective", [42], [""], ["  "], {}]) {
+		for (const userMessageTypes of ["task-objective", [42], [""], ["  "], {}]) {
 			const path = configFile({ reviewEvidence: { userMessageTypes } });
 			assert.throws(
 				() => loadAutoPermissionsConfig(path),

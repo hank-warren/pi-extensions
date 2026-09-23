@@ -7,8 +7,7 @@
  * for package `test/` files and nothing else — and because every package that
  * re-implemented it drifted from the real ExtensionAPI in a different way.
  *
- * Package-specific composition belongs in the package (see
- * `packages/pi-loop/test/support/mock-pi.ts`), not here.
+ * Package-specific composition belongs in the package, not here.
  */
 
 import os from "node:os";

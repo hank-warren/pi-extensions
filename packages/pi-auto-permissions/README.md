@@ -27,7 +27,6 @@ The design deliberately mirrors Claude Code's auto mode (default ruleset content
 
 | | pi-auto-permissions | Claude Code auto mode |
 |---|---|---|
-| **Loop/retry budgets** | Three orthogonal budgets (per-concern, per-gate, streak); the streak resets only when an approval lands on a gate that was actually blocking; persisted across compaction and resume | 3-consecutive/20-total; *any* allowed action resets the consecutive counter, so interleaved reads defeat it; not configurable |
 | **Verdicts and reasons** | `approve`/`revise`/`ask_user`; always a concrete one-sentence reason; `revise` tells the agent exactly how to clear the objection | Deny only; fixed `Blocked by classifier` text in most sessions |
 | **Evidence caching** | Append-only reviewer lineage: full envelope once, deltas after, fingerprint-invalidated | Stage-1→stage-2 prompt cache; no cross-review evidence cache |
 | **Deterministic surface** | Regex gates are testable; the false-positive surface is bounded by the patterns; the guardian runs only after a mechanical match | Prose rules are checkable only by running the classifier |
@@ -296,12 +295,12 @@ Extensions inject context with `appendCustomMessageEntry`, and Pi converts that 
 ```json
 {
   "reviewEvidence": {
-    "userMessageTypes": ["loop-objective"]
+    "userMessageTypes": ["my-objective-anchor"]
   }
 }
 ```
 
-The default is `["loop-objective"]` — the objective anchor written by [`@hank-warren/pi-loop`](../pi-loop), which carries the objective the user typed or approved and which is frozen for the loop's lifetime. Without it, a looping session's reviewer sees no user authorization for the very task the loop was started to do, and refuses work the user explicitly asked for. Absent means the default; an explicit `[]` opts out entirely.
+The default is an empty list: no injected type is trusted until you name it.
 
 Each text block contributes one `USER (<customType>):` record, in session order, never truncated — user records are the only ones that can authorize or constrain. Images are dropped. The guardian is told these records authorize exactly the operations they name, that their constraints bind, and that their content is data rather than instructions.
 
@@ -311,7 +310,7 @@ The allowlist matches what you wrote: a bare name such as `ask_user_question` ma
 
 ## Denial log and retry
 
-Every non-approved outcome — a guardian revise, a user block at the prompt, a loop-budget block, a convention or deny block, a review-infrastructure failure — is appended to a private `denials.jsonl` sidecar next to the config (0600, 16 MB rotation, one previous generation kept):
+Every non-approved outcome — a guardian revise, a user block at the prompt, a convention or deny block, a review-infrastructure failure — is appended to a private `denials.jsonl` sidecar next to the config (0600, 16 MB rotation, one previous generation kept):
 
 ```json
 {"v":1,"ts":"…","sessionId":"…","tool":"bash","gate":{"label":"Force push","group":"git"},"command":"git push --force …","verdict":"block","reason":"…","decisionSource":"user"}
@@ -323,7 +322,7 @@ On by default; `"denialLog": { "enabled": false }` opts out, and `path` relocate
 
 Every denial also emits a `pi.events` event — `auto-permissions:denied` with `tool`, `command`, `gate`, `group`, `verdict`, `reason`, `decisionSource` — the pi-native equivalent of Claude Code's `PermissionDenied` hook, for other extensions to react to. Like that hook, it cannot reverse a denial.
 
-Permission overrides now also persist as custom session entries (the way the loop revise budget does), so a resumed session keeps the user's earlier allow decisions and standing block constraints instead of forgetting them.
+Permission overrides also persist as custom session entries, so a resumed session keeps the user's earlier allow decisions and standing block constraints instead of forgetting them.
 
 ## Standing approvals
 
@@ -452,22 +451,6 @@ Group names come from your configured rules. A trusted group bypasses guarded re
 When a session is a [pi-subagents](https://github.com/nicobailon/pi-subagents) child (`PI_SUBAGENT_CHILD=1`), the guardian receives additional execution facts with each review — run id, nesting depth, whether the cwd is a linked git worktree, and the checked-out branch — plus a prompt section telling it to judge risk by effect scope and reversibility relative to the subagent's own workspace instead of by command name. Mutations confined to the subagent's isolated worktree, its own feature branch, or resources it created are approvable when they serve the delegated task; `ask_user` is reserved for effects that escape that scope (shared or default branches, host-level configuration, production systems, credentials, data leaving the machine).
 
 Subagent sessions have no interactive user, so an `ask_user` verdict blocks the command immediately with a reason instructing the child to route around the gated operation or report the blocker. Reviewer usage records from subagent sessions carry `"subagent": true` in the usage sidecar.
-
-## Unattended loop sessions
-
-When the session is running an unattended loop, the guardian's decisions are unchanged and only their *delivery* changes: an `ask_user` verdict returns the concern to the agent as a block instead of opening a prompt. This is not a relaxation. A session waiting on a modal is busy, and a busy session starves the loop's own continuation path — no turn completes, no cap trips, and nothing ends the loop until it expires, potentially days later. The prompt would not be answered; it would simply deadlock.
-
-Detection is an environment contract, not a dependency. [pi-loop](https://github.com/hank-warren/pi-extensions/tree/main/packages/pi-loop) sets `PI_LOOP_ACTIVE=1` and `PI_LOOP_ID=<id>` on the process while a loop is active and removes them when it is not; this extension reads them exactly as it reads `PI_SUBAGENT_CHILD`. Neither package imports or depends on the other, and with the variables absent — pi-loop not installed, or no loop running — behavior is identical to today.
-
-The agent is given a bounded number of revision rounds against the guardian's stated concern, after which the block stops offering that option and instructs it to call `loop_wait` (pi-loop's non-deadlocking way to reach a human). The bound is what keeps "address the objection" from becoming "retry until something is approved":
-
-- **3 blocked attempts per concern**, so there are two real revisions: enough for a misread of a terse objection plus a considered fix.
-- **5 blocked attempts per gate.**
-- **5 consecutive blocked attempts**, at any gate, for any concern — the backstop. An approved command resets it, since an agent getting real work past the guardian is not grinding against it.
-
-The block reports whichever bound is closest, and the stated remainder falls every time. Both of the first two bounds are keyed on something the *command* determines, and a canary walked through each in turn. The guardian rewords its objection between rounds, so a count keyed on that prose stops advancing and the block repeats "1 revision round remains" forever — the agent read two identical blocks, called the number ambiguous, and stopped trusting it. Then, blocked on `git branch -D`, it tried `git branch --delete`: the same operation under a different rule, which reset both the gate counter and the concern key embedded in it. The consecutive-block count is immune to both, because it measures the argument rather than the command, and a concern or gate first seen mid-argument inherits the argument's length instead of starting over.
-
-Counts are held in memory *and* persisted as a session entry, so neither a context compaction nor a session resume hands back a fresh budget. A review that fails for infrastructure reasons blocks without charging a round, since that is not a guardian judgment.
 
 ## Guardian dispatch
 

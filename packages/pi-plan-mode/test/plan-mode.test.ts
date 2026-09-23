@@ -728,19 +728,7 @@ test("plan mode completion result carries the plan and its path", () => {
 	assert.equal(completed.details.planPath, "/tmp/plans/s.md");
 });
 
-/**
- * Producer side of the pi-plan-mode -> pi-loop session-entry contract.
- *
- * @hank-warren/pi-loop reads the newest `plan-mode-state` entry and skips its
- * tick while `data.enabled === true`, so that entry type, that field, and its
- * boolean-ness are a cross-package interface, not an internal detail. The
- * mirrored literal copy lives in
- * `packages/pi-loop/test/fixtures/goal-state-sequences.ts`; the two files are
- * duplicated deliberately rather than imported, because public packages may
- * not import a sibling's source (repo `AGENTS.md`, Conventions). When this
- * test changes, change that fixture in the same PR.
- */
-test("plan-mode-state entry shape (pi-loop consumer contract)", async () => {
+test("plan-mode-state entry records enabled on enter and exit", async () => {
 	await withAgentDir(async () => {
 		const mock = createMockPi({ activeTools: ["read", "write"] });
 		planMode(mock.pi);
@@ -814,9 +802,7 @@ test("--plan activates Plan mode at session start", async () => {
 
 /**
  * `--plan` persists only when it is the thing that turned Plan mode on. A
- * session that resumes already planning must append nothing: `plan-mode-state`
- * is the cross-package entry pi-loop reads, so a spurious entry per session
- * start is not cosmetic.
+ * session that resumes already planning must append nothing.
  */
 test("--plan persists nothing when the resumed session is already planning", async () => {
 	await withAgentDir(async () => {

@@ -137,7 +137,7 @@ test("root pi.skills drift fails in both directions", () => {
 
   const invented = validate(({ read, write }) => {
     const root = read("package.json");
-    root.pi.skills = [...root.pi.skills, "./packages/pi-loop/docs/pi-nope"];
+    root.pi.skills = [...root.pi.skills, "./packages/pi-stash/docs/pi-nope"];
     write("package.json", root);
   });
   assert.equal(invented.status, 1);
@@ -205,13 +205,13 @@ test("the copy-to-create template carries the same engines value", () => {
 test("a workspace member missing from the lockfile fails and is named", () => {
   const result = validate(({ read, write }) => {
     const lock = read("package-lock.json");
-    delete lock.packages["node_modules/@hank-warren/pi-loop"];
+    delete lock.packages["node_modules/@hank-warren/pi-stash"];
     write("package-lock.json", lock);
   });
   assert.equal(result.status, 1);
   assert.match(
     result.stderr,
-    /workspace member missing from the lockfile: @hank-warren\/pi-loop \(packages\/pi-loop\)/,
+    /workspace member missing from the lockfile: @hank-warren\/pi-stash \(packages\/pi-stash\)/,
   );
 });
 
@@ -278,24 +278,6 @@ test("shared test support importing node and pi modules is allowed", () => {
   });
   assert.equal(result.status, 0, result.stderr);
 });
-
-for (const name of ["pi-loop", "pi-muxr"]) {
-  test(`${name} is out of the aggregate but still published and documented`, () => {
-    const backIn = validate(({ read, write }) => {
-      const root = read("package.json");
-      root.pi.extensions = [...root.pi.extensions, `./packages/${name}/index.ts`];
-      write("package.json", root);
-    });
-    assert.equal(backIn.status, 1);
-    assert.ok(backIn.stderr.includes(`${name}: deprecated package must not be in the aggregate`));
-
-    const undocumented = validate(({ replace }) =>
-      replace(`packages/${name}/README.md`, "> **Deprecated.**", "> Note:"),
-    );
-    assert.equal(undocumented.status, 1);
-    assert.match(undocumented.stderr, /README must open with a \*\*Deprecated\.\*\* block/);
-  });
-}
 
 test("an unapplied changeset fails validation", () => {
   // The release pull request must carry its own `npm run version-packages`

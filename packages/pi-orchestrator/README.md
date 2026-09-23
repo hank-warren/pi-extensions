@@ -28,7 +28,7 @@ The children are first-class pi sessions with the full extension set a human's s
 - **Waiting through the `process` tool**, never by sleeping in the supervisor's own shell.
 - **Verification as the gate** — a child saying it is done is a claim; the supervisor re-runs the named checks itself before repeating it.
 
-It does not start loops, schedule wakeups, or keep a ledger. It replaces [pi-loop](../pi-loop), whose pacing and evidence gate approximated for a single unsupervised session what a supervising model does by judgment.
+It does not start loops, schedule wakeups, or keep a ledger. It replaces the retired `@hank-warren/pi-loop` package, whose pacing and evidence gate approximated for a single unsupervised session what a supervising model does by judgment.
 
 ## Requirements
 

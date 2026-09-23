@@ -6,7 +6,6 @@ import { join } from "node:path";
 import type { AutoPermissionsConfig } from "./config.js";
 import { resolveGuardianCompleteSimple } from "./guardian-transport.js";
 import { isOpenAICodexModel } from "./openai-codex-transport.js";
-import { detectLoopContext } from "./loop-context.js";
 import { detectSubagentContext } from "./subagent-context.js";
 import { appendPromptEvaluation } from "./evaluation-log.js";
 import { mergeOverrideEvidence } from "./override-evidence.js";
@@ -17,7 +16,6 @@ import {
   buildGuardianPolicySection,
   buildReviewEnvelope,
   collectReviewEvidence,
-  LOOP_CONTEXT_SYSTEM_PROMPT,
   INJECTED_USER_MESSAGE_SYSTEM_PROMPT,
   OVERRIDE_FEEDBACK_SYSTEM_PROMPT,
   parsePermissionVerdict,
@@ -314,11 +312,9 @@ export function createGuardianReviewer(
     // buildReviewerSystemPrompt append the untrusted project-instructions
     // evidence block, keeping policy contiguous and evidence terminal.
     const subagentContext = detectSubagentContext(ctx.cwd);
-    const loopContext = detectLoopContext();
     const basePolicyPrompt = [
       config.systemPrompt,
       ...(subagentContext ? [SUBAGENT_CONTEXT_SYSTEM_PROMPT] : []),
-      ...(loopContext ? [LOOP_CONTEXT_SYSTEM_PROMPT] : []),
     ].join("\n\n");
     // Appended outside config.systemPrompt so sessions using a customized
     // systemPromptFile still learn how to weigh override records. The injected
@@ -357,13 +353,7 @@ export function createGuardianReviewer(
       cwd: ctx.cwd,
       gate: gate.label,
       group: gate.group,
-      ...(subagentContext && loopContext
-        ? { execution: { ...subagentContext, ...loopContext } }
-        : subagentContext
-          ? { execution: subagentContext }
-          : loopContext
-            ? { execution: loopContext }
-            : {}),
+      ...(subagentContext ? { execution: subagentContext } : {}),
     };
     const makeUserMessage = (records: readonly ReviewEvidenceRecord[], mode: "full" | "delta"): Message => ({
       role: "user",

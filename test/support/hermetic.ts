@@ -8,7 +8,7 @@
  * `getAgentDir()` and `homedir()`, so a test that forgets to pass a scratch
  * path does not fail — it silently reads, and sometimes writes, the machine
  * running the tests. Two of those escapes shipped from this repo before this
- * file existed (a real `~/.pi/agent/loop` ledger per composition run, and
+ * file existed (a loop ledger under the real `~/.pi/agent` per test run, and
  * pi-multi-login's first-load credential adoption).
  *
  * A test that saves and restores `process.env.HOME` by hand is working around
@@ -16,7 +16,7 @@
  *
  * Two limits of the local tripwire, both deliberate. It compares *top-level*
  * entry names and mtimes, so modifying an existing file in place under an
- * existing subdirectory (say `loop/<id>/criteria.json`) bumps no top-level mtime
+ * existing subdirectory (say `<dir>/<id>/state.json`) bumps no top-level mtime
  * and goes unreported locally; the CI branch below has no such gap, because it
  * refuses a `~/.pi` that exists at all. And `statusline-usage.json` is on the
  * churn list, so a regression of pi-statusline's agent-dir resolution writes to
@@ -51,8 +51,6 @@ const CLEARED_ENV = [
 	"PI_STASH_CONFIG",
 	"HERDR_ENV",
 	"PI_SUBAGENT_CHILD",
-	"PI_LOOP_ACTIVE",
-	"PI_LOOP_ID",
 	// pi-cliproxyapi-provider's connection, credential and metadata settings.
 	// A host pointed at a live CLIProxyAPI would otherwise steer the provider's
 	// config tests and let its discovery tests reach a real proxy.
