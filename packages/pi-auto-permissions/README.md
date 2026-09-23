@@ -360,7 +360,7 @@ Auto Permissions can append a private JSONL regression record whenever the guard
 }
 ```
 
-The path defaults to `review-evals.jsonl` beside the Auto Permissions config and resolves relative to that config. The file is created with mode `0600`.
+The path defaults to `review-evals.jsonl` beside the Auto Permissions config and resolves relative to that config. The file is created with mode `0600` and rotates to `review-evals.jsonl.1` once it passes 64 MiB, keeping one previous generation, so older rows are discarded. Writing is best effort: a failing log never blocks or changes a permission decision.
 
 When logging is enabled, prompted reviews offer the three labeling choices plus the standing option on guardian-sourced prompts:
 

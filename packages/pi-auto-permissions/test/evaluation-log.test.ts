@@ -6,6 +6,7 @@ import { OptionSelector } from "@hank-warren/pi-permission-selector/selector.ts"
 import {
   appendPromptEvaluation,
   classifyPromptChoice,
+  EVALUATION_LOG_ROTATE_BYTES,
   expectedDecisionForChoice,
   permissionPromptOptions,
   PROMPT_FEEDBACK_OPTIONS,
@@ -131,14 +132,23 @@ test("appends private JSONL evaluation records", () => {
   assert.equal(statSync(path).mode & 0o777, 0o600);
 });
 
-test("the evaluation log never rotates", () => {
+test("the evaluation log rotates once it reaches its own cap", () => {
   const dir = scratchDir("pi-auto-permissions-evals-");
   const path = join(dir, "review-evals.jsonl");
-  writeFileSync(path, "");
+  writeFileSync(path, `${JSON.stringify(record("ask_user", "block"))}\n`);
+  // Below the evaluation cap (at the smaller sidecar cap) nothing rotates.
   truncateSync(path, SIDECAR_ROTATE_BYTES);
+  appendPromptEvaluation(path, record("ask_user", "block"));
+  assert.ok(!existsSync(`${path}.1`));
+
+  // Sparse file: reported size equals the cap without writing 64 MiB.
+  truncateSync(path, EVALUATION_LOG_ROTATE_BYTES);
   const entry = record("approve", "allow_unnecessary");
   appendPromptEvaluation(path, entry);
 
-  assert.ok(!existsSync(`${path}.1`));
-  assert.equal(statSync(path).size, SIDECAR_ROTATE_BYTES + Buffer.byteLength(`${JSON.stringify(entry)}\n`));
+  assert.equal(statSync(`${path}.1`).size, EVALUATION_LOG_ROTATE_BYTES);
+  const lines = readFileSync(path, "utf8").trim().split("\n");
+  assert.equal(lines.length, 1);
+  assert.deepEqual(JSON.parse(lines[0]), entry);
+  assert.equal(statSync(path).mode & 0o777, 0o600);
 });

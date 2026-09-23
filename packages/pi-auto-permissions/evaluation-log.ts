@@ -111,6 +111,9 @@ export function expectedDecisionForChoice(
   return choice === "allow_unnecessary" ? "approve" : "ask_user";
 }
 
+/** Labeled rows are large (~51 KB), so this sidecar gets a bigger cap than the others. */
+export const EVALUATION_LOG_ROTATE_BYTES = 64 * 1024 * 1024;
+
 export function appendPromptEvaluation(path: string, record: EvaluationRecord): void {
-  appendJsonlRecord(path, record);
+  appendJsonlRecord(path, record, EVALUATION_LOG_ROTATE_BYTES);
 }

@@ -22,6 +22,8 @@ Find the active config through `PI_AUTO_PERMISSIONS_CONFIG` or `$PI_CODING_AGENT
 2. `denials.jsonl`
 3. `review-evals.jsonl`
 
+Each sidecar may have a rotated previous generation beside it (for example `usage.jsonl.1`); read it too when present.
+
 These show observed friction: what prompted, what was denied, and which asks the user labeled unnecessary. They do **not** prove that a hostname is owned or safe. Keep counts so the interview can surface repeated friction, for example: “SSH status checks prompted 14 times.”
 
 ### Session history
