@@ -5,8 +5,8 @@
 > [ogulcancelik/pi-extensions#24](https://github.com/ogulcancelik/pi-extensions/issues/24) /
 > [PR #25](https://github.com/ogulcancelik/pi-extensions/pull/25). Switch back to the
 > upstream package once it ships the feature. Never install both packages at once, or
-> every Bash call is reviewed twice. The upstream `index.test.ts` harness suite is not
-> vendored; the pure config/evidence tests live in `test/`.
+> every Bash call is reviewed twice. Tests live in `test/`: pure module tests plus
+> `test/extension.test.ts`, which drives the `tool_call` pipeline through a mock `ExtensionAPI`.
 
 A context-aware permission system for Pi shell commands, with an automated guardian that checks what the user actually authorized.
 
@@ -19,18 +19,18 @@ Pi Auto Permissions pauses configured Bash commands before execution. A guardian
 
 Only user messages can grant permission or impose constraints. The assistant cannot authorize its own command.
 
-The posture is review-by-default: a fresh install ships a live ruleset (deny rules for oversight bypasses and critical-path destruction, guardian review for force pushes, infrastructure destroys, credential access, and the rest of the default groups), prose trust configuration in `guardianPolicy`, a session-start trust snapshot, an optional blanket `reviewAllShell` mode with a cheap prefilter stage, a denial ledger with allow-on-retry, and a bundled setup skill that co-authors the trust config with you from observed friction.
+The posture is review-by-default: a fresh install ships a live ruleset (deny rules for oversight bypasses and critical-path destruction, guardian review for force pushes, infrastructure destroys, credential access, and the rest of the default groups), prose trust configuration in `guardianPolicy`, a session-start trust snapshot, an optional blanket `reviewAllShell` mode, a denial ledger with allow-on-retry, and a bundled setup skill that co-authors the trust config with you from observed friction.
 
 ## Compared with Claude Code auto mode
 
-The design deliberately mirrors Claude Code's auto mode (default ruleset content, trust tiers, `"$defaults"` splice, session-start remote baseline, two-stage review, denial review) while keeping the pieces pi does better. Honestly stated, both directions:
+The design deliberately mirrors Claude Code's auto mode (default ruleset content, trust tiers, `"$defaults"` splice, session-start remote baseline, denial review) while keeping the pieces pi does better. Honestly stated, both directions:
 
 | | pi-auto-permissions | Claude Code auto mode |
 |---|---|---|
 | **Verdicts and reasons** | `approve`/`revise`/`ask_user`; always a concrete one-sentence reason; `revise` tells the agent exactly how to clear the objection | Deny only; fixed `Blocked by classifier` text in most sessions |
 | **Evidence caching** | Append-only reviewer lineage: full envelope once, deltas after, fingerprint-invalidated | Stage-1→stage-2 prompt cache; no cross-review evidence cache |
 | **Deterministic surface** | Regex gates are testable; the false-positive surface is bounded by the patterns; the guardian runs only after a mechanical match | Prose rules are checkable only by running the classifier |
-| **Evaluation loop** | Labelled evaluation JSONL (three-way user labels, prefilter FNR records) + per-review cost sidecar | `/feedback`; no per-review cost or label surface |
+| **Evaluation loop** | Labelled evaluation JSONL (three-way user labels) + per-review cost sidecar | `/feedback`; no per-review cost or label surface |
 | **Coverage** | **Bash only.** Edits, writes, fetches, MCP tools, and subagent spawns are ungated (the beyond-bash plan is the named follow-up) | All tool calls Tier 3-reviewed; in-project edits skip review by design |
 | **Sandbox** | None — pair with OS sandboxing for a hard boundary | Integrated sandbox + network-domain review |
 | **Injection posture** | Keeps assistant text and tool-call summaries as (non-authorizing) evidence — better provenance, larger injection surface | Strips assistant text and tool output entirely; input-layer injection probe |
@@ -57,7 +57,7 @@ git commit -m "Fix the Failing Retry Test and Update Documentation"
 
 If the conversation never authorized a commit, an interactive Pi session asks the user before running it. A non-interactive session blocks it.
 
-Permissions are contextual by default. Each command is judged against the current conversation and the exact action being proposed; the user may explicitly promote one guardian-approved prompt decision into a revocable standing approval for comparable commands.
+Permissions are contextual by default. Each command is judged against the current conversation and the exact action being proposed.
 
 ## Install
 
@@ -124,22 +124,22 @@ Rule fields are:
 
 - `pattern`: JavaScript regular expression source
 - `flags`: optional regular expression flags, defaulting to `i`
-- `level`: `guarded` for guardian review, `convention` for an overridable policy block, or `deny` for a hard block
+- `level`: `guarded` for guardian review, or `deny` for a hard block
 - `group`: policy group used by trusted-project bypasses
 - `label`: short description shown during review
-- `message`: optional feedback; required for convention and deny rules
+- `message`: optional feedback; required for deny rules
 
-A convention rule blocks directly with its configured feedback instead of asking the guardian. The agent can call `request_override` for a legitimate one-session exception. Overrides require user confirmation and cannot bypass guarded rules.
+A deny rule is a hard policy boundary: it blocks immediately with its message, is evaluated before every other level, and nothing lifts it — not a trusted group, not user approval at a prompt. Reserve it for operations that should never happen in an agent session (disabling agent oversight, deleting critical paths), and use `guarded` where a human judgment call is legitimate.
 
-A deny rule is a hard policy boundary: it blocks immediately with its message, is evaluated before every other level, and nothing lifts it — not `request_override`, not a trusted group, not user approval at a prompt. Reserve it for operations that should never happen in an agent session (disabling agent oversight, deleting critical paths), and use `guarded` where a human judgment call is legitimate.
+When several rules match one command, the most severe level wins (deny, then guarded) regardless of their order in the list.
 
-When several rules match one command, the most severe level wins (deny, then convention, then guarded) regardless of their order in the list.
+A legacy `"level": "convention"` rule still loads, as a deny rule: it blocks without review, and `.pi/trusted-ops` cannot lift it.
 
 Set `enabled` to `false` to disable the extension. Invalid configuration fails closed and blocks Bash calls until corrected.
 
 ### Review every shell command
 
-Set `"reviewAllShell": true` to review every bash command that matches no rule under a generic `shell command` gate (group `all-shell`), the analogue of Claude Code's `classifyAllShell`. The rules then act as a severity layer on top of blanket coverage: deny rules still block outright, convention rules still block with feedback, and everything else — named by a rule or not — goes to the guardian. The trade is one guardian call per command; pair it with a cheap reviewer model. A command whose matching group is listed in `.pi/trusted-ops` was explicitly waved through and is not re-captured by the blanket gate; trusting `all-shell` itself opts a project out of blanket review while keeping the ruleset live. Loop budgets, lineage caching, and the evaluation log apply to `all-shell` reviews unchanged.
+Set `"reviewAllShell": true` to review every bash command that matches no rule under a generic `shell command` gate (group `all-shell`), the analogue of Claude Code's `classifyAllShell`. The rules then act as a severity layer on top of blanket coverage: deny rules still block outright, and everything else — named by a rule or not — goes to the guardian. The trade is one guardian call per command; pair it with a cheap reviewer model. A command whose matching group is listed in `.pi/trusted-ops` was explicitly waved through and is not re-captured by the blanket gate; trusting `all-shell` itself opts a project out of blanket review while keeping the ruleset live. Lineage caching and the evaluation log apply to `all-shell` reviews unchanged.
 
 ## Define trusted infrastructure
 
@@ -188,12 +188,6 @@ There used to be a second path here — a one-shot wizard that scanned the proje
 
 By default, the guardian uses Pi's active model with low reasoning effort and a 30-second timeout. You can select a separate low-cost model.
 
-### Two-stage review
-
-Set `"prefilter": true` inside the `reviewer` block for the Claude Code stage-1/stage-2 structure: before the full lineage review, a stateless single-token pass at minimal reasoning answers `SAFE` or `REVIEW` over the same envelope text. `SAFE` approves immediately (the review row shows reason `prefilter`); `REVIEW` — and any parse or infrastructure failure — falls through to the full review unchanged, so the prefilter can only ever short-circuit toward *more* review, never approve by accident. Because the prefilter envelope matches a full-rebuild review's, the escalated call is largely a provider prompt-cache hit of the prefilter call. The lineage conversation is untouched.
-
-Prefilter calls are recorded in the usage sidecar under a distinct `prefilter` label, and — when the evaluation log is enabled — every prefilter approval is logged with `"decisionSource": "prefilter"` so its false-negative rate can be measured offline against the same labels as prompted reviews. Off by default until that data justifies flipping it; it pays off most with `reviewAllShell`, where the per-command cost matters.
-
 Giving the guardian its own account keeps reviews from competing with your interactive session for a subscription's rate limits. Pi keys OAuth credentials by provider id, so a second login needs a second provider id — which is what [`@hank-warren/pi-multi-login`](../pi-multi-login/README.md) exists to create. This package no longer registers one itself.
 
 1. `pi install npm:@hank-warren/pi-multi-login`
@@ -223,12 +217,12 @@ The reviewer settings that change most often are editable from a settings menu i
 
 | Row | What it edits |
 | --- | --- |
-| Enabled | `enabled` — off lets every command run without guardian review |
+| Enabled | `enabled` — off disables all gating, including deny rules; every command runs unreviewed |
 | Reviewer model | `reviewer.provider` / `reviewer.model`, picked from the models you are signed in to |
 | Thinking level | `reviewer.reasoningEffort` |
 | Review timeout | `reviewer.timeoutMs`, entered as `30s` or `45000ms` |
 | System prompt | read-only: the resolved path of the active `systemPromptFile`, or whether the built-in or an inline prompt is in use |
-| Standing approvals | count plus a picker for revoking user-scoped comparable-command approvals |
+| Recent denials | read-only view of the denial log with **Allow on retry**; shown while `denialLog` is enabled (the default) |
 
 Saves are applied immediately — the config is re-read on every guarded command, so there is nothing to restart, in this session or any other. The menu is a narrow writer: it merges only the keys above into whatever is on disk, so rules, prompts, evidence settings and log paths stay exactly as you wrote them and remain file-only. A config that fails validation is never rewritten; the menu reports the error and refuses to open.
 
@@ -310,7 +304,7 @@ The allowlist matches what you wrote: a bare name such as `ask_user_question` ma
 
 ## Denial log and retry
 
-Every non-approved outcome — a guardian revise, a user block at the prompt, a convention or deny block, a review-infrastructure failure — is appended to a private `denials.jsonl` sidecar next to the config (0600, 16 MB rotation, one previous generation kept):
+Every non-approved outcome — a guardian revise, a user block at the prompt, a deny block, a review-infrastructure failure — is appended to a private `denials.jsonl` sidecar next to the config (0600, 16 MB rotation, one previous generation kept):
 
 ```json
 {"v":1,"ts":"…","sessionId":"…","tool":"bash","gate":{"label":"Force push","group":"git"},"command":"git push --force …","verdict":"block","reason":"…","decisionSource":"user"}
@@ -323,29 +317,6 @@ On by default; `"denialLog": { "enabled": false }` opts out, and `path` relocate
 Every denial also emits a `pi.events` event — `auto-permissions:denied` with `tool`, `command`, `gate`, `group`, `verdict`, `reason`, `decisionSource` — the pi-native equivalent of Claude Code's `PermissionDenied` hook, for other extensions to react to. Like that hook, it cannot reverse a denial.
 
 Permission overrides also persist as custom session entries, so a resumed session keeps the user's earlier allow decisions and standing block constraints instead of forgetting them.
-
-## Standing approvals
-
-A prompt caused by a guardian `ask_user` verdict includes **Allow and stop asking about comparable commands**. Choosing it executes the current command and appends a user-scoped record to `standing-approvals.jsonl` beside the config:
-
-```json
-{"v":1,"ts":"…","gate":{"label":"…","group":"…"},"command":"…","scope":"comparable","project":"…","reason":"…"}
-```
-
-At the next session start, these records become `USER (standing permission override, granted … in …):` evidence for the guardian. The guardian still reviews every mechanically guarded command: a comparable action may approve silently, while an action of a materially higher risk class remains uncovered and can still prompt. The origin project is context, not a scope limit, and later user statements or blocks take precedence.
-
-The ledger is mode `0600`, keeps the newest 200 valid records, and reports once when adding a record evicts the oldest. It is on by default; relocate or disable it with:
-
-```json
-{
-  "standingApprovals": {
-    "enabled": true,
-    "path": "./standing-approvals.jsonl"
-  }
-}
-```
-
-Use `/auto-permissions` → **Standing approvals** to select and revoke a record. Revocation takes effect immediately in that session; other already-running sessions drop it at their next session start. Review-infrastructure-failure prompts never offer standing trust, cancelled prompts write nothing, and deny rules never reach a prompt at all.
 
 ## Prompted-review evaluation log
 
@@ -360,16 +331,15 @@ Auto Permissions can append a private JSONL regression record whenever the guard
 }
 ```
 
-The path defaults to `review-evals.jsonl` beside the Auto Permissions config and resolves relative to that config. The file is created with mode `0600`.
+The path defaults to `review-evals.jsonl` beside the Auto Permissions config and resolves relative to that config. The file is created with mode `0600` and rotates to `review-evals.jsonl.1` once it passes 64 MiB, keeping one previous generation, so older rows are discarded. Writing is best effort: a failing log never blocks or changes a permission decision.
 
-When logging is enabled, prompted reviews offer the three labeling choices plus the standing option on guardian-sourced prompts:
+When logging is enabled, prompted reviews offer the three labeling choices:
 
 - **Allow — asking was unnecessary** executes the command and records `userChoice: "allow_unnecessary"` with `expectedDecision: "approve"`.
 - **Block — asking was appropriate** remains the second choice, blocks the command, and records `userChoice: "block"` with `expectedDecision: "ask_user"`. (A block always affirms the prompt: the guardian has no reject verdict — its only non-approve outcomes are asking you or bouncing the command back to the agent as `revise` — so the only true rejection in the system is yours at this prompt.)
 - **Allow — asking was appropriate** executes the command and records `userChoice: "allow_appropriate"` with `expectedDecision: "ask_user"`.
-- **Allow and stop asking about comparable commands** executes the command, writes the standing ledger, and records the evaluation label as `userChoice: "allow_unnecessary"`. This fourth choice appears only when the prompt came from a guardian verdict, never when review infrastructure failed.
 
-When logging is disabled, the prompt retains the normal **Allow** and **Block** choices, and **Allow and stop asking about comparable commands** still appears on guardian-sourced prompts when standing approvals are enabled — the standing ledger does not depend on evaluation logging. Prompts from Pi or other extensions are unchanged.
+When logging is disabled, the prompt retains the normal **Allow** and **Block** choices. Prompts from Pi or other extensions are unchanged.
 
 Each version 2 record contains the collected user request, exact command, compact reviewer evidence, guardian reason, gate and session metadata, raw user choice, and both labels used for evaluation. The guardian's `actualDecision` is `ask_user`. Automatic-review failures are identified separately with `decisionSource: "review_failure"`. Existing version 1 records can remain in the same JSONL file.
 
@@ -406,26 +376,16 @@ The default UI shows guardian progress as a single animated status line in a tem
 auto permissions · Git commit · ✶ waiting for openai-codex-auto-permissions/gpt-5.6-luna
 ```
 
-A sparkle spinner (`✶ ✸ ✻ ✽`) cycles while the guardian is reviewing and resolves to `✓ approved`, `↻ revision requested`, `? waiting for your approval`, or `✗ blocked`. When approval is needed, the selector's leading `●` pulses between warning-bright and dim so the active prompt remains visually distinct from the transcript. The guardian's reason, when present, appears on a dim second line; the command itself is not repeated because it is already visible in the Bash tool box. Configure the widget with:
+A sparkle spinner (`✶ ✸ ✻ ✽`) cycles while the guardian is reviewing and resolves to `✓ approved`, `↻ revision requested`, `? waiting for your approval`, or `✗ blocked`. When approval is needed, a static warning-colored `●` precedes the prompt heading so the active prompt remains visually distinct from the transcript. The guardian's reason, when present, appears on a dim second line; the command itself is not repeated because it is already visible in the Bash tool box. Configure the widget with:
 
 ```json
 {
   "ui": {
     "enabled": true,
-    "resultDisplayMs": 2500,
-    "placement": "widget"
+    "resultDisplayMs": 2500
   }
 }
 ```
-
-Set `placement` to `toolRow` to show the review inside Pi's Bash tool row:
-
-```text
-$ git commit --dry-run -m "fix auth"
-  ◌ guardian running · Git commit · openai-codex-auto-permissions/gpt-5.6-luna
-```
-
-`toolRow` reconstructs Pi's standard local Bash definition because Pi does not expose renderer-only decoration. Do not use it with SDK-provided, remote, sandboxed, or otherwise replaced Bash backends. The extension detects non-native Bash tools and falls back to the widget instead of replacing them.
 
 Set `ui.enabled` to `false` to hide review state without disabling enforcement.
 
@@ -444,7 +404,7 @@ git
 gh
 ```
 
-Group names come from your configured rules. A trusted group bypasses guarded review and convention blocks for that group, so use it only in projects you control. Deny rules are never bypassed: `.pi/trusted-ops` is a project-scoped file, and a checked-in file must not be able to disarm a hard policy boundary.
+Group names come from your configured rules. A trusted group bypasses guarded review for that group, so use it only in projects you control. Deny rules are never bypassed: `.pi/trusted-ops` is a project-scoped file, and a checked-in file must not be able to disarm a hard policy boundary.
 
 ## Subagent sessions
 

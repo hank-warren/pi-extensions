@@ -1,6 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { OptionSelector } from "@hank-warren/pi-permission-selector/selector.ts";
-import { PulsingApprovalIndicator } from "./approval-pulse.js";
 
 /**
  * Tell Herdr this pane is waiting on a human, so a supervising agent can see
@@ -33,23 +32,20 @@ export function promptSelect(
   title: string,
   values: string[],
   signal: AbortSignal,
-  opts: { allowComment: boolean },
 ): Promise<string | undefined> {
-  let indicator: PulsingApprovalIndicator | undefined;
   return ctx.ui.custom<string | undefined>((tui, theme, _keybindings, done) => {
     let finished = false;
     const onAbort = () => finish(undefined);
     const finish = (result: string | undefined) => {
       if (finished) return;
       finished = true;
-      indicator?.stop();
       signal.removeEventListener("abort", onAbort);
       done(result);
     };
     const selector = new OptionSelector({
-      title,
+      title: `${theme.fg("warning", theme.bold("●"))} ${title}`,
       options: values.map((value) => ({ value, label: value })),
-      allowComment: opts.allowComment,
+      allowComment: true,
       theme,
       onSelect: (option, comment) => {
         if (comment) {
@@ -64,17 +60,10 @@ export function promptSelect(
       onCancel: () => finish(undefined),
       requestRender: () => tui.requestRender(),
     });
-    indicator = new PulsingApprovalIndicator(
-      title.split("\n", 1)[0] ?? "Auto Permissions needs approval",
-      selector,
-      theme,
-      () => tui.requestRender(),
-    );
     signal.addEventListener("abort", onAbort, { once: true });
     // `done` before the factory resolves is safe: pi marks the dialog closed
     // and never mounts the component.
     if (signal.aborted) onAbort();
-    else indicator.start();
-    return indicator;
-  }).finally(() => indicator?.stop());
+    return selector;
+  });
 }

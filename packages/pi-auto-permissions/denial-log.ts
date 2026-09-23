@@ -1,23 +1,20 @@
-import { appendFileSync, chmodSync, mkdirSync, readFileSync, renameSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { dirname } from "node:path";
-
-/** Rotate once the sidecar grows past this size; one previous generation is kept. */
-const DENIAL_LOG_ROTATE_BYTES = 16 * 1024 * 1024;
+import { appendJsonlRecord, SIDECAR_ROTATE_BYTES } from "./jsonl-sidecar.js";
 
 /** The two ways a review can end without the command running. */
 export type DenialVerdict = "revise" | "block";
 
 /**
  * What produced the denial:
- * - `deny` / `convention` — a rule blocked mechanically, no reviewer involved
+ * - `deny` — a rule blocked mechanically, no reviewer involved
  * - `guardian` — the reviewer's own verdict (a revise, or an ask_user with no
  *   interactive user to ask)
  * - `user` — the user chose Block at the approval prompt
  * - `review_failure` — review infrastructure failed and the command was
  *   blocked rather than waved through
  */
-export type DenialSource = "deny" | "convention" | "guardian" | "user" | "review_failure";
+export type DenialSource = "deny" | "guardian" | "user" | "review_failure";
 
 export interface DenialRecord {
   v: 1;
@@ -58,20 +55,8 @@ export function buildDenialRecord(input: {
   };
 }
 
-function rotateIfLarge(path: string): void {
-  try {
-    if (statSync(path).size < DENIAL_LOG_ROTATE_BYTES) return;
-    renameSync(path, `${path}.1`);
-  } catch {
-    // A missing or unrotatable sidecar simply keeps appending.
-  }
-}
-
 export function appendDenialRecord(path: string, record: DenialRecord): void {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  rotateIfLarge(path);
-  appendFileSync(path, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
-  chmodSync(path, 0o600);
+  appendJsonlRecord(path, record, SIDECAR_ROTATE_BYTES);
 }
 
 /**

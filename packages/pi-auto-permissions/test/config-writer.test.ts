@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { afterEach, describe, test } from "node:test";
-import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { describe, test } from "node:test";
+import { chmodSync, existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadAutoPermissionsConfig } from "../config.ts";
 import { detectIndent, patchAutoPermissionsConfig } from "../config-writer.ts";
+import { scratchDir } from "./support/temp-dir.ts";
 
 const FIXTURE = {
 	systemPromptFile: "system-prompt.md",
@@ -18,12 +18,8 @@ const FIXTURE = {
 	somethingAFutureVersionAdded: { keep: true },
 } as const;
 
-const tempDirs: string[] = [];
-
 function tempDir(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-auto-permissions-writer-"));
-	tempDirs.push(dir);
-	return dir;
+	return scratchDir("pi-auto-permissions-writer-");
 }
 
 function fixtureFile(value: unknown = FIXTURE, indent: string | number = 2): string {
@@ -38,13 +34,6 @@ function fixtureFile(value: unknown = FIXTURE, indent: string | number = 2): str
 function read(path: string): Record<string, unknown> {
 	return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
 }
-
-afterEach(() => {
-	for (const dir of tempDirs.splice(0)) {
-		chmodSync(dir, 0o700);
-		rmSync(dir, { recursive: true, force: true });
-	}
-});
 
 describe("config writer", () => {
 	test("patches only the reviewer block", () => {
@@ -70,9 +59,9 @@ describe("config writer", () => {
 	test("keeps a concurrent edit to another key", () => {
 		const path = fixtureFile();
 		// Another session rewrites the file after this one loaded it.
-		writeFileSync(path, `${JSON.stringify({ ...FIXTURE, ui: { placement: "toolRow" } }, null, 2)}\n`, "utf8");
+		writeFileSync(path, `${JSON.stringify({ ...FIXTURE, ui: { resultDisplayMs: 5000 } }, null, 2)}\n`, "utf8");
 		patchAutoPermissionsConfig(path, { enabled: false });
-		assert.deepEqual(read(path).ui, { placement: "toolRow" });
+		assert.deepEqual(read(path).ui, { resultDisplayMs: 5000 });
 	});
 
 	test("writes enabled false and removes the key when switched back on", () => {
@@ -134,10 +123,10 @@ describe("config writer", () => {
 		assert.equal(existsSync(path), true);
 	});
 
-	test("a reviewer patch preserves the hand-written prefilter key", () => {
+	test("a reviewer patch preserves hand-written reviewer keys", () => {
 		const path = fixtureFile({
 			...FIXTURE,
-			reviewer: { ...FIXTURE.reviewer, prefilter: true },
+			reviewer: { ...FIXTURE.reviewer, prefilter: true, note: "x" },
 		});
 		patchAutoPermissionsConfig(path, {
 			reviewer: { provider: "openai-codex", model: "gpt-5.6-luna", reasoningEffort: "high", timeoutMs: 45_000 },
@@ -150,46 +139,9 @@ describe("config writer", () => {
 			reasoningEffort: "high",
 			timeoutMs: 45_000,
 			prefilter: true,
+			note: "x",
 		});
-		assert.equal(loadAutoPermissionsConfig(path).reviewer?.prefilter, true);
-	});
-
-	test("appends environment and softDeny entries without touching the rest of guardianPolicy", () => {
-		const path = fixtureFile({
-			...FIXTURE,
-			guardianPolicy: {
-				environment: ["existing entry"],
-				softDeny: ["existing production boundary"],
-				hardDeny: ["never push outside our org"],
-			},
-		});
-		patchAutoPermissionsConfig(path, {
-			appendEnvironment: [" new entry ", "existing entry", "second new entry"],
-			appendSoftDeny: [" new production boundary ", "existing production boundary"],
-		});
-
-		const written = read(path);
-		assert.deepEqual(written.guardianPolicy, {
-			environment: ["existing entry", "new entry", "second new entry"],
-			softDeny: ["existing production boundary", "new production boundary"],
-			hardDeny: ["never push outside our org"],
-		});
-		// Unrelated keys survive untouched.
-		assert.deepEqual(written.somethingAFutureVersionAdded, { keep: true });
-
-		// No guardianPolicy on disk: the block is created with only environment.
-		const fresh = fixtureFile();
-		patchAutoPermissionsConfig(fresh, {
-			appendEnvironment: ["only entry"],
-			appendSoftDeny: ["only boundary"],
-		});
-		assert.deepEqual(read(fresh).guardianPolicy, {
-			environment: ["only entry"],
-			softDeny: ["only boundary"],
-		});
-		const loaded = loadAutoPermissionsConfig(fresh).guardianPolicy;
-		assert.deepEqual(loaded.environment, ["only entry"]);
-		assert.deepEqual(loaded.softDeny, ["only boundary"]);
+		assert.doesNotThrow(() => loadAutoPermissionsConfig(path));
 	});
 
 	test("round-trips through the loader", () => {
@@ -206,7 +158,6 @@ describe("config writer", () => {
 			model: "gpt-5.6-luna",
 			reasoningEffort: "xhigh",
 			timeoutMs: 120_000,
-			prefilter: false,
 		});
 		assert.equal(config.rules.length, FIXTURE.rules.length);
 		assert.equal(config.rules[0]?.label, "rm");

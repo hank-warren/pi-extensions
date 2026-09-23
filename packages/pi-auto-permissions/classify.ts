@@ -5,40 +5,26 @@ import { ALL_SHELL_GATE, findGates, type Gate } from "./gates.js";
  * What the ruleset says about one command, before any guardian is involved.
  *
  * `pass` means nothing gated it: no rule matched, or the only rules that did
- * are ones this project trusts or has already granted an override for.
+ * are ones this project trusts.
  */
 export type CommandClassification =
   | { kind: "pass" }
-  | { kind: "deny" | "convention" | "review"; gate: Gate };
-
-/**
- * Rules that matched and still apply.
- *
- * Deny rules are hard policy boundaries: a project-scoped trusted-ops file
- * must not be able to lift one, or a checked-in file could disarm the
- * circuit breaker. Only guarded and convention matches honor the bypass.
- */
-export function untrustedMatches(
-  command: string,
-  config: AutoPermissionsConfig,
-  trustedGroups: ReadonlySet<string>,
-): Gate[] {
-  return findGates(command, config.rules).filter(
-    (gate) => gate.level === "deny" || !trustedGroups.has(gate.group),
-  );
-}
+  | { kind: "deny" | "review"; gate: Gate };
 
 /**
  * Decide a command's fate from the ruleset alone.
  *
- * Level priority across all matches, never first-match: a convention or
- * guarded rule earlier in config order must not shadow a deny rule later.
+ * Level priority across all matches, never first-match: a guarded rule
+ * earlier in config order must not shadow a deny rule later.
+ *
+ * Deny rules are hard policy boundaries: a project-scoped trusted-ops file
+ * must not be able to lift one, or a checked-in file could disarm the
+ * circuit breaker. Only guarded matches honor the bypass.
  */
 export function classifyCommand(
   command: string,
   config: AutoPermissionsConfig,
   trustedGroups: ReadonlySet<string>,
-  allowedConventionCommands: ReadonlySet<string>,
 ): CommandClassification {
   const ruleMatches = findGates(command, config.rules);
   const matches = ruleMatches.filter(
@@ -47,11 +33,6 @@ export function classifyCommand(
 
   const deny = matches.find((gate) => gate.level === "deny");
   if (deny) return { kind: "deny", gate: deny };
-
-  const convention = matches.find((gate) => gate.level === "convention");
-  if (convention && !allowedConventionCommands.has(command)) {
-    return { kind: "convention", gate: convention };
-  }
 
   let gate = matches.find((candidate) => candidate.level === "guarded");
   // With reviewAllShell on, a command no rule names at all still gets a

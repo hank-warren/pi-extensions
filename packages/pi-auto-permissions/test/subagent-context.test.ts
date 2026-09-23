@@ -1,20 +1,12 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { test } from "node:test";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { detectSubagentContext } from "../subagent-context.ts";
-
-const tempDirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
+import { scratchDir } from "./support/temp-dir.ts";
 
 function tempDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), "auto-permissions-subagent-"));
-  tempDirs.push(dir);
-  return dir;
+  return scratchDir("auto-permissions-subagent-");
 }
 
 test("returns undefined outside a subagent child session", () => {

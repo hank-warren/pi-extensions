@@ -1,7 +1,6 @@
 import { createReviewQueue } from "./review-queue.js";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadAutoPermissionsConfig, type AutoPermissionsConfig } from "./config.js";
@@ -16,11 +15,10 @@ import {
   classifyPromptChoice,
   expectedDecisionForChoice,
   permissionPromptOptions,
-  shouldOfferStandingApproval,
   type PromptEvaluationUserChoice,
 } from "./evaluation-log.js";
 import type { Gate } from "./gates.js";
-import { classifyCommand, untrustedMatches } from "./classify.js";
+import { classifyCommand } from "./classify.js";
 import type { ReviewEvidenceRecord } from "./review.js";
 import { promptSelect, setHerdrBlocked } from "./prompt-select.js";
 import { createReviewDisplay } from "./review-display.js";
@@ -69,14 +67,15 @@ function loadTrustedGroups(cwd: string): Set<string> {
 }
 
 function denyReason(gate: Gate): string {
-  return `Blocked by policy: ${gate.label}\n\n${gate.message ?? "This operation is denied by rule."}\n\nThis is a deny rule: it cannot be overridden with request_override, trusted groups, or user approval. Choose a different approach.`;
+  return `Blocked by policy: ${gate.label}\n\n${gate.message ?? "This operation is denied by rule."}\n\nThis is a deny rule: it cannot be overridden by trusted groups or user approval. Choose a different approach.`;
 }
 
-function conventionReason(gate: Gate, command: string): string {
-  let reason = `Convention violation: ${gate.label}\n\n${gate.message ?? "Use the configured project tooling."}`;
-  const suggestion = gate.suggest?.(command);
-  if (suggestion && suggestion !== command) reason += `\n\nSuggested command:\n  ${suggestion}`;
-  return `${reason}\n\nIf this is a legitimate edge case, explain why and call \`request_override\` with the exact command.`;
+function reviewCancelledResult(): BlockResult {
+  return { block: true, reason: "Auto Permissions review cancelled" };
+}
+
+function withLifecycle(signal: AbortSignal | undefined, lifecycle: AbortSignal): AbortSignal {
+  return signal ? AbortSignal.any([signal, lifecycle]) : lifecycle;
 }
 
 export default function autoPermissionsExtension(pi: ExtensionAPI) {
@@ -84,10 +83,12 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   let trustedGroups = new Set<string>();
   let lastConfigError: string | undefined;
   let lastEvaluationLogError: string | undefined;
-  let sessionActive = true;
   const guardianReviewQueue = createReviewQueue();
-  const display = createReviewDisplay(pi, { isSessionActive: () => sessionActive });
-  const reviewer = createGuardianReviewer({ isSessionActive: () => sessionActive, overrides });
+  // The session is active exactly while the reviewer lifecycle is unaborted:
+  // session_shutdown aborts it, session_start synchronously aborts and replaces
+  // it, and nothing else touches it.
+  const reviewer = createGuardianReviewer({ overrides });
+  const display = createReviewDisplay({ isSessionActive: () => !reviewer.lifecycleSignal.aborted });
 
   /**
    * Record a non-approved outcome: a `pi.events` emit (the PermissionDenied
@@ -165,13 +166,8 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
    * if that package is installed. Say so once per session instead of letting the
    * first guarded command fail with a bare "review model not found".
    */
-  function warnAboutMissingReviewerProvider(ctx: ExtensionContext): void {
-    let provider: string | undefined;
-    try {
-      provider = currentConfig(ctx).reviewer?.provider;
-    } catch {
-      return; // The config error was already reported by currentConfig().
-    }
+  function warnAboutMissingReviewerProvider(ctx: ExtensionContext, config: AutoPermissionsConfig): void {
+    const provider = config.reviewer?.provider;
     if (!provider || ctx.modelRegistry.getProvider(provider)) return;
 
     const message =
@@ -182,7 +178,15 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   }
 
   function reviewCancelled(signal: AbortSignal | undefined): boolean {
-    return !sessionActive || signal?.aborted === true;
+    return signal?.aborted === true;
+  }
+
+  function cancelledAfterAwait(scope: ReviewScope, lifecycleSignal: AbortSignal): BlockResult | undefined {
+    if (reviewer.isStale(lifecycleSignal)) return reviewCancelledResult();
+    if (!reviewCancelled(scope.ctx.signal)) return undefined;
+    reviewer.discardLineage();
+    display.clear(scope);
+    return reviewCancelledResult();
   }
 
   function logPromptEvaluation(
@@ -235,8 +239,8 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     const { ctx, config, gate, command } = scope;
     const signal = ctx.signal;
     const lifecycleStale = () => reviewer.isStale(lifecycleSignal);
-    const promptSignal = signal ? AbortSignal.any([signal, lifecycleSignal]) : lifecycleSignal;
-    const cancelled = (): BlockResult => ({ block: true, reason: "Auto Permissions review cancelled" });
+    const promptSignal = withLifecycle(signal, lifecycleSignal);
+    const cancelled = reviewCancelledResult;
     if (lifecycleStale() || reviewCancelled(signal)) {
       if (!lifecycleStale()) reviewer.discardLineage();
       return cancelled();
@@ -246,7 +250,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
       return settle(scope, {
         display: "blocked",
         verdict: "block",
-        source: decisionSource === "guardian" ? "guardian" : "review_failure",
+        source: decisionSource,
         reason: detail,
         block: `${gate.label} requires user approval: ${detail}\nThis session has no interactive user to ask. Prefer an approach that avoids the gated operation, or report this blocker in your final output instead of retrying the same command.`,
       });
@@ -261,32 +265,24 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
           pi,
           ctx,
           `${gate.label} — Auto Permissions needs approval\n\n${detail}\n\n${command}`,
-          permissionPromptOptions(
-            config.evaluationLog.enabled,
-            shouldOfferStandingApproval(decisionSource, config.standingApprovals.enabled),
-          ),
+          permissionPromptOptions(config.evaluationLog.enabled),
           promptSignal,
-          { allowComment: true },
         );
       } catch (error) {
         if (!lifecycleStale() && !reviewCancelled(signal)) throw error;
         if (!lifecycleStale()) reviewer.discardLineage();
         return cancelled();
       }
-      if (lifecycleStale()) return cancelled();
-      if (reviewCancelled(signal)) {
-        reviewer.discardLineage();
-        if (sessionActive) display.clear(scope);
-        return cancelled();
-      }
+      const cancelledResult = cancelledAfterAwait(scope, lifecycleSignal);
+      if (cancelledResult) return cancelledResult;
       const classification = classifyPromptChoice(choice);
       // Feed the user's decision back to the guardian as session-scoped
       // user-source evidence. review_failure prompts are excluded: their
       // "concern" is an infrastructure error, not a guardian judgment.
       if (decisionSource === "guardian" && classification) {
-        overrides.recordPromptDecision(scope, classification, detail, reviewer.lastEvidenceKey);
+        overrides.recordPromptDecision(gate, command, classification, detail, reviewer.lastEvidenceKey);
       }
-      if (config.evaluationLog.enabled && classification?.userChoice) {
+      if (classification?.userChoice) {
         logPromptEvaluation(scope, detail, evaluationContext, decisionSource, classification.userChoice);
       }
       if (classification?.allowsExecution) {
@@ -320,7 +316,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     }
     if (!config.enabled) return;
     const target: ReviewTarget = { toolName: event.toolName, toolCallId: event.toolCallId };
-    const classified = classifyCommand(command, config, trustedGroups, overrides.allowedConventionCommands);
+    const classified = classifyCommand(command, config, trustedGroups);
     if (classified.kind === "pass") return;
     const gate = classified.gate;
     const scope: ReviewScope = { ctx, config, gate, command, target };
@@ -330,15 +326,6 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
         source: "deny",
         reason: gate.message ?? gate.label,
         block: denyReason(gate),
-      });
-    }
-    if (classified.kind === "convention") {
-      if (ctx.hasUI) overrides.activateOverrideTool();
-      return settle(scope, {
-        verdict: "block",
-        source: "convention",
-        reason: gate.message ?? gate.label,
-        block: conventionReason(gate, command),
       });
     }
 
@@ -353,29 +340,23 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     // Same composite the ask path builds, so Esc and a reviewer-lifecycle reset
     // both release a queued command instead of stranding it behind a review it
     // is no longer waiting for.
-    const queueSignal = ctx.signal ? AbortSignal.any([ctx.signal, lifecycleSignal]) : lifecycleSignal;
+    const queueSignal = withLifecycle(ctx.signal, lifecycleSignal);
     let releaseReviewSlot: () => void;
     try {
       releaseReviewSlot = await guardianReviewQueue.acquire(queueSignal);
     } catch {
-      return { block: true, reason: "Auto Permissions review cancelled" };
+      return reviewCancelledResult();
     }
     try {
       if (lifecycleStale() || reviewCancelled(ctx.signal)) {
-        return { block: true, reason: "Auto Permissions review cancelled" };
+        return reviewCancelledResult();
       }
       const signal = ctx.signal;
       display.show(scope, "waiting");
       try {
         const verdict = await reviewer.review(scope, event.input as Record<string, unknown>);
-        if (lifecycleStale()) {
-          return { block: true, reason: "Auto Permissions review cancelled" };
-        }
-        if (reviewCancelled(signal)) {
-          reviewer.discardLineage();
-          if (sessionActive) display.clear(scope);
-          return { block: true, reason: "Auto Permissions review cancelled" };
-        }
+        const cancelledResult = cancelledAfterAwait(scope, lifecycleSignal);
+        if (cancelledResult) return cancelledResult;
         if (verdict.decision === "approve") {
           return settle(scope, { display: "approved", reason: verdict.reason });
         }
@@ -391,8 +372,8 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
         return askUser(scope, verdict.reason, lifecycleSignal, "guardian");
       } catch (error) {
         if (lifecycleStale() || reviewCancelled(signal)) {
-          if (!lifecycleStale() && sessionActive) display.clear(scope);
-          return { block: true, reason: "Auto Permissions review cancelled" };
+          if (!lifecycleStale()) display.clear(scope);
+          return reviewCancelledResult();
         }
         const reason = error instanceof Error ? error.message : String(error);
         return askUser(scope, `Automatic review failed: ${reason}`, lifecycleSignal, "review_failure");
@@ -402,126 +383,25 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     }
   });
 
-  pi.registerTool({
-    name: "request_override",
-    executionMode: "sequential",
-    label: "Request Override",
-    description: "Request a one-session exception for a command that violates a tooling convention. This cannot bypass guarded commands or deny rules.",
-    parameters: Type.Object({
-      command: Type.String({ description: "Exact command to allow" }),
-      reason: Type.String({ description: "Why the convention does not apply" }),
-    }),
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      let config: AutoPermissionsConfig;
-      try {
-        config = currentConfig(ctx);
-      } catch (error) {
-        return {
-          content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
-          details: { success: false },
-        };
-      }
-      const matches = untrustedMatches(params.command, config, trustedGroups);
-      if (matches.some((gate) => gate.level === "deny")) {
-        return {
-          content: [{ type: "text", text: "The command matches a deny rule, which is a hard policy boundary. Deny rules cannot be bypassed with request_override; choose a different approach." }],
-          details: { success: false },
-        };
-      }
-      if (!matches.length || matches.some((gate) => gate.level === "guarded")) {
-        return {
-          content: [{ type: "text", text: "The command is not a convention violation. Guarded commands cannot be bypassed with request_override." }],
-          details: { success: false },
-        };
-      }
-      const gate = matches[0];
-      const lifecycleSignal = reviewer.lifecycleSignal;
-      const lifecycleStale = () => reviewer.isStale(lifecycleSignal);
-      const promptSignal = signal ? AbortSignal.any([signal, lifecycleSignal]) : lifecycleSignal;
-      const cancelled = () => ({
-        content: [{ type: "text" as const, text: "Override cancelled." }],
-        details: { success: false },
-      });
-      if (lifecycleStale() || reviewCancelled(signal)) return cancelled();
-      if (!ctx.hasUI) {
-        return {
-          content: [{ type: "text", text: "Cannot request an override without an interactive UI." }],
-          details: { success: false },
-        };
-      }
-
-      setHerdrBlocked(pi, true, gate.label);
-      try {
-        let choice: string | undefined;
-        try {
-          // The override prompt never had Tab-to-comment (the monkey patch only
-          // enabled it on titles matching /needs approval/i), so keep parity.
-          choice = await promptSelect(
-            pi,
-            ctx,
-            `Convention override: ${gate.label}\n\n${params.reason}\n\n${params.command}`,
-            ["Allow for this session", "Keep blocked"],
-            promptSignal,
-            { allowComment: false },
-          );
-        } catch (error) {
-          if (!lifecycleStale() && !reviewCancelled(signal)) throw error;
-          return cancelled();
-        }
-        if (lifecycleStale() || reviewCancelled(signal)) return cancelled();
-        if (choice === "Allow for this session") {
-          overrides.allowConvention(params.command);
-          return {
-            content: [{ type: "text", text: `Override granted for this session:\n  ${params.command}` }],
-            details: { success: true, command: params.command },
-          };
-        }
-        return {
-          content: [{ type: "text", text: gate.message ?? "Use the configured project tooling." }],
-          details: { success: false },
-        };
-      } finally {
-        if (!lifecycleStale()) setHerdrBlocked(pi, false);
-      }
-    },
-  });
-
-  // The override schema is useful only after a convention denial has named an
-  // exact command. It is kept registered for replay and narrowed out of the
-  // active set at session_start — never here, because Pi refuses action methods
-  // during extension loading.
-
   registerSettingsCommand(pi, { overrides, reviewer });
 
   pi.on("session_shutdown", async (_event, ctx) => {
-    sessionActive = false;
-    reviewer.abortLifecycle();
-    reviewer.discardLineage();
+    reviewer.endSession();
     display.shutdown(ctx);
     setHerdrBlocked(pi, false);
   });
 
   pi.on("session_start", async (_event, ctx) => {
-    overrides.resetForSession();
-    warnAboutMissingReviewerProvider(ctx);
+    let config: AutoPermissionsConfig | undefined;
+    try {
+      config = currentConfig(ctx);
+    } catch {
+      // Reported by currentConfig; the first bash call fails closed.
+    }
+    if (config) warnAboutMissingReviewerProvider(ctx, config);
 
-    reviewer.abortLifecycle();
-    reviewer.discardLineage();
-    reviewer.resetLifecycle();
-    sessionActive = true;
+    reviewer.startSession(ctx.cwd);
     overrides.restore(ctx.sessionManager.getBranch());
     trustedGroups = ctx.isProjectTrusted() ? loadTrustedGroups(ctx.cwd) : new Set();
-    // Snapshot the trust baseline at session start: remotes configured now are
-    // inside the boundary, anything added or repointed later is not. Re-capture
-    // on every session_start (resume, branch switch) so the baseline follows
-    // the session the reviews belong to; the fingerprint covers the change.
-    reviewer.captureEnvironment(ctx.cwd);
-    try {
-      const config = currentConfig(ctx);
-      overrides.loadStanding(config, ctx);
-      if (config.ui.placement === "toolRow") display.registerGuardedBash(ctx);
-    } catch {
-      // The first bash call will fail closed with the configuration error.
-    }
   });
 }

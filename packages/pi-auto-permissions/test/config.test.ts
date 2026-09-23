@@ -1,34 +1,21 @@
 // Converted from the vendored package's bun:test suite (config.test.ts) to
 // node:test so the repo test suite needs no bun toolchain.
 import assert from "node:assert/strict";
-import { afterEach, describe, test } from "node:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { describe, test } from "node:test";
+import { writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { expandRules, loadAutoPermissionsConfig } from "../config.ts";
 import { DEFAULT_RULES } from "../default-rules.ts";
 import type { Gate } from "../gates.ts";
-
-const PRUNING_DEFAULTS = {
-	toolRecordMaxChars: 500,
-	assistantRecordMaxChars: 1000,
-	compactionRecordMaxChars: 4000,
-	fullRebuildKeepToolRecords: 60,
-} as const;
-
-const tempDirs: string[] = [];
+import { scratchDir } from "./support/temp-dir.ts";
 
 function configFile(value: unknown): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-auto-permissions-"));
-	tempDirs.push(dir);
+	const dir = scratchDir("pi-auto-permissions-");
 	const path = join(dir, "config.json");
 	writeFileSync(path, JSON.stringify(value), "utf8");
 	return path;
 }
-
-afterEach(() => {
-	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
 
 describe("auto permissions config", () => {
 	test("uses the built-in ruleset when the config is missing", () => {
@@ -41,7 +28,6 @@ describe("auto permissions config", () => {
 			projectInstructions: false,
 			userAnswerTools: [],
 			userMessageTypes: [],
-			...PRUNING_DEFAULTS,
 		});
 		assert.deepEqual(config.evaluationLog, {
 			enabled: false,
@@ -51,85 +37,60 @@ describe("auto permissions config", () => {
 			enabled: true,
 			path: join(tmpdir(), "usage.jsonl"),
 		});
-		assert.deepEqual(config.standingApprovals, {
-			enabled: true,
-			path: join(tmpdir(), "standing-approvals.jsonl"),
-		});
-		assert.deepEqual(config.ui, { enabled: true, resultDisplayMs: 2500, placement: "widget" });
+		assert.deepEqual(config.ui, { enabled: true, resultDisplayMs: 2500 });
 	});
 
-	test("keeps the usage sidecar on by default and allows opting out or relocating it", () => {
-		const defaults = configFile({});
-		assert.deepEqual(loadAutoPermissionsConfig(defaults).usageLog, {
-			enabled: true,
-			path: join(dirname(defaults), "usage.jsonl"),
+	for (const [key, file, defaultEnabled] of [
+		["usageLog", "usage.jsonl", true],
+		["denialLog", "denials.jsonl", true],
+		["evaluationLog", "review-evals.jsonl", false],
+	] as const) {
+		test(`resolves the ${key} sidecar block`, () => {
+			const load = (value: unknown) => loadAutoPermissionsConfig(configFile(value))[key];
+			const defaults = configFile({});
+			assert.deepEqual(loadAutoPermissionsConfig(defaults)[key], {
+				enabled: defaultEnabled,
+				path: join(dirname(defaults), file),
+			});
+
+			const flipped = configFile({ [key]: { enabled: !defaultEnabled } });
+			assert.deepEqual(loadAutoPermissionsConfig(flipped)[key], {
+				enabled: !defaultEnabled,
+				path: join(dirname(flipped), file),
+			});
+
+			const relocated = configFile({ [key]: { path: "logs/x.jsonl" } });
+			assert.deepEqual(loadAutoPermissionsConfig(relocated)[key], {
+				enabled: defaultEnabled,
+				path: join(dirname(relocated), "logs", "x.jsonl"),
+			});
+
+			assert.deepEqual(load({ [key]: { path: "~/x.jsonl" } }), {
+				enabled: defaultEnabled,
+				path: join(homedir(), "x.jsonl"),
+			});
+			assert.deepEqual(load({ [key]: { path: "/abs/x.jsonl" } }), {
+				enabled: defaultEnabled,
+				path: "/abs/x.jsonl",
+			});
+
+			for (const bad of [true, [], null, { enabled: "yes" }, { enabled: null }, { path: "" }]) {
+				assert.throws(() => load({ [key]: bad }), new RegExp(key));
+			}
 		});
+	}
 
-		const disabled = configFile({ usageLog: { enabled: false } });
-		assert.deepEqual(loadAutoPermissionsConfig(disabled).usageLog, {
-			enabled: false,
-			path: join(dirname(disabled), "usage.jsonl"),
-		});
-
-		const relocated = configFile({ usageLog: { path: "logs/guardian-usage.jsonl" } });
-		assert.deepEqual(loadAutoPermissionsConfig(relocated).usageLog, {
-			enabled: true,
-			path: join(dirname(relocated), "logs", "guardian-usage.jsonl"),
-		});
-	});
-
-	test("keeps the denial log on by default and allows opting out or relocating it", () => {
-		const defaults = configFile({});
-		assert.deepEqual(loadAutoPermissionsConfig(defaults).denialLog, {
-			enabled: true,
-			path: join(dirname(defaults), "denials.jsonl"),
-		});
-
-		const disabled = configFile({ denialLog: { enabled: false } });
-		assert.equal(loadAutoPermissionsConfig(disabled).denialLog.enabled, false);
-
-		const relocated = configFile({ denialLog: { path: "logs/denials.jsonl" } });
-		assert.deepEqual(loadAutoPermissionsConfig(relocated).denialLog, {
-			enabled: true,
-			path: join(dirname(relocated), "logs", "denials.jsonl"),
-		});
-	});
-
-	test("keeps standing approvals on by default and allows opting out or relocating them", () => {
-		const defaults = configFile({});
-		assert.deepEqual(loadAutoPermissionsConfig(defaults).standingApprovals, {
-			enabled: true,
-			path: join(dirname(defaults), "standing-approvals.jsonl"),
-		});
-
-		const disabled = configFile({ standingApprovals: { enabled: false } });
-		assert.equal(loadAutoPermissionsConfig(disabled).standingApprovals.enabled, false);
-
-		const relocated = configFile({ standingApprovals: { path: "logs/standing.jsonl" } });
-		assert.deepEqual(loadAutoPermissionsConfig(relocated).standingApprovals, {
-			enabled: true,
-			path: join(dirname(relocated), "logs", "standing.jsonl"),
-		});
-	});
-
-	test("rejects malformed standing approvals configuration", () => {
-		for (const standingApprovals of [true, [], { enabled: "yes" }, { path: "" }]) {
-			const path = configFile({ standingApprovals });
-			assert.throws(() => loadAutoPermissionsConfig(path), /standingApprovals/);
+	test("a null config block is rejected, never treated as absent", () => {
+		for (const key of ["reviewer", "ui", "reviewEvidence", "guardianPolicy"]) {
+			const path = configFile({ [key]: null });
+			assert.throws(() => loadAutoPermissionsConfig(path), new RegExp(`^Error: ${key} must be an object$`));
 		}
 	});
 
-	test("rejects malformed denial log configuration", () => {
-		for (const denialLog of [true, [], { enabled: "yes" }, { path: "" }]) {
-			const path = configFile({ denialLog });
-			assert.throws(() => loadAutoPermissionsConfig(path), /denialLog/);
-		}
-	});
-
-	test("rejects malformed usage sidecar configuration", () => {
-		for (const usageLog of [true, [], { enabled: "yes" }, { path: "" }]) {
-			const path = configFile({ usageLog });
-			assert.throws(() => loadAutoPermissionsConfig(path), /usageLog/);
+	test("ignores a legacy standingApprovals key of any shape", () => {
+		for (const standingApprovals of [{ enabled: true, path: "x.jsonl" }, true, [], { enabled: "yes" }, { path: "" }]) {
+			const config = loadAutoPermissionsConfig(configFile({ standingApprovals }));
+			assert.equal(Object.hasOwn(config, "standingApprovals"), false);
 		}
 	});
 
@@ -143,7 +104,7 @@ describe("auto permissions config", () => {
 			},
 			systemPrompt: "custom permission policy",
 			reviewEvidence: { projectInstructions: true },
-			ui: { enabled: true, resultDisplayMs: 5000, placement: "toolRow" },
+			ui: { enabled: true, resultDisplayMs: 5000 },
 			rules: [
 				{
 					pattern: "\\brm\\s+-rf\\b",
@@ -160,18 +121,23 @@ describe("auto permissions config", () => {
 			model: "gpt-5.4",
 			reasoningEffort: "medium",
 			timeoutMs: 12_000,
-			prefilter: false,
 		});
 		assert.equal(config.systemPrompt, "custom permission policy");
 		assert.deepEqual(config.reviewEvidence, {
 			projectInstructions: true,
 			userAnswerTools: [],
 			userMessageTypes: [],
-			...PRUNING_DEFAULTS,
 		});
-		assert.deepEqual(config.ui, { enabled: true, resultDisplayMs: 5000, placement: "toolRow" });
+		assert.deepEqual(config.ui, { enabled: true, resultDisplayMs: 5000 });
 		assert.equal(config.rules.length, 1);
 		assert.equal(config.rules[0].pattern.test("rm -rf build"), true);
+	});
+
+	test("ignores a legacy ui.placement of any value", () => {
+		for (const placement of ["toolRow", "bogus", 42]) {
+			const config = loadAutoPermissionsConfig(configFile({ ui: { placement } }));
+			assert.deepEqual(config.ui, { enabled: true, resultDisplayMs: 2500 });
+		}
 	});
 
 	test("accepts, trims, and deduplicates user answer tools", () => {
@@ -182,7 +148,6 @@ describe("auto permissions config", () => {
 			projectInstructions: false,
 			userAnswerTools: ["ask_user_question", "plan_review"],
 			userMessageTypes: [],
-			...PRUNING_DEFAULTS,
 		});
 	});
 
@@ -210,26 +175,20 @@ describe("auto permissions config", () => {
 		}
 	});
 
-	test("accepts custom evidence pruning knobs, including 0 to disable", () => {
+	test("legacy pruning knobs in reviewEvidence are ignored, even malformed", () => {
 		const path = configFile({
-			reviewEvidence: { toolRecordMaxChars: 0, assistantRecordMaxChars: 2500, compactionRecordMaxChars: 8000, fullRebuildKeepToolRecords: 100 },
+			reviewEvidence: {
+				toolRecordMaxChars: 10,
+				assistantRecordMaxChars: -1,
+				compactionRecordMaxChars: "500",
+				fullRebuildKeepToolRecords: "x",
+			},
 		});
-		const evidence = loadAutoPermissionsConfig(path).reviewEvidence;
-		assert.equal(evidence.toolRecordMaxChars, 0);
-		assert.equal(evidence.assistantRecordMaxChars, 2500);
-		assert.equal(evidence.compactionRecordMaxChars, 8000);
-		assert.equal(evidence.fullRebuildKeepToolRecords, 100);
-	});
-
-	test("rejects malformed evidence pruning knobs", () => {
-		for (const bad of [-1, 1.5, "500", true, 1_000_001]) {
-			const path = configFile({ reviewEvidence: { toolRecordMaxChars: bad } });
-			assert.throws(
-				() => loadAutoPermissionsConfig(path),
-				(error: unknown) => error instanceof Error
-					&& error.message.includes("reviewEvidence.toolRecordMaxChars must be an integer between 0 and 1000000"),
-			);
-		}
+		assert.deepEqual(loadAutoPermissionsConfig(path).reviewEvidence, {
+			projectInstructions: false,
+			userAnswerTools: [],
+			userMessageTypes: [],
+		});
 	});
 
 	test("rejects malformed user answer tools", () => {
@@ -240,29 +199,6 @@ describe("auto permissions config", () => {
 				(error: unknown) => error instanceof Error
 					&& error.message.includes("reviewEvidence.userAnswerTools must be an array of non-empty strings"),
 			);
-		}
-	});
-
-	test("resolves an enabled evaluation log relative to the config", () => {
-		const path = configFile({ evaluationLog: { enabled: true, path: "logs/reviews.jsonl" } });
-		assert.deepEqual(loadAutoPermissionsConfig(path).evaluationLog, {
-			enabled: true,
-			path: join(path, "..", "logs/reviews.jsonl"),
-		});
-	});
-
-	test("uses a private adjacent evaluation log path by default", () => {
-		const path = configFile({ evaluationLog: { enabled: true } });
-		assert.deepEqual(loadAutoPermissionsConfig(path).evaluationLog, {
-			enabled: true,
-			path: join(path, "..", "review-evals.jsonl"),
-		});
-	});
-
-	test("rejects malformed evaluation log configuration", () => {
-		for (const evaluationLog of [true, [], { enabled: "yes" }, { path: "" }]) {
-			const path = configFile({ evaluationLog });
-			assert.throws(() => loadAutoPermissionsConfig(path));
 		}
 	});
 
@@ -278,18 +214,12 @@ describe("auto permissions config", () => {
 		}
 	});
 
-	test("reviewer.prefilter defaults off, accepts true, and rejects non-booleans", () => {
+	test("reviewer.prefilter is ignored, including non-booleans", () => {
 		const reviewer = { provider: "p", model: "m" };
-		assert.equal(loadAutoPermissionsConfig(configFile({ reviewer })).reviewer?.prefilter, false);
-		assert.equal(
-			loadAutoPermissionsConfig(configFile({ reviewer: { ...reviewer, prefilter: true } })).reviewer?.prefilter,
-			true,
-		);
-		for (const prefilter of ["yes", 1, [], {}]) {
-			assert.throws(
-				() => loadAutoPermissionsConfig(configFile({ reviewer: { ...reviewer, prefilter } })),
-				/reviewer\.prefilter must be boolean/,
-			);
+		for (const prefilter of [true, "yes", 1, []]) {
+			const config = loadAutoPermissionsConfig(configFile({ reviewer: { ...reviewer, prefilter } }));
+			assert.ok(config.reviewer);
+			assert.equal(Object.hasOwn(config.reviewer, "prefilter"), false);
 		}
 	});
 
@@ -379,8 +309,18 @@ describe("auto permissions config", () => {
 		const path = configFile({ rules: [{ pattern: "x", level: "hard", group: "g", label: "L" }] });
 		assert.throws(
 			() => loadAutoPermissionsConfig(path),
-			/rules\[0\]\.level must be guarded, convention, or deny/,
+			/rules\[0\]\.level must be guarded or deny/,
 		);
+	});
+
+	test("loads a legacy convention rule as a deny rule, still requiring its message", () => {
+		const path = configFile({ rules: [{ pattern: "x", level: "convention", group: "g", label: "L", message: "m" }] });
+		const config = loadAutoPermissionsConfig(path);
+		assert.equal(config.rules[0].level, "deny");
+		assert.equal(config.rules[0].message, "m");
+
+		const missingMessage = configFile({ rules: [{ pattern: "x", level: "convention", group: "g", label: "L" }] });
+		assert.throws(() => loadAutoPermissionsConfig(missingMessage), /message is required/);
 	});
 
 	test("activates the built-in ruleset when the rules key is absent", () => {
@@ -436,8 +376,7 @@ describe("auto permissions config", () => {
 	});
 
 	test("loads a prompt file relative to the config", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-auto-permissions-"));
-		tempDirs.push(dir);
+		const dir = scratchDir("pi-auto-permissions-");
 		writeFileSync(join(dir, "prompt.md"), "review carefully\n", "utf8");
 		const path = join(dir, "config.json");
 		writeFileSync(path, JSON.stringify({ systemPromptFile: "./prompt.md" }), "utf8");

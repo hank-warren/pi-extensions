@@ -11,29 +11,11 @@
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { pid } from "node:process";
-import { autoPermissionsConfigPath, type ReasoningEffort } from "./config.js";
-
-export { autoPermissionsConfigPath };
-
-/** The subset of the config the settings UI owns. */
-export interface ReviewerBlock {
-  provider: string;
-  model: string;
-  reasoningEffort: ReasoningEffort;
-  timeoutMs: number;
-}
+import type { ReviewerConfig } from "./config.js";
 
 interface ConfigPatch {
   enabled?: boolean;
-  reviewer?: ReviewerBlock;
-  /**
-   * Entries to append to `guardianPolicy.environment` (the setup wizard's
-   * accept path). Deduplicated against what is already there; every other
-   * `guardianPolicy` list and unrelated key is left exactly as written.
-   */
-  appendEnvironment?: string[];
-  /** Entries to append to `guardianPolicy.softDeny`, with the same semantics. */
-  appendSoftDeny?: string[];
+  reviewer?: ReviewerConfig;
 }
 
 const DEFAULT_INDENT = "  ";
@@ -78,10 +60,7 @@ function parseObject(text: string): Record<string, unknown> {
  * Throws on an unparsable or non-object file rather than clobbering it; the
  * caller surfaces that as a notification.
  */
-export function patchAutoPermissionsConfig(
-  path: string = autoPermissionsConfigPath(),
-  patch: ConfigPatch = {},
-): void {
+export function patchAutoPermissionsConfig(path: string, patch: ConfigPatch): void {
   const existing = readText(path);
   const merged = parseObject(existing);
 
@@ -90,41 +69,17 @@ export function patchAutoPermissionsConfig(
     else merged.enabled = false;
   }
   if (patch.reviewer !== undefined) {
-    // Preserve file-only reviewer keys the menu does not edit (prefilter):
-    // this writer must never silently drop what the human wrote by hand.
+    // Preserve every file-only reviewer key the menu does not edit: this writer must never silently drop what the human wrote by hand.
     const existingReviewer = merged.reviewer && typeof merged.reviewer === "object" && !Array.isArray(merged.reviewer)
       ? merged.reviewer as Record<string, unknown>
       : {};
     merged.reviewer = {
+      ...existingReviewer,
       provider: patch.reviewer.provider,
       model: patch.reviewer.model,
       reasoningEffort: patch.reviewer.reasoningEffort,
       timeoutMs: patch.reviewer.timeoutMs,
-      ...(existingReviewer.prefilter !== undefined ? { prefilter: existingReviewer.prefilter } : {}),
     };
-  }
-
-  const policyAppends = [
-    ["environment", patch.appendEnvironment],
-    ["softDeny", patch.appendSoftDeny],
-  ] as const;
-  if (policyAppends.some(([, entries]) => entries?.length)) {
-    const policy = merged.guardianPolicy && typeof merged.guardianPolicy === "object" && !Array.isArray(merged.guardianPolicy)
-      ? merged.guardianPolicy as Record<string, unknown>
-      : {};
-    for (const [key, entries] of policyAppends) {
-      if (!entries?.length) continue;
-      const existingEntries = Array.isArray(policy[key])
-        ? policy[key].filter((entry): entry is string => typeof entry === "string")
-        : [];
-      policy[key] = [
-        ...new Set([
-          ...existingEntries,
-          ...entries.map((entry) => entry.trim()).filter(Boolean),
-        ]),
-      ];
-    }
-    merged.guardianPolicy = policy;
   }
 
   const payload = `${JSON.stringify(merged, null, detectIndent(existing))}\n`;

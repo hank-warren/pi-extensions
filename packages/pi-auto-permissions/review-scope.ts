@@ -5,7 +5,7 @@ import type { Gate } from "./gates.js";
 /** What a permission decision hands back to Pi to stop the tool call. */
 export type BlockResult = { block: true; reason: string };
 
-/** The tool call a review belongs to, and the row it may render in. */
+/** The tool call a review belongs to. */
 export interface ReviewTarget {
   toolName: string;
   toolCallId?: string;
@@ -13,9 +13,9 @@ export interface ReviewTarget {
 
 /**
  * Everything one gated command is judged against, built once per `tool_call`
- * (and per `request_override`) and passed whole to the display, the reviewer,
- * the denial log and the approval prompt — so those five never disagree about
- * which command, gate or config they are talking about.
+ * and passed whole to the display, the reviewer, the denial log and the
+ * approval prompt — so they never disagree about which command, gate or
+ * config they are talking about.
  */
 export interface ReviewScope {
   ctx: ExtensionContext;

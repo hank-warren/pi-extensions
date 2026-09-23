@@ -2,15 +2,15 @@
 // node:test so the repo test suite needs no bun toolchain.
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { findGate, findGates } from "../gates.ts";
+import { findGates } from "../gates.ts";
 import {
 	AUTO_PERMISSIONS_SYSTEM_PROMPT,
 	buildGuardianPolicySection,
 	buildReviewEnvelope,
 	collectReviewEvidence,
+	DEFAULT_EVIDENCE_CAPS,
+	FULL_REBUILD_KEEP_TOOL_RECORDS,
 	parsePermissionVerdict,
-	parsePrefilterVerdict,
-	PREFILTER_INSTRUCTION,
 	SUBAGENT_CONTEXT_SYSTEM_PROMPT,
 } from "../review.ts";
 
@@ -295,20 +295,20 @@ describe("permission verdicts", () => {
 });
 
 describe("gate matching", () => {
-	test("distinguishes guarded commands from conventions", () => {
+	test("distinguishes guarded commands from deny rules", () => {
 		const rules = [
 			{ pattern: /git push/i, level: "guarded", group: "git", label: "Push" },
-			{ pattern: /pip install/i, level: "convention", group: "pip", label: "pip", message: "Use uv" },
+			{ pattern: /pip install/i, level: "deny", group: "pip", label: "pip", message: "Use uv" },
 		] as const;
-		assert.equal(findGate("git push origin main", rules)?.level, "guarded");
-		assert.equal(findGate("pip install requests", rules)?.level, "convention");
-		assert.equal(findGate("git status", rules), undefined);
+		assert.equal(findGates("git push origin main", rules)[0]?.level, "guarded");
+		assert.equal(findGates("pip install requests", rules)[0]?.level, "deny");
+		assert.equal(findGates("git status", rules)[0], undefined);
 	});
 
 	test("handles configurable stateful regular expressions repeatedly", () => {
 		const rules = [{ pattern: /git push/g, level: "guarded", group: "git", label: "Push" }] as const;
-		assert.equal(findGate("git push", rules)?.label, "Push");
-		assert.equal(findGate("git push", rules)?.label, "Push");
+		assert.equal(findGates("git push", rules)[0]?.label, "Push");
+		assert.equal(findGates("git push", rules)[0]?.label, "Push");
 	});
 
 	test("collects every matching operation in a compound command", () => {
@@ -451,6 +451,33 @@ describe("evidence pruning", () => {
 		assert.deepEqual(applyFullRebuildEviction(records, 3), records);
 	});
 
+	test("pins the hardcoded evidence pruning limits", () => {
+		assert.deepEqual(DEFAULT_EVIDENCE_CAPS, {
+			toolRecordMaxChars: 500,
+			assistantRecordMaxChars: 1000,
+			compactionRecordMaxChars: 4000,
+		});
+		assert.equal(FULL_REBUILD_KEEP_TOOL_RECORDS, 60);
+	});
+
+	test("applyFullRebuildEviction leaves CUSTOM records verbatim and uncounted", async () => {
+		const { applyFullRebuildEviction } = await import("../review.ts");
+		const custom = { key: "c1", source: "tool" as const, text: "CUSTOM subagent-notify: done, error" };
+		const records = [
+			custom,
+			{ key: "t1", source: "tool" as const, text: 'TOOL bash {"command":"old"} → success' },
+			{ key: "c2", source: "tool" as const, text: "CUSTOM plan-note: middle" },
+			{ key: "t2", source: "tool" as const, text: 'TOOL bash {"command":"new"} → error' },
+		];
+		const evicted = applyFullRebuildEviction(records, 1);
+		assert.equal(evicted[0].text, custom.text);
+		assert.equal(evicted[1].text, "TOOL bash → success");
+		assert.equal(evicted[2].text, "CUSTOM plan-note: middle");
+		assert.equal(evicted[3].text, 'TOOL bash {"command":"new"} → error');
+		assert.deepEqual(applyFullRebuildEviction(records, 0), records);
+		assert.deepEqual(applyFullRebuildEviction(records, 2), records);
+	});
+
 	test("an allowlisted injected message is user-source; everything else is capped tool-source", () => {
 		// An extension that anchors an objective with appendCustomMessageEntry
 		// reaches the model as a user message, but the session entry is a
@@ -577,9 +604,6 @@ describe("evidence pruning", () => {
 		assert.match(AUTO_PERMISSIONS_SYSTEM_PROMPT, /unrelated third destination/);
 		assert.match(AUTO_PERMISSIONS_SYSTEM_PROMPT, /never as evidence that something did not happen/);
 		assert.match(OVERRIDE_FEEDBACK_SYSTEM_PROMPT, /USER \(permission override\):/);
-		assert.match(OVERRIDE_FEEDBACK_SYSTEM_PROMPT, /USER \(standing permission override, granted/);
-		assert.match(OVERRIDE_FEEDBACK_SYSTEM_PROMPT, /origin project is context, not a scope limit/);
-		assert.match(OVERRIDE_FEEDBACK_SYSTEM_PROMPT, /comparable actions in any project/);
 		assert.match(OVERRIDE_FEEDBACK_SYSTEM_PROMPT, /Later user statements, blocks, and later overrides take precedence/);
 		assert.match(OVERRIDE_FEEDBACK_SYSTEM_PROMPT, /never covers a materially higher-risk action/);
 
@@ -676,23 +700,5 @@ describe("unresolvable-target rule", () => {
 		assert.ok(AUTO_PERMISSIONS_SYSTEM_PROMPT.includes(
 			"The assignment is visible: judge it as a delete of /tmp/build-cache.",
 		));
-	});
-});
-
-describe("prefilter stage", () => {
-	test("parsePrefilterVerdict accepts only the exact word SAFE", () => {
-		assert.equal(parsePrefilterVerdict("SAFE"), "safe");
-		assert.equal(parsePrefilterVerdict("  safe \n"), "safe");
-		// Everything else — including prose containing SAFE — escalates.
-		for (const text of ["REVIEW", "", "SAFE.", "SAFE, because it is a read", "The action is SAFE", "UNSAFE", "{\"decision\":\"approve\"}"]) {
-			assert.equal(parsePrefilterVerdict(text), "review", `"${text}" must escalate to full review`);
-		}
-	});
-
-	test("the prefilter instruction demands a single word and defaults to REVIEW under uncertainty", () => {
-		assert.ok(PREFILTER_INSTRUCTION.startsWith("PREFILTER MODE"));
-		assert.ok(PREFILTER_INSTRUCTION.includes("Respond with exactly one word"));
-		assert.ok(PREFILTER_INSTRUCTION.includes("Do not return JSON"));
-		assert.ok(PREFILTER_INSTRUCTION.includes("When uncertain, respond REVIEW."));
 	});
 });

@@ -1,9 +1,5 @@
-import { appendFileSync, chmodSync, mkdirSync, renameSync, statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { dirname } from "node:path";
-
-/** Rotate once the sidecar grows past this size; one previous generation is kept. */
-export const USAGE_LOG_ROTATE_BYTES = 16 * 1024 * 1024;
+import { appendJsonlRecord, SIDECAR_ROTATE_BYTES } from "./jsonl-sidecar.js";
 
 interface UsageLogTotals {
   input: number;
@@ -55,14 +51,13 @@ export function buildUsageLogRecord(
   model: string,
   usage: unknown,
   label = "guardian",
-  source = "auto-permissions",
   subagent = false,
 ): UsageLogRecord {
   return {
     v: 1,
     id: randomUUID(),
     ts: new Date().toISOString(),
-    source,
+    source: "auto-permissions",
     label,
     provider,
     model,
@@ -71,18 +66,6 @@ export function buildUsageLogRecord(
   };
 }
 
-function rotateIfLarge(path: string): void {
-  try {
-    if (statSync(path).size < USAGE_LOG_ROTATE_BYTES) return;
-    renameSync(path, `${path}.1`);
-  } catch {
-    // A missing or unrotatable sidecar simply keeps appending.
-  }
-}
-
 export function appendUsageRecord(path: string, record: UsageLogRecord): void {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  rotateIfLarge(path);
-  appendFileSync(path, `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
-  chmodSync(path, 0o600);
+  appendJsonlRecord(path, record, SIDECAR_ROTATE_BYTES);
 }

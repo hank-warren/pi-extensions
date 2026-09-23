@@ -1,26 +1,18 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { test } from "node:test";
+import { existsSync, readFileSync, statSync, truncateSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   appendUsageRecord,
   buildUsageLogRecord,
   usageLogTotals,
-  USAGE_LOG_ROTATE_BYTES,
   type UsageLogRecord,
 } from "../usage-log.ts";
-
-const tempDirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
+import { SIDECAR_ROTATE_BYTES } from "../jsonl-sidecar.ts";
+import { scratchDir } from "./support/temp-dir.ts";
 
 function tempDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), "auto-permissions-usage-"));
-  tempDirs.push(dir);
-  return dir;
+  return scratchDir("auto-permissions-usage-");
 }
 
 const piAiUsage = {
@@ -81,7 +73,7 @@ test("appends private newline-delimited records", () => {
 });
 
 test("tags subagent reviews and omits the field otherwise", () => {
-  const tagged = buildUsageLogRecord("openai-codex", "gpt-5.6-luna", piAiUsage, "guardian", "auto-permissions", true);
+  const tagged = buildUsageLogRecord("openai-codex", "gpt-5.6-luna", piAiUsage, "guardian", true);
   assert.equal(tagged.subagent, true);
   const untagged = buildUsageLogRecord("openai-codex", "gpt-5.6-luna", piAiUsage);
   assert.ok(!("subagent" in untagged), "non-subagent records must not carry the field");
@@ -89,7 +81,8 @@ test("tags subagent reviews and omits the field otherwise", () => {
 
 test("rotates one generation once the sidecar grows past the cap", () => {
   const path = join(tempDir(), "usage.jsonl");
-  writeFileSync(path, "x".repeat(USAGE_LOG_ROTATE_BYTES), "utf8");
+  writeFileSync(path, "");
+  truncateSync(path, SIDECAR_ROTATE_BYTES);
   const record = buildUsageLogRecord("anthropic", "claude-fable-5", piAiUsage);
   appendUsageRecord(path, record);
 

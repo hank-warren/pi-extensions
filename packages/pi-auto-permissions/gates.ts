@@ -1,18 +1,16 @@
 /**
  * Rule severity levels, in decision order:
  * - `deny`: blocks immediately with the rule's required `message`. A hard
- *   policy boundary — not clearable by `request_override`, not bypassed by
- *   `.pi/trusted-ops` groups, never shown to the guardian. The mechanical
- *   analogue of Claude Code's pre-classifier circuit breaker.
- * - `convention`: blocks directly with the rule's required `message`, but the
- *   agent may ask the user for a one-session exception via `request_override`.
+ *   policy boundary — not bypassed by `.pi/trusted-ops` groups, never shown
+ *   to the guardian. The mechanical analogue of Claude Code's pre-classifier
+ *   circuit breaker.
  * - `guarded`: sends the command to the guardian reviewer.
  *
  * When several rules match one command, the effective level is the most
- * severe across *all* matches (deny > convention > guarded), never the first
- * match in config order.
+ * severe across *all* matches (deny > guarded), never the first match in
+ * config order.
  */
-export type GateLevel = "deny" | "guarded" | "convention";
+export type GateLevel = "deny" | "guarded";
 
 export interface Gate {
   pattern: RegExp;
@@ -20,7 +18,6 @@ export interface Gate {
   group: string;
   label: string;
   message?: string;
-  suggest?: (command: string) => string;
 }
 
 /**
@@ -42,8 +39,4 @@ export function findGates(command: string, rules: readonly Gate[]): Gate[] {
     gate.pattern.lastIndex = 0;
     return gate.pattern.test(command);
   });
-}
-
-export function findGate(command: string, rules: readonly Gate[]): Gate | undefined {
-  return findGates(command, rules)[0];
 }

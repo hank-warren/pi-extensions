@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
-import { isOpenAICodexModel } from "../openai-codex-transport.ts";
+import { isOpenAICodexModel } from "../guardian-reviewer.ts";
 
 describe("OpenAI Codex transport selection", () => {
   test("recognizes Codex transport by API so provider aliases retain websocket sessions", () => {

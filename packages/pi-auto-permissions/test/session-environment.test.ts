@@ -1,30 +1,20 @@
 import assert from "node:assert/strict";
-import { afterEach, describe, test } from "node:test";
+import { describe, test } from "node:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { realpathSync } from "node:fs";
 import {
 	buildSessionEnvironmentSection,
 	captureSessionEnvironment,
 } from "../session-environment.ts";
-
-const tempDirs: string[] = [];
+import { scratchDir } from "./support/temp-dir.ts";
 
 function tempDir(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-ap-session-env-"));
-	tempDirs.push(dir);
-	return dir;
+	return scratchDir("pi-ap-session-env-");
 }
 
 function git(cwd: string, ...args: string[]): void {
 	execFileSync("git", args, { cwd, stdio: "ignore" });
 }
-
-afterEach(() => {
-	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
 
 describe("session environment snapshot", () => {
 	test("captures repo root and remotes inside a repository", () => {

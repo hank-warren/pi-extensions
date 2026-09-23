@@ -4,8 +4,8 @@
  * Two guarded commands issued in the same assistant turn used to open two
  * reviewer conversations at once, which raced for the same widget/bash review
  * row and let the second verdict land against the first command's display. The
- * queue serializes the *decisions* only: denies, convention blocks, trusted
- * commands and already-approved execution never enter it.
+ * queue serializes the *decisions* only: denies, trusted commands and
+ * already-approved execution never enter it.
  *
  * Every acquirer releases in a `finally`, and a release that throws (or is
  * never observed) must not poison later requests — so the tail is always a
@@ -26,15 +26,12 @@ interface ReviewQueue {
 	 * live holder — see the catch in the implementation.
 	 */
 	acquire(signal?: AbortSignal): Promise<() => void>;
-	/** Slots currently waiting, excluding the one holding the queue. */
-	readonly waiting: number;
 	/** True while a slot is held, so a caller can show a queued state. */
 	readonly busy: boolean;
 }
 
 export function createReviewQueue(): ReviewQueue {
 	let tail: Promise<void> = Promise.resolve();
-	let waiting = 0;
 	let held = 0;
 
 	return {
@@ -52,7 +49,6 @@ export function createReviewQueue(): ReviewQueue {
 				held -= 1;
 				release();
 			};
-			waiting += 1;
 			try {
 				await (signal ? raceAbort(previous, signal) : previous.catch(() => undefined));
 			} catch (error) {
@@ -62,17 +58,11 @@ export function createReviewQueue(): ReviewQueue {
 				// the next waiter while the current holder is still inside its
 				// critical section — silently undoing the mutual exclusion this class
 				// exists to provide.
-				released = true;
 				void previous.catch(() => undefined).then(release);
 				throw error;
-			} finally {
-				waiting -= 1;
 			}
 			held += 1;
 			return releaseOnce;
-		},
-		get waiting() {
-			return waiting;
 		},
 		get busy() {
 			return held > 0;

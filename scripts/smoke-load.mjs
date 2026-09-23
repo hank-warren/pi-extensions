@@ -54,9 +54,8 @@ const EXPECTED_SURFACES = {
 		commands: ["stats"],
 	},
 	"./packages/pi-auto-permissions/index.ts": {
-		tools: ["request_override"],
 		commands: ["auto-permissions"],
-		handlers: ["session_shutdown", "session_start", "tool_call", "tool_execution_end"],
+		handlers: ["session_shutdown", "session_start", "tool_call"],
 	},
 	"./packages/pi-plan-mode/index.ts": {
 		tools: ["plan_implemented", "plan_mode_complete", "plan_mode_question"],

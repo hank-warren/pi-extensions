@@ -22,6 +22,8 @@ Find the active config through `PI_AUTO_PERMISSIONS_CONFIG` or `$PI_CODING_AGENT
 2. `denials.jsonl`
 3. `review-evals.jsonl`
 
+Each sidecar may have a rotated previous generation beside it (for example `usage.jsonl.1`); read it too when present.
+
 These show observed friction: what prompted, what was denied, and which asks the user labeled unnecessary. They do **not** prove that a hostname is owned or safe. Keep counts so the interview can surface repeated friction, for example: “SSH status checks prompted 14 times.”
 
 ### Session history
@@ -40,7 +42,7 @@ Use `ask_user_question`; do not replace the interview with assumptions in prose.
 
 - Classify ambiguous hosts as production, staging, development, or not theirs.
 - Confirm source-control organizations, registries, buckets, and internal domains.
-- Surface measured friction with counts and a concrete choice: “SSH status checks prompted 14 times — standing approval or a softDeny carve-out?”
+- Surface measured friction with counts and a concrete choice: “SSH status checks prompted 14 times — a guardianPolicy.allow entry or a softDeny carve-out?”
 - Ask which boundaries are absolute. User statements such as “never push outside our orgs” are candidates for `hardDeny`.
 
 Production-looking or customer-looking names are not proof, but they require classification. If a hostname matches production/customer patterns or the user says it is production or customer-facing, propose it as `softDeny`, never `environment`.
@@ -61,7 +63,7 @@ Use these meanings precisely:
 - `softDeny`: blocks unless an allow entry covers the action or the user names the exact operation and target. For production/customer targets, use wording like: “Do not perform mutating operations against HOST unless the user names the exact operation and instance.”
 - `hardDeny`: unconditional policy boundary. Propose it only for boundaries the user states absolutely.
 
-Never propose editing `rules`. Never write `.pi/trusted-ops` unless the user explicitly asks. If asked, explain that a trusted group only bypasses matching guarded/convention rules and may be a no-op under a catch-all rule or when no matching group exists.
+Never propose editing `rules`. Never write `.pi/trusted-ops` unless the user explicitly asks. If asked, explain that a trusted group only bypasses matching guarded rules and may be a no-op under a catch-all rule or when no matching group exists.
 
 ## 4. Apply only after confirmation
 

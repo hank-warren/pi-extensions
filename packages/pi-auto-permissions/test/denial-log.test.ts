@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { afterEach, describe, test } from "node:test";
-import { mkdtempSync, rmSync, statSync, writeFileSync, appendFileSync } from "node:fs";
+import { describe, test } from "node:test";
+import { existsSync, readFileSync, statSync, truncateSync, writeFileSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -9,18 +9,12 @@ import {
 	readRecentDenials,
 	type DenialRecord,
 } from "../denial-log.ts";
-
-const tempDirs: string[] = [];
+import { SIDECAR_ROTATE_BYTES } from "../jsonl-sidecar.ts";
+import { scratchDir } from "./support/temp-dir.ts";
 
 function tempPath(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-ap-denials-"));
-	tempDirs.push(dir);
-	return join(dir, "denials.jsonl");
+	return join(scratchDir("pi-ap-denials-"), "denials.jsonl");
 }
-
-afterEach(() => {
-	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
 
 function record(command: string, verdict: DenialRecord["verdict"] = "block"): DenialRecord {
 	return buildDenialRecord({
@@ -73,5 +67,18 @@ describe("denial log", () => {
 		const path = tempPath();
 		writeFileSync(path, `${JSON.stringify({ v: 1, command: "x" })}\n`, "utf8");
 		assert.deepEqual(readRecentDenials(path, 10), []);
+	});
+
+	test("rotates one generation once the sidecar reaches the cap", () => {
+		const path = tempPath();
+		writeFileSync(path, "");
+		truncateSync(path, SIDECAR_ROTATE_BYTES);
+		const denial = record("after-rotation");
+		appendDenialRecord(path, denial);
+
+		assert.ok(existsSync(`${path}.1`), "previous generation is retained");
+		const lines = readFileSync(path, "utf8").trim().split("\n");
+		assert.equal(lines.length, 1);
+		assert.deepEqual(JSON.parse(lines[0]!) as DenialRecord, denial);
 	});
 });

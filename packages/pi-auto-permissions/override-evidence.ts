@@ -6,6 +6,8 @@ import type { ReviewEvidenceRecord } from "./review.js";
  * evidence stream as user-source records so the guardian can treat them as
  * authorization (allows) or standing constraints (blocks).
  */
+export const PERMISSION_OVERRIDE_CHOICES = ["allow", "allow_unnecessary", "allow_appropriate", "block"] as const;
+
 export interface PermissionOverride {
   seq: number;
   /**
@@ -18,13 +20,7 @@ export interface PermissionOverride {
   gateLabel: string;
   command: string;
   reviewerReason: string;
-  choice: "allow" | "allow_unnecessary" | "allow_appropriate" | "block";
-  /** Present only for a user-scoped ledger approval loaded at session start. */
-  standing?: {
-    grantedAt: string;
-    project: string;
-    gateGroup: string;
-  };
+  choice: (typeof PERMISSION_OVERRIDE_CHOICES)[number];
 }
 
 /** Anchor value meaning "before every collected record". */
@@ -43,16 +39,6 @@ export function overrideEvidenceRecord(override: PermissionOverride): ReviewEvid
   const command = JSON.stringify(commandPreview(override.command));
   const gate = JSON.stringify(override.gateLabel);
   const concern = JSON.stringify(commandPreview(override.reviewerReason));
-  if (override.standing) {
-    const granted = override.standing.grantedAt.slice(0, 10);
-    const project = JSON.stringify(commandPreview(override.standing.project));
-    const group = JSON.stringify(override.standing.gateGroup);
-    return {
-      key: `override:${override.seq}`,
-      source: "user",
-      text: `USER (standing permission override, granted ${granted} in ${project}): allowed gated command ${command} (gate ${gate}, group ${group}) despite reviewer concern ${concern}. Treat comparable actions in any project as authorized unless a later user statement or block contradicts this. This never authorizes an action of a materially higher risk class.`,
-    };
-  }
   let text: string;
   switch (override.choice) {
     case "allow_unnecessary":

@@ -45,7 +45,6 @@ test("the first slot is granted without waiting", async () => {
 	});
 	await pending;
 	assert.equal(granted, true);
-	assert.equal(queue.waiting, 0);
 });
 
 test("a reviewer that throws still hands the queue on", async () => {
@@ -91,17 +90,6 @@ test("releasing twice is harmless and never lets two slots overlap", async () =>
 	assert.equal(overlapped, false);
 });
 
-test("waiting reports queued slots so a caller can re-check cancellation", async () => {
-	const queue = createReviewQueue();
-	const release = await queue.acquire();
-	const queued = [queue.acquire(), queue.acquire()];
-	await tick();
-	assert.equal(queue.waiting, 2);
-	release();
-	for (const pending of queued) (await pending)();
-	assert.equal(queue.waiting, 0);
-});
-
 test("busy is false when idle and true while a slot is held", async () => {
 	// The caller renders a "queued" row on this, so a lone review must not see
 	// a busy queue and flash one.
@@ -132,7 +120,6 @@ test("an aborted waiter rejects promptly, without waiting out the holder", async
 	const controller = new AbortController();
 	const queued = queue.acquire(controller.signal);
 	await tick();
-	assert.equal(queue.waiting, 1);
 
 	controller.abort(new Error("Esc"));
 	// Rejects while the first slot is still held: no dependency on the holder.
@@ -180,7 +167,6 @@ test("an aborted waiter never lets the next one overtake the live holder", async
 	assert.equal(overlapped, false, "two slots were never held at once");
 	assert.deepEqual(order, ["holder:start", "holder:end", "behind:start"]);
 	assert.equal(queue.busy, false);
-	assert.equal(queue.waiting, 0);
 });
 
 test("no abort listener survives an acquire, in either outcome", async () => {

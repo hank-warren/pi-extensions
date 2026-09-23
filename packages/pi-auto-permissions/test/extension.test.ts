@@ -22,14 +22,6 @@ import { initTheme } from "@earendil-works/pi-coding-agent";
 import autoPermissionsExtension from "../index.ts";
 import { builtinTool, createCustomSelectorHarness, createMockContext, createMockPi } from "../../../test/support/mock-pi.ts";
 
-type ToolExecute = (
-	toolCallId: string,
-	params: Record<string, unknown>,
-	signal: AbortSignal | undefined,
-	onUpdate: undefined,
-	ctx: unknown,
-) => Promise<{ content: Array<{ text: string }>; details: { success?: boolean; command?: string } }>;
-
 type EventHandler = (...args: unknown[]) => unknown;
 
 type BlockResult = { block: true; reason: string } | undefined;
@@ -70,8 +62,8 @@ interface Display {
 	detail?: string;
 }
 
-// The guarded bash renderer decorates Pi's native one, which reads the global
-// theme rather than the one it is handed.
+// The pi-tui components the settings and approval dialogs render read the
+// global theme rather than the one they are handed.
 initTheme();
 
 const PRELOAD_CONFIG_ENV = process.env.PI_AUTO_PERMISSIONS_CONFIG;
@@ -83,13 +75,6 @@ const GUARDED_RULE = {
 	level: "guarded",
 	group: "git",
 	label: "Git push",
-};
-const CONVENTION_RULE = {
-	pattern: "^npm install",
-	level: "convention",
-	group: "npm",
-	label: "Package install",
-	message: "Use npm ci in this repository.",
 };
 
 function verdictText(decision: "approve" | "revise" | "ask_user", reason: string): string {
@@ -111,22 +96,6 @@ const PLAIN_THEME = {
 	fg: (_role: string, text: string) => text,
 	bold: (text: string) => text,
 };
-
-/**
- * The theme the guarded bash `renderCall` receives. Permissive because the
- * native renderer this one decorates may reach for any theme helper; every one
- * of them here answers with the text it was handed, so a rendered row is
- * readable as plain strings.
- */
-const RENDER_THEME = new Proxy(
-	{},
-	{
-		get(_target, property) {
-			if (property === "fg") return (_role: string, text: string) => text;
-			return (...args: unknown[]) => args.find((value) => typeof value === "string") ?? "";
-		},
-	},
-);
 
 function decodeDisplay(value: unknown): Display {
 	if (value === undefined) return { state: "cleared", detail: undefined };
@@ -177,15 +146,10 @@ function digitForLabel(rendered: readonly string[], label: string): string {
  * own `custom` driver for a *different* dialog and still want the approval
  * prompt answered the usual way.
  */
-function answerOptionSelector(
-	factory: unknown,
-	harness: Harness,
-	onPrompt?: (harness: Harness) => void,
-): unknown {
+function answerOptionSelector(factory: unknown, harness: Harness): unknown {
 	const selector = createCustomSelectorHarness(factory, 100);
 	const rendered = selector.render(100);
 	harness.prompts.push(rendered);
-	onPrompt?.(harness);
 	const answer = harness.answers.shift();
 	selector.handleInput(answer === undefined ? "\u001b" : digitForLabel(rendered, answer));
 	return selector.result;
@@ -216,7 +180,6 @@ const MENU_ROW = {
 	timeout: 3,
 	systemPrompt: 4,
 	recentDenials: 5,
-	standingApprovals: 6,
 } as const;
 
 /** Resolve with the promise's value, or the sentinel while it is still pending. */
@@ -250,14 +213,11 @@ interface SetupOptions {
 	completeSimple?: GuardianScript;
 	/** Replaces the OptionSelector driver, for prompts that are not selectors. */
 	custom?: (factory: unknown, harness: Harness) => Promise<unknown>;
-	/** Runs while an approval prompt is on screen, before it is answered. */
-	onPrompt?: (harness: Harness) => void;
 }
 
 interface Harness {
 	configPath: string;
 	denialLogPath: string;
-	standingApprovalsPath: string;
 	mock: ReturnType<typeof createMockPi>;
 	context: ReturnType<typeof createMockContext>;
 	ctx: never;
@@ -269,16 +229,11 @@ interface Harness {
 	answers: string[];
 	branch: unknown[];
 	customCalls: number;
-	/** Every `context.invalidate` the guarded bash renderer was asked to run. */
-	invalidations: string[];
 	sessionStart(): Promise<void>;
 	sessionShutdown(): Promise<void>;
 	toolCall(command: string, toolCallId?: string): Promise<BlockResult>;
-	requestOverride(command: string, reason: string): ReturnType<ToolExecute>;
 	settingsCommand(args?: string): Promise<void>;
-	renderToolRow(toolCallId: string, command: string): string[];
 	denials(): DenialLine[];
-	standingApprovals(): Array<{ gate: { label: string; group: string }; command: string; reason: string; project: string }>;
 	overrideEntries(): Array<{ seq: number; overrides: Array<Record<string, unknown>> }>;
 }
 
@@ -309,14 +264,10 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 	const branch: unknown[] = [];
 	const script = options.completeSimple ?? (() => assistantResponse(verdictText("approve", "scripted")));
 
-	const invalidations: string[] = [];
-	const toolRowState = new Map<string, Record<string, unknown>>();
-
 	const mock = createMockPi({ activeTools: ["bash"], allTools: [builtinTool("bash")] });
 	const harness: Harness = {
 		configPath,
 		denialLogPath: join(dir, "denials.jsonl"),
-		standingApprovalsPath: join(dir, "standing-approvals.jsonl"),
 		mock,
 		context: undefined as never,
 		calls,
@@ -326,7 +277,6 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 		answers,
 		branch,
 		customCalls: 0,
-		invalidations,
 		ctx: undefined as never,
 		async sessionStart() {
 			await mock.events.get("session_start")?.[0]?.({ reason: "startup" }, harness.ctx);
@@ -339,34 +289,10 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 			assert.ok(handler, "the extension registers a tool_call handler");
 			return (await handler({ toolName: "bash", toolCallId, input: { command } }, harness.ctx)) as BlockResult;
 		},
-		requestOverride(command: string, reason: string) {
-			const execute = mock.tools.find((tool) => tool.name === "request_override")?.execute as
-				| ToolExecute
-				| undefined;
-			assert.ok(execute, "request_override must be registered");
-			return execute("override-1", { command, reason }, undefined, undefined, harness.ctx);
-		},
 		async settingsCommand(args = "") {
 			const command = mock.commands.get("auto-permissions");
 			assert.ok(command, "the extension registers /auto-permissions");
 			await command.handler(args, harness.ctx);
-		},
-		renderToolRow(toolCallId: string, command: string) {
-			const tool = mock.tools.find((candidate) => candidate.name === "bash");
-			assert.ok(tool, "toolRow placement registers a guarded bash tool");
-			const renderCall = tool.renderCall as (
-				args: unknown,
-				theme: unknown,
-				context: unknown,
-			) => { render(width: number): string[] };
-			const state = toolRowState.get(toolCallId) ?? {};
-			toolRowState.set(toolCallId, state);
-			const component = renderCall({ command }, RENDER_THEME, {
-				toolCallId,
-				state,
-				invalidate: () => invalidations.push(toolCallId),
-			});
-			return component.render(120);
 		},
 		denials() {
 			if (!existsSync(harness.denialLogPath)) return [];
@@ -374,13 +300,6 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 				.split("\n")
 				.filter((line) => line.trim())
 				.map((line) => JSON.parse(line) as DenialLine);
-		},
-		standingApprovals() {
-			if (!existsSync(harness.standingApprovalsPath)) return [];
-			return readFileSync(harness.standingApprovalsPath, "utf8")
-				.split("\n")
-				.filter((line) => line.trim())
-				.map((line) => JSON.parse(line));
 		},
 		overrideEntries() {
 			return mock.entries
@@ -423,7 +342,7 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 		custom: async (factory: unknown) => {
 			harness.customCalls += 1;
 			if (options.custom) return options.custom(factory, harness);
-			return answerOptionSelector(factory, harness, options.onPrompt);
+			return answerOptionSelector(factory, harness);
 		},
 	});
 	harness.context = context;
@@ -456,7 +375,7 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 }
 
 test("1 · a command no rule matches runs without calling the reviewer", async () => {
-	await withExtension({ rules: [GUARDED_RULE, CONVENTION_RULE] }, async (harness) => {
+	await withExtension({ rules: [GUARDED_RULE] }, async (harness) => {
 		await harness.sessionStart();
 
 		assert.equal(await harness.toolCall("echo hello"), undefined);
@@ -467,10 +386,9 @@ test("1 · a command no rule matches runs without calling the reviewer", async (
 	});
 });
 
-test("2 · a deny rule wins over convention and guarded rules that matched earlier in config order", async () => {
+test("2 · a deny rule wins over a guarded rule that matched earlier in config order", async () => {
 	const rules = [
 		{ pattern: "danger", level: "guarded", group: "first", label: "Guarded first" },
-		{ pattern: "danger", level: "convention", group: "second", label: "Convention second", message: "Use the wrapper." },
 		{ pattern: "danger", level: "deny", group: "third", label: "Deny last", message: "Never run this." },
 	];
 	await withExtension({ rules }, async (harness) => {
@@ -494,29 +412,26 @@ test("2 · a deny rule wins over convention and guarded rules that matched earli
 	});
 });
 
-test("3 · a convention block activates request_override, and an allowed override lets the same command through", async () => {
-	await withExtension({ rules: [CONVENTION_RULE] }, async (harness) => {
+test("3 · a legacy convention rule blocks as deny without review, and trusted-ops cannot lift it", async () => {
+	const rules = [{
+		pattern: "^npm install",
+		level: "convention",
+		group: "npm",
+		label: "Package install",
+		message: "Use npm ci in this repository.",
+	}];
+	await withExtension({ rules, trustedOps: ["npm"], projectTrusted: true }, async (harness) => {
 		await harness.sessionStart();
-		assert.deepEqual(harness.mock.setActiveToolsCalls, [], "the override tool stays out of the active set until it is useful");
 
 		const blocked = await harness.toolCall("npm install left-pad");
 		assert.ok(blocked?.block);
-		assert.match(blocked.reason, /^Convention violation: Package install/u);
-		assert.match(blocked.reason, /Use npm ci in this repository\./u);
-		assert.match(blocked.reason, /call `request_override` with the exact command/u);
+		assert.match(blocked.reason, /^Blocked by policy: Package install/u);
+		assert.match(blocked.reason, /This is a deny rule/u);
 		assert.equal(harness.denied.length, 1);
-		assert.equal(harness.denied[0].decisionSource, "convention");
-		assert.deepEqual(harness.mock.setActiveToolsCalls, [["bash", "request_override"]]);
-		assert.deepEqual(harness.calls, [], "a convention rule never reaches the guardian");
-
-		harness.answers.push("Allow for this session");
-		const granted = await harness.requestOverride("npm install left-pad", "vendored package, npm ci cannot see it");
-		assert.equal(granted.details.success, true);
-		assert.equal(granted.details.command, "npm install left-pad");
-		assert.match(harness.prompts[0].join("\n"), /Convention override: Package install/u);
-
-		assert.equal(await harness.toolCall("npm install left-pad"), undefined);
-		assert.equal(harness.denied.length, 1, "the allowed command records no second denial");
+		assert.equal(harness.denied[0].decisionSource, "deny");
+		assert.deepEqual(harness.calls, [], "a legacy convention rule never reaches the guardian");
+		assert.deepEqual(harness.mock.setActiveToolsCalls, []);
+		assert.equal(harness.mock.tools.some((tool) => tool.name === "request_override"), false);
 	});
 });
 
@@ -754,7 +669,7 @@ test("12 · a second guarded command in the same turn shows queued before it sho
 	);
 });
 
-test("13 · a SAFE prefilter approves without a full review, and a failing prefilter falls through to one", async () => {
+test("13 · a legacy reviewer.prefilter key is ignored", async () => {
 	await withExtension(
 		{
 			rules: [GUARDED_RULE],
@@ -766,45 +681,15 @@ test("13 · a SAFE prefilter approves without a full review, and a failing prefi
 					prefilter: true,
 				},
 			},
-			completeSimple: () => assistantResponse("SAFE"),
+			completeSimple: () => assistantResponse(verdictText("approve", "reviewed in full")),
 		},
 		async (harness) => {
 			await harness.sessionStart();
 
 			assert.equal(await harness.toolCall("git push origin main"), undefined);
-			assert.equal(harness.calls.length, 1, "SAFE short-circuits the full review");
-			assert.match(harness.calls[0].envelope, /PREFILTER MODE/u);
-			assert.equal(harness.calls[0].options.reasoning, "minimal");
-			assert.deepEqual(harness.displays, [
-				{ state: "waiting", detail: undefined },
-				{ state: "approved", detail: "prefilter" },
-			]);
-		},
-	);
-
-	await withExtension(
-		{
-			rules: [GUARDED_RULE],
-			config: {
-				reviewer: {
-					provider: GUARDIAN_MODEL.provider,
-					model: GUARDIAN_MODEL.id,
-					timeoutMs: 30_000,
-					prefilter: true,
-				},
-			},
-			completeSimple: (_call, index) => {
-				if (index === 0) throw new Error("prefilter offline");
-				return assistantResponse(verdictText("approve", "reviewed in full"));
-			},
-		},
-		async (harness) => {
-			await harness.sessionStart();
-
-			assert.equal(await harness.toolCall("git push origin main"), undefined);
-			assert.equal(harness.calls.length, 2, "a prefilter that cannot answer falls closed into the full review");
-			assert.doesNotMatch(harness.calls[1].envelope, /PREFILTER MODE/u);
-			assert.equal(harness.displays.at(-1)?.detail, "reviewed in full");
+			assert.equal(harness.calls.length, 1, "exactly one full review, no prefilter pass");
+			assert.doesNotMatch(harness.calls[0].envelope, /PREFILTER MODE/u);
+			assert.equal(harness.calls[0].options.reasoning, "low");
 		},
 	);
 });
@@ -812,7 +697,7 @@ test("13 · a SAFE prefilter approves without a full review, and a failing prefi
 test("14 · session_shutdown then session_start discards the lineage and restores the session's decisions", async () => {
 	await withExtension(
 		{
-			rules: [GUARDED_RULE, CONVENTION_RULE],
+			rules: [GUARDED_RULE],
 			completeSimple: () => assistantResponse(verdictText("approve", "fine")),
 		},
 		async (harness) => {
@@ -828,32 +713,22 @@ test("14 · session_shutdown then session_start discards the lineage and restore
 			);
 
 			await harness.sessionShutdown();
-			harness.branch.push(
-				{
-					type: "custom",
-					customType: "auto-permissions-overrides",
-					data: {
-						seq: 4,
-						overrides: [
-							{
-								seq: 3,
-								gateLabel: "Git push",
-								command: "git push --force origin main",
-								reviewerReason: "force push rewrites history",
-								choice: "allow",
-							},
-						],
-					},
+			harness.branch.push({
+				type: "custom",
+				customType: "auto-permissions-overrides",
+				data: {
+					seq: 4,
+					overrides: [
+						{
+							seq: 3,
+							gateLabel: "Git push",
+							command: "git push --force origin main",
+							reviewerReason: "force push rewrites history",
+							choice: "allow",
+						},
+					],
 				},
-				{
-					type: "message",
-					message: {
-						role: "toolResult",
-						toolName: "request_override",
-						details: { success: true, command: "npm install left-pad" },
-					},
-				},
-			);
+			});
 			await harness.sessionStart();
 
 			assert.equal(await harness.toolCall("git push origin main", "call-3"), undefined);
@@ -866,189 +741,17 @@ test("14 · session_shutdown then session_start discards the lineage and restore
 				harness.calls[2].envelope,
 				/USER \(permission override\): allowed gated command \\"git push --force origin main\\"/u,
 			);
-
-			assert.equal(
-				await harness.toolCall("npm install left-pad", "call-4"),
-				undefined,
-				"the session's granted convention overrides are rebuilt from the branch",
-			);
 			assert.deepEqual(harness.denied, []);
 		},
 	);
 });
 
 /**
- * Stage A2: the surfaces the widget-placement cases above do not reach — the
- * tool-row renderer, the standing-approval ledger, and the `/auto-permissions`
- * command.
+ * Stage A2: the surface the cases above do not reach — the
+ * `/auto-permissions` command.
  */
 
 const SETUP_HANDOFF = "Use the auto-permissions-setup skill to set up my Auto Permissions policy.";
-const ALLOW_STANDING = "Allow and stop asking about comparable commands";
-
-function stripAnsi(lines: readonly string[]): string {
-	return lines.join("\n").replace(/\u001b\[[0-9;]*m/gu, "");
-}
-
-test("15 · toolRow placement renders every guardian status under the bash call, and clears it on cancel", async () => {
-	const controller = new AbortController();
-	let releaseFirst: (() => void) | undefined;
-	let firstCalled: (() => void) | undefined;
-	const firstReached = new Promise<void>((resolve) => {
-		firstCalled = resolve;
-	});
-	let askUserRow = "";
-	await withExtension(
-		{
-			rules: [GUARDED_RULE],
-			config: { ui: { placement: "toolRow" } },
-			signal: controller.signal,
-			onPrompt: (harness) => {
-				askUserRow = stripAnsi(harness.renderToolRow("call-3", "git push origin qa"));
-			},
-			completeSimple: (_call, index) => {
-				if (index === 1) return assistantResponse(verdictText("revise", "push to a branch, not main"));
-				if (index === 2) return assistantResponse(verdictText("ask_user", "force push rewrites history"));
-				if (index === 3) {
-					controller.abort();
-					return assistantResponse(verdictText("approve", "too late"));
-				}
-				return new Promise((resolve) => {
-					releaseFirst = () => resolve(assistantResponse(verdictText("approve", "the user asked for this push")));
-					firstCalled?.();
-				});
-			},
-		},
-		async (harness) => {
-			await harness.sessionStart();
-			assert.ok(
-				harness.mock.tools.some((tool) => tool.name === "bash"),
-				"toolRow placement re-registers bash so the review status can render in its row",
-			);
-
-			// Priming the row is what registers its invalidator, exactly as Pi
-			// rendering the call for the first time would.
-			assert.doesNotMatch(
-				stripAnsi(harness.renderToolRow("call-1", "git push origin main")),
-				/guardian running/u,
-				"an un-reviewed call renders the native row alone",
-			);
-
-			const first = harness.toolCall("git push origin main", "call-1");
-			await firstReached;
-			assert.deepEqual(harness.invalidations, ["call-1"], "the row is repainted when its state changes");
-			assert.match(
-				stripAnsi(harness.renderToolRow("call-1", "git push origin main")),
-				/◌ guardian running · Git push · guardian\/reviewer-1/u,
-			);
-
-			// A second guarded command while the first review holds the queue: the
-			// row must say it is queued, in the same words the widget uses, and
-			// not fall through to the blocked branch.
-			const second = harness.toolCall("git push origin dev", "call-2");
-			assert.match(
-				stripAnsi(harness.renderToolRow("call-2", "git push origin dev")),
-				/⋯ queued behind another review · Git push/u,
-			);
-
-			releaseFirst?.();
-			assert.equal(await first, undefined);
-			const approved = stripAnsi(harness.renderToolRow("call-1", "git push origin main"));
-			assert.match(approved, /✓ approved · Git push/u);
-			assert.match(approved, /the user asked for this push/u);
-			assert.match(approved, /\$ git push origin main/u, "the native call render is kept above the status");
-
-			const revised = await second;
-			assert.ok(revised?.block);
-			const reviseRow = stripAnsi(harness.renderToolRow("call-2", "git push origin dev"));
-			assert.match(reviseRow, /↻ revision requested · Git push/u);
-			assert.match(reviseRow, /push to a branch, not main/u);
-
-			harness.answers.push("Block");
-			const asked = await harness.toolCall("git push origin qa", "call-3");
-			assert.deepEqual(asked, { block: true, reason: "Blocked by user" });
-			assert.match(askUserRow, /\? approval required · Git push/u);
-			assert.match(
-				stripAnsi(harness.renderToolRow("call-3", "git push origin qa")),
-				/✗ blocked · Git push/u,
-			);
-
-			// Cancellation is the path that takes the row away again.
-			const cancelled = await harness.toolCall("git push origin hotfix", "call-4");
-			assert.deepEqual(cancelled, { block: true, reason: "Auto Permissions review cancelled" });
-			assert.doesNotMatch(
-				stripAnsi(harness.renderToolRow("call-4", "git push origin hotfix")),
-				/guardian running|approved|blocked/u,
-			);
-
-			assert.deepEqual(harness.displays, [], "with a tool row there is nothing above the editor");
-		},
-	);
-});
-
-test("16 · a standing approval is written to the ledger, kept out of the session entry, and reloaded at session_start", async () => {
-	await withExtension(
-		{
-			rules: [GUARDED_RULE],
-			completeSimple: (_call, index) =>
-				assistantResponse(
-					index === 0
-						? verdictText("ask_user", "force push rewrites history")
-						: verdictText("approve", "covered by the standing approval"),
-				),
-		},
-		async (harness) => {
-			await harness.sessionStart();
-
-			harness.answers.push(ALLOW_STANDING);
-			assert.equal(await harness.toolCall("git push --force origin main", "call-1"), undefined);
-
-			const ledger = harness.standingApprovals();
-			assert.equal(ledger.length, 1);
-			assert.deepEqual(ledger[0].gate, { label: "Git push", group: "git" });
-			assert.equal(ledger[0].command, "git push --force origin main");
-			assert.equal(ledger[0].reason, "force push rewrites history");
-			assert.deepEqual(
-				harness.overrideEntries().at(-1)?.overrides,
-				[],
-				"ledger-backed approvals are not duplicated into the session entry",
-			);
-
-			assert.equal(await harness.toolCall("git push --force origin dev", "call-2"), undefined);
-			assert.match(
-				harness.calls[1].envelope,
-				/USER \(standing permission override, granted \d{4}-\d{2}-\d{2} in .*\): allowed gated command \\"git push --force origin main\\"/u,
-			);
-
-			await harness.sessionShutdown();
-			await harness.sessionStart();
-			assert.equal(await harness.toolCall("git push --force origin qa", "call-3"), undefined);
-			assert.match(
-				harness.calls[2].envelope,
-				/USER \(standing permission override/u,
-			);
-		},
-	);
-
-	// The other half of the invariant: an infrastructure failure is not a
-	// guardian judgment, so it never offers to stop asking.
-	await withExtension(
-		{
-			rules: [GUARDED_RULE],
-			completeSimple: () => {
-				throw new Error("reviewer offline");
-			},
-		},
-		async (harness) => {
-			await harness.sessionStart();
-
-			harness.answers.push("Block");
-			await harness.toolCall("git push origin main");
-			assert.doesNotMatch(harness.prompts[0].join("\n"), /stop asking about comparable commands/u);
-			assert.deepEqual(harness.standingApprovals(), []);
-		},
-	);
-});
 
 test("17 · /auto-permissions refuses to open over an invalid config, opens over a valid one, and hands setup to the skill", async () => {
 	await withExtension({ rules: [GUARDED_RULE] }, async (harness) => {
@@ -1315,7 +1018,7 @@ test("21 · the review widget clears itself after ui.resultDisplayMs, and a shut
 	);
 });
 
-test("22 · the settings menu reverts a failed save and revokes a standing approval", async () => {
+test("22 · the settings menu reverts a failed save", async () => {
 	await withExtension(
 		{
 			rules: [GUARDED_RULE],
@@ -1347,59 +1050,6 @@ test("22 · the settings menu reverts a failed save and revokes a standing appro
 				saved.enabled,
 				undefined,
 				"the failed edit was reverted: a still-disabled `settings` would have written enabled: false",
-			);
-		},
-	);
-
-	let settingsPhase = false;
-	await withExtension(
-		{
-			rules: [GUARDED_RULE],
-			completeSimple: (_call, index) =>
-				assistantResponse(
-					index === 0
-						? verdictText("ask_user", "force push rewrites history")
-						: verdictText("approve", "covered by the standing approval"),
-				),
-			custom: async (factory, harness) => {
-				if (!settingsPhase) return answerOptionSelector(factory, harness);
-				settingsPhase = false;
-				const menu = buildMenuComponent(factory, () => {});
-				for (let row = 0; row < MENU_ROW.standingApprovals; row += 1) menu.handleInput(KEY_DOWN);
-				menu.handleInput(KEY_ENTER);
-				assert.match(menu.render(100).join("\n"), /Standing approvals/u);
-				menu.handleInput(KEY_ENTER);
-				assert.match(menu.render(100).join("\n"), /Revoke standing approval\?/u);
-				menu.handleInput(KEY_ENTER); // "Revoke"
-				return undefined;
-			},
-		},
-		async (harness) => {
-			await harness.sessionStart();
-
-			harness.answers.push(ALLOW_STANDING);
-			assert.equal(await harness.toolCall("git push --force origin main", "call-1"), undefined);
-			assert.equal(harness.standingApprovals().length, 1);
-
-			assert.equal(await harness.toolCall("git push --force origin dev", "call-2"), undefined);
-			const lineageSessionId = harness.calls[1].options.sessionId;
-			assert.match(harness.calls[1].envelope, /USER \(standing permission override/u);
-
-			settingsPhase = true;
-			await harness.settingsCommand();
-			assert.deepEqual(harness.standingApprovals(), [], "the ledger entry is gone");
-			assert.equal(harness.context.notifications.at(-1)?.message, "Standing approval revoked.");
-
-			assert.equal(await harness.toolCall("git push --force origin qa", "call-3"), undefined);
-			assert.doesNotMatch(
-				harness.calls[2].envelope,
-				/USER \(standing permission override/u,
-				"the revoked approval stops being evidence",
-			);
-			assert.notEqual(
-				harness.calls[2].options.sessionId,
-				lineageSessionId,
-				"the reviewer conversation that saw the approval is not continued",
 			);
 		},
 	);

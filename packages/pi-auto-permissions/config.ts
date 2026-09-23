@@ -34,14 +34,6 @@ export interface AutoPermissionsConfig {
     model: string;
     reasoningEffort: ReasoningEffort;
     timeoutMs: number;
-    /**
-     * Two-stage review: a stateless single-token SAFE/REVIEW pass at minimal
-     * reasoning before the full lineage review. SAFE approves; REVIEW and
-     * every parse or infrastructure failure fall through to the full review
-     * (fail closed). Opt-in until evaluation-log data justifies default-on;
-     * recommended together with `reviewAllShell`.
-     */
-    prefilter: boolean;
   };
   systemPrompt: string;
   systemPromptSource: SystemPromptSource;
@@ -64,12 +56,6 @@ export interface AutoPermissionsConfig {
      * authorization. Naming the types keeps that an explicit choice.
      */
     userMessageTypes: string[];
-    /** Per-record caps at evidence creation; 0 disables. User records are never truncated. */
-    toolRecordMaxChars: number;
-    assistantRecordMaxChars: number;
-    compactionRecordMaxChars: number;
-    /** On full envelope rebuilds, collapse all but the newest N tool records; 0 disables. */
-    fullRebuildKeepToolRecords: number;
   };
   evaluationLog: {
     enabled: boolean;
@@ -81,11 +67,6 @@ export interface AutoPermissionsConfig {
   };
   /** Every non-approved outcome, for the Recent denials view. Default on. */
   denialLog: {
-    enabled: boolean;
-    path: string;
-  };
-  /** User-granted comparable-command approvals, shared across projects. Default on. */
-  standingApprovals: {
     enabled: boolean;
     path: string;
   };
@@ -118,9 +99,10 @@ export interface AutoPermissionsConfig {
   ui: {
     enabled: boolean;
     resultDisplayMs: number;
-    placement: "widget" | "toolRow";
   };
 }
+
+export type ReviewerConfig = NonNullable<AutoPermissionsConfig["reviewer"]>;
 
 interface RuleInput {
   pattern?: unknown;
@@ -157,6 +139,33 @@ function optionalString(value: unknown, name: string): string | undefined {
   return value.trim();
 }
 
+function objectBlock(value: unknown, name: string): Record<string, unknown> | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${name} must be an object`);
+  return value as Record<string, unknown>;
+}
+
+function stringList(value: unknown, name: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string" || !entry.trim())) {
+    throw new Error(`${name} must be an array of non-empty strings`);
+  }
+  return [...new Set((value as string[]).map((entry) => entry.trim()))];
+}
+
+function boundedInteger(value: unknown, fallback: number, min: number, max: number, name: string): number {
+  const v = value === undefined ? fallback : value;
+  if (!Number.isInteger(v) || Number(v) < min || Number(v) > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}`);
+  }
+  return Number(v);
+}
+
+function optionalBoolean(value: unknown, name: string): boolean | undefined {
+  if (value !== undefined && typeof value !== "boolean") throw new Error(`${name} must be boolean`);
+  return value as boolean | undefined;
+}
+
 function compileRule(value: unknown, index: number): Gate {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`rules[${index}] must be an object`);
@@ -168,13 +177,15 @@ function compileRule(value: unknown, index: number): Gate {
   if (!pattern || !group || !label) throw new Error(`rules[${index}] requires pattern, group, and label`);
   const flags = input.flags === undefined ? "i" : input.flags;
   if (typeof flags !== "string") throw new Error(`rules[${index}].flags must be a string`);
-  const level: GateLevel = input.level === undefined ? "guarded" : input.level as GateLevel;
-  if (level !== "guarded" && level !== "convention" && level !== "deny") {
-    throw new Error(`rules[${index}].level must be guarded, convention, or deny`);
+  const rawLevel = input.level === undefined ? "guarded" : input.level;
+  if (rawLevel !== "guarded" && rawLevel !== "deny" && rawLevel !== "convention") {
+    throw new Error(`rules[${index}].level must be guarded or deny`);
   }
+  // The retired convention level blocked without review; deny keeps that.
+  const level: GateLevel = rawLevel === "convention" ? "deny" : rawLevel;
   const message = optionalString(input.message, `rules[${index}].message`);
-  if ((level === "convention" || level === "deny") && !message) {
-    throw new Error(`rules[${index}].message is required for ${level} rules`);
+  if (level === "deny" && !message) {
+    throw new Error(`rules[${index}].message is required for deny rules`);
   }
 
   return {
@@ -216,6 +227,11 @@ export function expandRules(rawRules: readonly unknown[], defaults: readonly Gat
   return rules;
 }
 
+function resolveConfigRelativePath(value: string, configFilePath: string): string {
+  const expanded = value.startsWith("~/") ? join(homedir(), value.slice(2)) : value;
+  return isAbsolute(expanded) ? expanded : resolve(dirname(configFilePath), expanded);
+}
+
 function resolvePrompt(
   raw: Record<string, unknown>,
   path: string,
@@ -226,131 +242,54 @@ function resolvePrompt(
   if (inline) return { prompt: inline, source: { kind: "inline" } };
   if (!file) return { prompt: AUTO_PERMISSIONS_SYSTEM_PROMPT, source: { kind: "builtin" } };
 
-  const expanded = file.startsWith("~/") ? join(homedir(), file.slice(2)) : file;
-  const resolved = isAbsolute(expanded) ? expanded : resolve(dirname(path), expanded);
+  const resolved = resolveConfigRelativePath(file, path);
   const prompt = readFileSync(resolved, "utf8").trim();
   if (!prompt) throw new Error("systemPromptFile is empty");
   return { prompt, source: { kind: "file", path: resolved } };
 }
 
-const EVIDENCE_PRUNING_DEFAULTS = {
-  toolRecordMaxChars: 500,
-  assistantRecordMaxChars: 1000,
-  compactionRecordMaxChars: 4000,
-  fullRebuildKeepToolRecords: 60,
-} as const;
-
-function resolvePruningKnob(evidence: Record<string, unknown>, name: keyof typeof EVIDENCE_PRUNING_DEFAULTS): number {
-  const value = evidence[name];
-  if (value === undefined) return EVIDENCE_PRUNING_DEFAULTS[name];
-  if (!Number.isInteger(value) || Number(value) < 0 || Number(value) > 1_000_000) {
-    throw new Error(`reviewEvidence.${name} must be an integer between 0 and 1000000`);
-  }
-  return Number(value);
-}
-
 function resolveReviewEvidence(raw: Record<string, unknown>): AutoPermissionsConfig["reviewEvidence"] {
-  if (raw.reviewEvidence === undefined) {
-    return {
-      projectInstructions: false,
-      userAnswerTools: [],
-      userMessageTypes: [],
-      ...EVIDENCE_PRUNING_DEFAULTS,
-    };
-  }
-  if (!raw.reviewEvidence || typeof raw.reviewEvidence !== "object" || Array.isArray(raw.reviewEvidence)) {
-    throw new Error("reviewEvidence must be an object");
-  }
-  const evidence = raw.reviewEvidence as Record<string, unknown>;
-  if (evidence.projectInstructions !== undefined && typeof evidence.projectInstructions !== "boolean") {
-    throw new Error("reviewEvidence.projectInstructions must be boolean");
-  }
-  const rawTools = evidence.userAnswerTools === undefined ? [] : evidence.userAnswerTools;
-  if (!Array.isArray(rawTools) || rawTools.some((tool) => typeof tool !== "string" || !tool.trim())) {
-    throw new Error("reviewEvidence.userAnswerTools must be an array of non-empty strings");
-  }
-  const rawMessageTypes = evidence.userMessageTypes === undefined ? [] : evidence.userMessageTypes;
-  if (
-    !Array.isArray(rawMessageTypes)
-    || rawMessageTypes.some((type) => typeof type !== "string" || !type.trim())
-  ) {
-    throw new Error("reviewEvidence.userMessageTypes must be an array of non-empty strings");
-  }
+  const evidence = objectBlock(raw.reviewEvidence, "reviewEvidence") ?? {};
+  const projectInstructions = optionalBoolean(evidence.projectInstructions, "reviewEvidence.projectInstructions");
+  const userAnswerTools = stringList(evidence.userAnswerTools, "reviewEvidence.userAnswerTools");
+  const userMessageTypes = stringList(evidence.userMessageTypes, "reviewEvidence.userMessageTypes");
   return {
-    projectInstructions: evidence.projectInstructions === true,
-    userAnswerTools: [...new Set((rawTools as string[]).map((tool) => tool.trim()))],
-    userMessageTypes: [...new Set((rawMessageTypes as string[]).map((type) => type.trim()))],
-    toolRecordMaxChars: resolvePruningKnob(evidence, "toolRecordMaxChars"),
-    assistantRecordMaxChars: resolvePruningKnob(evidence, "assistantRecordMaxChars"),
-    compactionRecordMaxChars: resolvePruningKnob(evidence, "compactionRecordMaxChars"),
-    fullRebuildKeepToolRecords: resolvePruningKnob(evidence, "fullRebuildKeepToolRecords"),
+    projectInstructions: projectInstructions === true,
+    userAnswerTools,
+    userMessageTypes,
   };
 }
 
-function resolveEvaluationLog(
-  raw: Record<string, unknown>,
-  configFilePath: string,
-): AutoPermissionsConfig["evaluationLog"] {
-  const defaultPath = resolve(dirname(configFilePath), "review-evals.jsonl");
-  if (raw.evaluationLog === undefined) return { enabled: false, path: defaultPath };
-  if (!raw.evaluationLog || typeof raw.evaluationLog !== "object" || Array.isArray(raw.evaluationLog)) {
-    throw new Error("evaluationLog must be an object");
-  }
-  const evaluationLog = raw.evaluationLog as Record<string, unknown>;
-  if (evaluationLog.enabled !== undefined && typeof evaluationLog.enabled !== "boolean") {
-    throw new Error("evaluationLog.enabled must be boolean");
-  }
-  const configuredPath = optionalString(evaluationLog.path, "evaluationLog.path");
-  if (!configuredPath) return { enabled: evaluationLog.enabled === true, path: defaultPath };
-  const expanded = configuredPath.startsWith("~/") ? join(homedir(), configuredPath.slice(2)) : configuredPath;
-  return {
-    enabled: evaluationLog.enabled === true,
-    path: isAbsolute(expanded) ? expanded : resolve(dirname(configFilePath), expanded),
-  };
-}
+type SidecarKey = "evaluationLog" | "usageLog" | "denialLog";
 
-function resolveUsageLog(
+function resolveSidecar(
   raw: Record<string, unknown>,
+  key: SidecarKey,
+  fileName: string,
+  defaultEnabled: boolean,
   configFilePath: string,
-): AutoPermissionsConfig["usageLog"] {
-  const defaultPath = resolve(dirname(configFilePath), "usage.jsonl");
-  if (raw.usageLog === undefined) return { enabled: true, path: defaultPath };
-  if (!raw.usageLog || typeof raw.usageLog !== "object" || Array.isArray(raw.usageLog)) {
-    throw new Error("usageLog must be an object");
-  }
-  const usageLog = raw.usageLog as Record<string, unknown>;
-  if (usageLog.enabled !== undefined && typeof usageLog.enabled !== "boolean") {
-    throw new Error("usageLog.enabled must be boolean");
-  }
-  const enabled = usageLog.enabled !== false;
-  const configuredPath = optionalString(usageLog.path, "usageLog.path");
-  if (!configuredPath) return { enabled, path: defaultPath };
-  const expanded = configuredPath.startsWith("~/") ? join(homedir(), configuredPath.slice(2)) : configuredPath;
-  return { enabled, path: isAbsolute(expanded) ? expanded : resolve(dirname(configFilePath), expanded) };
+): { enabled: boolean; path: string } {
+  const defaultPath = resolve(dirname(configFilePath), fileName);
+  const block = objectBlock(raw[key], key);
+  if (!block) return { enabled: defaultEnabled, path: defaultPath };
+  const enabled = optionalBoolean(block.enabled, `${key}.enabled`) ?? defaultEnabled;
+  const configured = optionalString(block.path, `${key}.path`);
+  return { enabled, path: configured ? resolveConfigRelativePath(configured, configFilePath) : defaultPath };
 }
 
 const GUARDIAN_POLICY_KEYS = ["environment", "allow", "softDeny", "hardDeny"] as const;
 
 function resolveGuardianPolicy(raw: Record<string, unknown>): AutoPermissionsConfig["guardianPolicy"] {
   const empty = { environment: [], allow: [], softDeny: [], hardDeny: [] };
-  if (raw.guardianPolicy === undefined) return empty;
-  if (!raw.guardianPolicy || typeof raw.guardianPolicy !== "object" || Array.isArray(raw.guardianPolicy)) {
-    throw new Error("guardianPolicy must be an object");
-  }
-  const policy = raw.guardianPolicy as Record<string, unknown>;
+  const policy = objectBlock(raw.guardianPolicy, "guardianPolicy");
+  if (!policy) return empty;
   for (const key of Object.keys(policy)) {
     if (!(GUARDIAN_POLICY_KEYS as readonly string[]).includes(key)) {
       throw new Error(`guardianPolicy.${key} is not a recognized list (use environment, allow, softDeny, hardDeny)`);
     }
   }
-  const resolveList = (key: typeof GUARDIAN_POLICY_KEYS[number]): string[] => {
-    const value = policy[key];
-    if (value === undefined) return [];
-    if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string" || !entry.trim())) {
-      throw new Error(`guardianPolicy.${key} must be an array of non-empty strings`);
-    }
-    return [...new Set((value as string[]).map((entry) => entry.trim()))];
-  };
+  const resolveList = (key: typeof GUARDIAN_POLICY_KEYS[number]): string[] =>
+    stringList(policy[key], `guardianPolicy.${key}`);
   return {
     environment: resolveList("environment"),
     allow: resolveList("allow"),
@@ -359,72 +298,16 @@ function resolveGuardianPolicy(raw: Record<string, unknown>): AutoPermissionsCon
   };
 }
 
-function resolveDenialLog(
-  raw: Record<string, unknown>,
-  configFilePath: string,
-): AutoPermissionsConfig["denialLog"] {
-  const defaultPath = resolve(dirname(configFilePath), "denials.jsonl");
-  if (raw.denialLog === undefined) return { enabled: true, path: defaultPath };
-  if (!raw.denialLog || typeof raw.denialLog !== "object" || Array.isArray(raw.denialLog)) {
-    throw new Error("denialLog must be an object");
-  }
-  const denialLog = raw.denialLog as Record<string, unknown>;
-  if (denialLog.enabled !== undefined && typeof denialLog.enabled !== "boolean") {
-    throw new Error("denialLog.enabled must be boolean");
-  }
-  const enabled = denialLog.enabled !== false;
-  const configuredPath = optionalString(denialLog.path, "denialLog.path");
-  if (!configuredPath) return { enabled, path: defaultPath };
-  const expanded = configuredPath.startsWith("~/") ? join(homedir(), configuredPath.slice(2)) : configuredPath;
-  return { enabled, path: isAbsolute(expanded) ? expanded : resolve(dirname(configFilePath), expanded) };
-}
-
-function resolveStandingApprovals(
-  raw: Record<string, unknown>,
-  configFilePath: string,
-): AutoPermissionsConfig["standingApprovals"] {
-  const defaultPath = resolve(dirname(configFilePath), "standing-approvals.jsonl");
-  if (raw.standingApprovals === undefined) return { enabled: true, path: defaultPath };
-  if (!raw.standingApprovals || typeof raw.standingApprovals !== "object" || Array.isArray(raw.standingApprovals)) {
-    throw new Error("standingApprovals must be an object");
-  }
-  const standingApprovals = raw.standingApprovals as Record<string, unknown>;
-  if (standingApprovals.enabled !== undefined && typeof standingApprovals.enabled !== "boolean") {
-    throw new Error("standingApprovals.enabled must be boolean");
-  }
-  const enabled = standingApprovals.enabled !== false;
-  const configuredPath = optionalString(standingApprovals.path, "standingApprovals.path");
-  if (!configuredPath) return { enabled, path: defaultPath };
-  const expanded = configuredPath.startsWith("~/") ? join(homedir(), configuredPath.slice(2)) : configuredPath;
-  return { enabled, path: isAbsolute(expanded) ? expanded : resolve(dirname(configFilePath), expanded) };
-}
-
 function resolveUi(raw: Record<string, unknown>): AutoPermissionsConfig["ui"] {
-  if (raw.ui === undefined) return { enabled: true, resultDisplayMs: 2500, placement: "widget" };
-  if (!raw.ui || typeof raw.ui !== "object" || Array.isArray(raw.ui)) {
-    throw new Error("ui must be an object");
-  }
-  const ui = raw.ui as Record<string, unknown>;
-  if (ui.enabled !== undefined && typeof ui.enabled !== "boolean") {
-    throw new Error("ui.enabled must be boolean");
-  }
-  const resultDisplayMs = ui.resultDisplayMs === undefined ? 2500 : ui.resultDisplayMs;
-  if (!Number.isInteger(resultDisplayMs) || Number(resultDisplayMs) < 0 || Number(resultDisplayMs) > 30_000) {
-    throw new Error("ui.resultDisplayMs must be an integer between 0 and 30000");
-  }
-  const placement = ui.placement ?? "widget";
-  if (placement !== "widget" && placement !== "toolRow") {
-    throw new Error("ui.placement must be widget or toolRow");
-  }
-  return { enabled: ui.enabled !== false, resultDisplayMs: Number(resultDisplayMs), placement };
+  const ui = objectBlock(raw.ui, "ui") ?? {};
+  const enabled = optionalBoolean(ui.enabled, "ui.enabled");
+  const resultDisplayMs = boundedInteger(ui.resultDisplayMs, 2500, 0, 30_000, "ui.resultDisplayMs");
+  return { enabled: enabled !== false, resultDisplayMs };
 }
 
 function resolveReviewer(raw: Record<string, unknown>): AutoPermissionsConfig["reviewer"] {
-  if (raw.reviewer === undefined) return undefined;
-  if (!raw.reviewer || typeof raw.reviewer !== "object" || Array.isArray(raw.reviewer)) {
-    throw new Error("reviewer must be an object");
-  }
-  const reviewer = raw.reviewer as Record<string, unknown>;
+  const reviewer = objectBlock(raw.reviewer, "reviewer");
+  if (!reviewer) return undefined;
   const provider = optionalString(reviewer.provider, "reviewer.provider");
   const model = optionalString(reviewer.model, "reviewer.model");
   if (!provider || !model) throw new Error("reviewer requires both provider and model");
@@ -433,32 +316,20 @@ function resolveReviewer(raw: Record<string, unknown>): AutoPermissionsConfig["r
   if (!REASONING_EFFORTS.includes(reasoningEffort)) {
     throw new Error("reviewer.reasoningEffort is invalid");
   }
-  const timeoutMs = reviewer.timeoutMs === undefined ? DEFAULT_REVIEWER_TIMEOUT_MS : reviewer.timeoutMs;
-  if (
-    !Number.isInteger(timeoutMs)
-    || Number(timeoutMs) < MIN_REVIEWER_TIMEOUT_MS
-    || Number(timeoutMs) > MAX_REVIEWER_TIMEOUT_MS
-  ) {
-    throw new Error("reviewer.timeoutMs must be an integer between 1000 and 300000");
-  }
-  if (reviewer.prefilter !== undefined && typeof reviewer.prefilter !== "boolean") {
-    throw new Error("reviewer.prefilter must be boolean");
-  }
-  return {
-    provider,
-    model,
-    reasoningEffort,
-    timeoutMs: Number(timeoutMs),
-    prefilter: reviewer.prefilter === true,
-  };
+  const timeoutMs = boundedInteger(
+    reviewer.timeoutMs,
+    DEFAULT_REVIEWER_TIMEOUT_MS,
+    MIN_REVIEWER_TIMEOUT_MS,
+    MAX_REVIEWER_TIMEOUT_MS,
+    "reviewer.timeoutMs",
+  );
+  return { provider, model, reasoningEffort, timeoutMs };
 }
 
 export function loadAutoPermissionsConfig(path = autoPermissionsConfigPath()): AutoPermissionsConfig {
   const raw = readObject(path);
-  if (raw.enabled !== undefined && typeof raw.enabled !== "boolean") throw new Error("enabled must be boolean");
-  if (raw.reviewAllShell !== undefined && typeof raw.reviewAllShell !== "boolean") {
-    throw new Error("reviewAllShell must be boolean");
-  }
+  optionalBoolean(raw.enabled, "enabled");
+  optionalBoolean(raw.reviewAllShell, "reviewAllShell");
   if (raw.rules !== undefined && !Array.isArray(raw.rules)) throw new Error("rules must be an array");
   // Absent means the built-in ruleset is active; an authored array replaces it
   // entirely unless it splices "$defaults" back in; an explicit [] gates
@@ -472,10 +343,9 @@ export function loadAutoPermissionsConfig(path = autoPermissionsConfigPath()): A
     systemPrompt: prompt.prompt,
     systemPromptSource: prompt.source,
     reviewEvidence: resolveReviewEvidence(raw),
-    evaluationLog: resolveEvaluationLog(raw, path),
-    usageLog: resolveUsageLog(raw, path),
-    denialLog: resolveDenialLog(raw, path),
-    standingApprovals: resolveStandingApprovals(raw, path),
+    evaluationLog: resolveSidecar(raw, "evaluationLog", "review-evals.jsonl", false, path),
+    usageLog: resolveSidecar(raw, "usageLog", "usage.jsonl", true, path),
+    denialLog: resolveSidecar(raw, "denialLog", "denials.jsonl", true, path),
     rules,
     reviewAllShell: raw.reviewAllShell === true,
     guardianPolicy: resolveGuardianPolicy(raw),
