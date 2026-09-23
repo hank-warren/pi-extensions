@@ -9,7 +9,6 @@ import {
   type AutoPermissionsConfig,
 } from "./config.js";
 import { resolveGuardianCompleteSimple } from "./guardian-transport.js";
-import { isOpenAICodexModel } from "./openai-codex-transport.js";
 import { detectSubagentContext } from "./subagent-context.js";
 import { appendPromptEvaluation } from "./evaluation-log.js";
 import { mergeOverrideEvidence } from "./override-evidence.js";
@@ -115,6 +114,16 @@ function createUuidV7(): string {
 
   const hex = bytes.toString("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/**
+ * Codex models are reached over a websocket session rather than plain HTTP, and
+ * the guardian has to pick that transport itself. The check is on the model's
+ * api rather than its provider id so it keeps working for a reviewer pointed at
+ * an aliased Codex login (see @hank-warren/pi-multi-login).
+ */
+export function isOpenAICodexModel(model: { api?: string }): boolean {
+  return model.api === "openai-codex-responses";
 }
 
 function reviewerSessionId(model: { api?: string }): string {

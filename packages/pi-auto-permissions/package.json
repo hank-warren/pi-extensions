@@ -50,7 +50,6 @@
     "denial-log.ts",
     "settings-menu.ts",
     "guardian-transport.ts",
-    "openai-codex-transport.ts",
     "subagent-context.ts",
     "evaluation-log.ts",
     "gates.ts",
