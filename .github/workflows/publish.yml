@@ -52,7 +52,8 @@ on:
     branches: [main]
   # Manual re-run for cases where the publish failed on infrastructure rather
   # than package content (for example an npm registry outage). It publishes
-  # whatever the tree says is ahead of npm.
+  # whatever the tree says is ahead of npm. Only a run started from main can
+  # publish; from any other ref the gate runs and the publish job is skipped.
   workflow_dispatch:
 
 permissions:
@@ -163,8 +164,9 @@ jobs:
     # normal case: code pull requests carry no version bump (see "Hold the
     # changeset" in AGENTS.md), so most merges have nothing to release.
     # workflow_dispatch always proceeds so a manual re-drive can converge
-    # whatever is outstanding.
-    if: needs.gate.outputs.releasable == 'true' || github.event_name == 'workflow_dispatch'
+    # whatever is outstanding, but only from main: a dispatch from a release
+    # branch would otherwise publish and tag an unmerged commit.
+    if: github.ref == 'refs/heads/main' && (needs.gate.outputs.releasable == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     # The release tags only. Nothing here writes to a branch.
     permissions:
