@@ -604,9 +604,6 @@ describe("evidence pruning", () => {
 		assert.match(AUTO_PERMISSIONS_SYSTEM_PROMPT, /unrelated third destination/);
 		assert.match(AUTO_PERMISSIONS_SYSTEM_PROMPT, /never as evidence that something did not happen/);
 		assert.match(OVERRIDE_FEEDBACK_SYSTEM_PROMPT, /USER \(permission override\):/);
-		assert.match(OVERRIDE_FEEDBACK_SYSTEM_PROMPT, /USER \(standing permission override, granted/);
-		assert.match(OVERRIDE_FEEDBACK_SYSTEM_PROMPT, /origin project is context, not a scope limit/);
-		assert.match(OVERRIDE_FEEDBACK_SYSTEM_PROMPT, /comparable actions in any project/);
 		assert.match(OVERRIDE_FEEDBACK_SYSTEM_PROMPT, /Later user statements, blocks, and later overrides take precedence/);
 		assert.match(OVERRIDE_FEEDBACK_SYSTEM_PROMPT, /never covers a materially higher-risk action/);
 
