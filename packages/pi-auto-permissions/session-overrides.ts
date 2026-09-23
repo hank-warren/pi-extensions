@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AutoPermissionsConfig } from "./config.js";
 import type { PromptChoiceClassification } from "./evaluation-log.js";
-import type { PermissionOverride } from "./override-evidence.js";
+import { PERMISSION_OVERRIDE_CHOICES, type PermissionOverride } from "./override-evidence.js";
 import type { ReviewScope } from "./review-scope.js";
 import type { DenialSummary } from "./settings-menu.js";
 import {
@@ -95,7 +95,7 @@ export function createSessionOverrides(pi: ExtensionAPI): SessionOverrides {
             || typeof candidate.gateLabel !== "string"
             || typeof candidate.command !== "string"
             || typeof candidate.reviewerReason !== "string"
-            || !["allow", "allow_unnecessary", "allow_appropriate", "block"].includes(candidate.choice)
+            || !PERMISSION_OVERRIDE_CHOICES.includes(candidate.choice)
           ) {
             continue;
           }
@@ -114,6 +114,17 @@ export function createSessionOverrides(pi: ExtensionAPI): SessionOverrides {
       }
       return;
     }
+  }
+
+  function addOverride(
+    gateLabel: string,
+    command: string,
+    reviewerReason: string,
+    choice: PermissionOverride["choice"],
+    anchorKey: string | undefined,
+  ): void {
+    permissionOverrides.push({ seq: overrideSeq++, anchorKey, gateLabel, command, reviewerReason, choice });
+    persist();
   }
 
   /** Drop matching ledger-backed evidence in place; the array is shared by reference. */
@@ -206,17 +217,8 @@ export function createSessionOverrides(pi: ExtensionAPI): SessionOverrides {
           ctx.ui.notify(`Could not save standing approval: ${message}`, "warning");
         }
       }
-      if (!recordedStanding) {
-        permissionOverrides.push({
-          seq: overrideSeq++,
-          anchorKey,
-          gateLabel: gate.label,
-          command,
-          reviewerReason: detail,
-          choice: overrideChoice,
-        });
-      }
-      persist();
+      if (recordedStanding) persist();
+      else addOverride(gate.label, command, detail, overrideChoice, anchorKey);
     },
 
     /**
@@ -227,15 +229,7 @@ export function createSessionOverrides(pi: ExtensionAPI): SessionOverrides {
      * may retry. No new authorization pathway.
      */
     allowRetry(denial: DenialSummary, anchorKey: string | undefined): void {
-      permissionOverrides.push({
-        seq: overrideSeq++,
-        anchorKey,
-        gateLabel: denial.gateLabel,
-        command: denial.command,
-        reviewerReason: denial.reason,
-        choice: "allow",
-      });
-      persist();
+      addOverride(denial.gateLabel, denial.command, denial.reason, "allow", anchorKey);
       try {
         // The same channel a prompt note uses. This is a real user decision
         // made in the menu, so a user message is honest provenance — and it

@@ -6,6 +6,8 @@ import type { ReviewEvidenceRecord } from "./review.js";
  * evidence stream as user-source records so the guardian can treat them as
  * authorization (allows) or standing constraints (blocks).
  */
+export const PERMISSION_OVERRIDE_CHOICES = ["allow", "allow_unnecessary", "allow_appropriate", "block"] as const;
+
 export interface PermissionOverride {
   seq: number;
   /**
@@ -18,7 +20,7 @@ export interface PermissionOverride {
   gateLabel: string;
   command: string;
   reviewerReason: string;
-  choice: "allow" | "allow_unnecessary" | "allow_appropriate" | "block";
+  choice: (typeof PERMISSION_OVERRIDE_CHOICES)[number];
   /** Present only for a user-scoped ledger approval loaded at session start. */
   standing?: {
     grantedAt: string;
