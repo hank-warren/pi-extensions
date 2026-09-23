@@ -432,13 +432,15 @@ export function createGuardianReviewer(
     }
     let userMessage = makeUserMessage(base ? evidence.slice(base.evidenceKeys.length) : fullEvidence(), base ? "delta" : "full");
     let messages = base ? [...base.messages, userMessage] : [userMessage];
-    if (base && estimateReviewTokens(systemPrompt, messages) >= budget) {
+    let estimate = estimateReviewTokens(systemPrompt, messages);
+    if (base && estimate >= budget) {
       discardReviewerLineage();
       base = undefined;
       userMessage = makeUserMessage(fullEvidence(), "full");
       messages = [userMessage];
+      estimate = estimateReviewTokens(systemPrompt, messages);
     }
-    if (estimateReviewTokens(systemPrompt, messages) >= budget) {
+    if (estimate >= budget) {
       discardReviewerLineage();
       throw new Error("compact review evidence exceeds the review model's safe context budget");
     }
