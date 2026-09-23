@@ -52,8 +52,6 @@
     "guardian-transport.ts",
     "openai-codex-transport.ts",
     "subagent-context.ts",
-    "loop-context.ts",
-    "loop-revise-budget.ts",
     "evaluation-log.ts",
     "gates.ts",
     "override-evidence.ts",

@@ -58,13 +58,6 @@ export interface AutoPermissionsConfig {
      * collector never saw it. The model read the text as the user's; the
      * reviewer read nothing at all.
      *
-     * pi-loop's objective is the case that matters: user-typed or
-     * user-approved, frozen at start, and the whole reason the session is
-     * doing what it is doing. Reviewing a looping session without it means
-     * refusing work the user explicitly asked for — observed live, on a
-     * `git worktree add` whose objective said "in a worktree branched off
-     * origin/main".
-     *
      * An allowlist rather than "project every custom message", for the same
      * reason `userAnswerTools` is one: any installed extension can append a
      * custom message, and a blanket rule would let any of them mint user
@@ -240,16 +233,6 @@ function resolvePrompt(
   return { prompt, source: { kind: "file", path: resolved } };
 }
 
-/**
- * The one injected message type trusted out of the box.
- *
- * pi-loop's kickoff anchor (`LOOP_ANCHOR_MESSAGE_TYPE`), which carries the
- * objective the user typed or approved. Named as a plain string, the way
- * `loop-context.ts` names `PI_LOOP_ACTIVE`: no import, no dependency, and no
- * behaviour at all when pi-loop is not installed.
- */
-const DEFAULT_USER_MESSAGE_TYPES = ["loop-objective"] as const;
-
 const EVIDENCE_PRUNING_DEFAULTS = {
   toolRecordMaxChars: 500,
   assistantRecordMaxChars: 1000,
@@ -271,7 +254,7 @@ function resolveReviewEvidence(raw: Record<string, unknown>): AutoPermissionsCon
     return {
       projectInstructions: false,
       userAnswerTools: [],
-      userMessageTypes: [...DEFAULT_USER_MESSAGE_TYPES],
+      userMessageTypes: [],
       ...EVIDENCE_PRUNING_DEFAULTS,
     };
   }
@@ -286,12 +269,7 @@ function resolveReviewEvidence(raw: Record<string, unknown>): AutoPermissionsCon
   if (!Array.isArray(rawTools) || rawTools.some((tool) => typeof tool !== "string" || !tool.trim())) {
     throw new Error("reviewEvidence.userAnswerTools must be an array of non-empty strings");
   }
-  // Absent means the default, and an explicit empty array means none: a user
-  // who wants the loop objective out of the envelope must be able to say so,
-  // and cannot if omission and `[]` are the same thing.
-  const rawMessageTypes = evidence.userMessageTypes === undefined
-    ? [...DEFAULT_USER_MESSAGE_TYPES]
-    : evidence.userMessageTypes;
+  const rawMessageTypes = evidence.userMessageTypes === undefined ? [] : evidence.userMessageTypes;
   if (
     !Array.isArray(rawMessageTypes)
     || rawMessageTypes.some((type) => typeof type !== "string" || !type.trim())

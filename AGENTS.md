@@ -15,11 +15,9 @@ packages/                      # public, npm-published pi packages
   pi-plan-mode/                # Plan mode + Auto Permissions integration
   pi-ask-user-question/        # structured questionnaire tool (numbered options, multi-select)
   pi-simplify/                 # skill-only package: single-agent simplify skill (no extension code)
-  pi-orchestrator/             # skill-only package: supervise pi sessions in Herdr panes (replaces pi-loop)
+  pi-orchestrator/             # skill-only package: supervise pi sessions in Herdr panes
   pi-multi-login/              # additional OAuth logins for built-in providers (/multi-login)
-  pi-loop/                     # deprecated: /loop long-running work (published, tested, not in the aggregate)
   pi-stash/                    # park an unsent prompt with Ctrl+S and restore it
-  pi-muxr/                     # deprecated: muxr bridge client (published, tested, not in the aggregate)
   pi-cliproxyapi-provider/     # CLIProxyAPI as a pi model provider, seeded from pi's builtin catalog (fork of 0xRichardH/pi-cliproxyapi-provider)
   pi-codex-compaction/        # native Codex compaction, directly or through CPA (fork of @ogulcancelik/pi-codex-compaction)
 docs/                          # template-package/ (copy-to-create package skeleton)
@@ -27,9 +25,9 @@ scripts/                       # validate.py, test.sh, scan-secrets.sh, smoke-lo
 test/                          # cross-package composition tests and the shared test support in test/support/
 ```
 
-Two package layouts, both fine: **flat** — `index.ts` plus sibling modules in the package root — is the default and what the template documents; a package large enough to want internal structure moves its modules into `src/` and keeps a one-line `index.ts` that re-exports the entry point (`pi-loop`, `pi-plan-mode`, `pi-cliproxyapi-provider`). Nothing else distinguishes them: the `pi` manifest still points at `./index.ts` either way.
+Two package layouts, both fine: **flat** — `index.ts` plus sibling modules in the package root — is the default and what the template documents; a package large enough to want internal structure moves its modules into `src/` and keeps a one-line `index.ts` that re-exports the entry point (`pi-plan-mode`, `pi-cliproxyapi-provider`). Nothing else distinguishes them: the `pi` manifest still points at `./index.ts` either way.
 
-The root `package.json` is a private npm workspace whose `pi` manifest aggregates non-deprecated extension and skill packages, so `pi install <git-url>` loads those resources. The npm packages exist purely for external sharing; never install them on a host that also git-installs this repository or the extensions load twice.
+The root `package.json` is a private npm workspace whose `pi` manifest aggregates every extension and skill package, so `pi install <git-url>` loads those resources. The npm packages exist purely for external sharing; never install them on a host that also git-installs this repository or the extensions load twice.
 
 Cross-package coupling: `packages/pi-auto-permissions` deep-imports `@hank-warren/pi-permission-selector/selector.ts` and declares that sibling in plain `dependencies`. The [pi packages docs](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/packages.md) tell packages to add another pi package to `dependencies` **and** `bundledDependencies`; that rule targets packages whose `pi` manifest points at a dependency's resources through `node_modules/` paths, which this one does not do. Bundling was tested here and is actively wrong: `npm install --package-lock-only` fails with `ENOENT`, and because npm workspaces hoist the sibling to a root symlink there is nothing inside the package to bundle, so the tarball ships without it and the deep import fails with `MODULE_NOT_FOUND` for consumers. Plain `dependencies` was verified end-to-end from a packed tarball in a clean project. Removing `selector.ts` from the `pi-permission-selector` `files` allowlist, renaming its exports, or adding an `exports` map without a matching subpath breaks that consumer.
 
@@ -74,7 +72,7 @@ Skill packages publish through changesets exactly like extension packages.
 
 ### When a skill is the wrong shape
 
-A skill's description line sits in every system prompt of every session with the package loaded, so it must buy something only that placement can: the model acting on it in a session where nothing has been invoked yet. `simplify` and `auto-permissions-setup` qualify — the user asks for them by name. Guidance that only matters once a mode is already active (how to draft a loop, what a decision-complete plan is, how to write a statusline item) does not: the mode's own prompt can inject an absolute path to a shipped markdown file, resolved with `import.meta.dirname`, and the model reads it then at zero cost to every other session. `pi-loop` and `pi-plan-mode` were converted this way after ~220 sessions showed every read of their skill files was triggered by the mode prompt and never by the description. The bar for adding a hybrid package is a session in which the model acted on the description unprompted, not the theory that it might.
+A skill's description line sits in every system prompt of every session with the package loaded, so it must buy something only that placement can: the model acting on it in a session where nothing has been invoked yet. `simplify` and `auto-permissions-setup` qualify — the user asks for them by name. Guidance that only matters once a mode is already active (what a decision-complete plan is, how to write a statusline item) does not: the mode's own prompt can inject an absolute path to a shipped markdown file, resolved with `import.meta.dirname`, and the model reads it then at zero cost to every other session. `pi-plan-mode` was converted this way after ~220 sessions showed every read of its skill file was triggered by the mode prompt and never by the description. The bar for adding a hybrid package is a session in which the model acted on the description unprompted, not the theory that it might.
 
 Note on skill-name collisions: pi deduplicates packages, not skill names. If the same skill also exists in another installed package, both load and the name collides — remove or rename the duplicate when promoting a skill to a public package.
 
@@ -128,7 +126,7 @@ The workflows are split so each run has a distinct job — a release costs exact
 
 Changes that touch only `scripts/` or docs do not need a changeset.
 
-A **deprecated** package (`DEPRECATED_PACKAGES` in `scripts/validate.py`; currently `pi-loop` and `pi-muxr`) stays in `PUBLIC_PACKAGES`, the workspace, the test glob and on npm, but is removed from the root `pi.extensions` aggregate and from `EXPECTED_SURFACES` in `scripts/smoke-load.mjs`, so a git install of this repository stops loading it. Its README carries a deprecation block naming the replacement (or explicitly stating there is none), and once the version carrying that README is on npm, the registry is told too — `npm deprecate @hank-warren/pi-<name> "<message naming the replacement>"` (interactive terminal, passkey 2FA; verify with `npm view @hank-warren/pi-<name> deprecated`, which is `null` until it takes) — so `pi install npm:` warns rather than relying on the README being read. Do not delete a deprecated package's directory: npm keeps the last version either way, and the source is what lets a bug report against it be answered.
+**Retiring a package** means deleting it from the repository — its directory, its `PUBLIC_PACKAGES` and aggregate entries, its lockfile entry (`npm install --package-lock-only`) and every sibling integration — and then telling the registry: `npm deprecate @hank-warren/pi-<name> "<message naming the replacement, or saying there is none>"` (interactive terminal, passkey 2FA; verify with `npm view @hank-warren/pi-<name> deprecated`). npm keeps the published versions and git keeps the source, so nothing is maintained in-tree for a package nobody installs. `pi-loop` and `pi-muxr` were retired this way.
 
 `changeset publish` skips any version already on npm, so re-runs are safe. The `workflow_dispatch` trigger re-drives a publish that failed on infrastructure rather than package content; it publishes whatever the tree says is ahead of npm.
 
@@ -164,45 +162,34 @@ node --import tsx --import ./test/support/hermetic.ts --test \
 That is `npm run test:unit`. To run one package (or one file) with the same guarantees, pass paths to `test:pkg`:
 
 ```bash
-npm run test:pkg -- packages/pi-loop/test/*.test.ts
+npm run test:pkg -- packages/pi-plan-mode/test/*.test.ts
 ```
 
-**`test/support/hermetic.ts` is a preload, and every test process gets it** (Node propagates `--import` to the forked test processes). It gives each process a fresh `HOME` and a fresh `PI_CODING_AGENT_DIR` under a scratch root, clears the config env vars extensions read (`PI_AUTO_PERMISSIONS_CONFIG`, `PI_MULTI_LOGIN_CONFIG`, `PI_STASH_CONFIG`, `HERDR_ENV`, `PI_SUBAGENT_CHILD`, `PI_LOOP_ACTIVE`, `PI_LOOP_ID`, and the seven `CLIPROXYAPI_*` connection, credential and metadata vars listed in the preload), removes the scratch root on exit, and arms a tripwire on the *real* `~/.pi/agent`: on CI any `~/.pi` at all fails the run, and locally a changed entry (ignoring live-session churn) warns, or fails with `PI_EXT_TEST_STRICT=1`. A test that saves and restores `process.env.HOME` by hand is working around a guarantee it already has; delete that scaffolding rather than adding more.
+**`test/support/hermetic.ts` is a preload, and every test process gets it** (Node propagates `--import` to the forked test processes). It gives each process a fresh `HOME` and a fresh `PI_CODING_AGENT_DIR` under a scratch root, clears the config env vars extensions read (`PI_AUTO_PERMISSIONS_CONFIG`, `PI_MULTI_LOGIN_CONFIG`, `PI_STASH_CONFIG`, `HERDR_ENV`, `PI_SUBAGENT_CHILD`, and the seven `CLIPROXYAPI_*` connection, credential and metadata vars listed in the preload), removes the scratch root on exit, and arms a tripwire on the *real* `~/.pi/agent`: on CI any `~/.pi` at all fails the run, and locally a changed entry (ignoring live-session churn) warns, or fails with `PI_EXT_TEST_STRICT=1`. A test that saves and restores `process.env.HOME` by hand is working around a guarantee it already has; delete that scaffolding rather than adding more.
 
 Shared fakes live in `test/support/mock-pi.ts` — `createMockPi`, `createMockContext`, the custom-selector harness, the tool builders and the model-registry fake. A package's own `test/support/` composes that one rather than re-implementing it, and `scripts/validate.py` allows exactly this climb-out (`ROOT/test/support/`) and no other.
 
 ### The live canary
 
-Unit tests here mock `ExtensionAPI`, so they pin what the extension *asks* Pi to do, never what Pi *does*. Every bug that shipped from this repo lived in that gap: a re-sent message that silently never dispatched, a poke Pi refused because the session was busy, a terminal state that paused the loop because the consumer fixture had been invented rather than transcribed. **Run the extension in a real session before releasing anything that touches session lifecycle, message delivery, or another extension's entries.**
+Unit tests here mock `ExtensionAPI`, so they pin what the extension *asks* Pi to do, never what Pi *does*. Every bug that shipped from this repo lived in that gap: a re-sent message that silently never dispatched, a poke Pi refused because the session was busy, a consumer fixture invented rather than transcribed. **Run the extension in a real session before releasing anything that touches session lifecycle, message delivery, or another extension's entries.**
 
 ```bash
 # a scratch agent dir so the canary can never write real settings or sessions
 PI_CODING_AGENT_DIR=$(mktemp -d) pi -ne -e .
 ```
 
-The checklist below was written for pi-loop and is kept as the worked example of what a canary has to cover — every step is a state a mock cannot reach. pi-loop is deprecated and out of the aggregate, so run it with `-e ./packages/pi-loop` explicitly when the loop package itself is being released; for any other package, write the equivalent list of states before canarying, not after.
+Write the list of states to cover *before* canarying, not after — each one a state a mock cannot reach. The standing ones for this repo's shared surfaces:
 
-In that session, with pi-loop loaded:
-
-1. **Launch menu** — bare `/loop` with nothing running renders the tui-kit menu (`Loop`, `Status: Off.`, Start loop planning / Settings / How loops work). Open "How loops work" and come back with `Esc`; nothing starts.
-2. **Planning seed** — `/loop get a.txt written containing ok` opens planning *and* sends that text as the first message, with the widget showing `◆ loop · drafting objective`.
-3. **Propose, not refuse** — with planning open, ask conversationally for a loop. The model must call `loop_propose` and render the approval card, **not** answer with a command for you to type. This is the regression that made planning exist; it is the single most valuable step in this list.
-4. **Ground rules** — name a constraint while drafting ("never touch anything outside /tmp"). The card must show a **Ground rules** section, the approval menu must count them, and after the loop starts they must appear in the objective append as `Ground rules (hard constraints, never violate):`. Ask the running model what its system prompt says if you need to confirm the last one.
-5. **Approval actions** — the card's menu offers start here, start in a fresh session, change cadence, keep editing, cancel. Take "start here" for the main pass, and exercise "start in a fresh session" once: only the objective and the ground rules cross, and the new session kicks off on its own.
-6. **Widget and footer** — the running loop renders the same line in both (`⟳ loop 0/1 done · turn 1/∞ · 0s · next 18:38`), and the first working turn fires immediately. They are one function for a reason: when each formatted its own, they drifted. `∞` is the new default — a turn budget appears only when Settings sets one.
-7. **Manager, pause and resume** — `/loop` on a running loop opens the manager. Status shows the full state; **Pause** is offered and **Resume** is not, and after pausing the same menu offers exactly the reverse. There is no `/loop pause` any more, so a missing item is a lost control.
-8. **Resume across a session boundary** — pause, exit Pi, restart with `--continue`, then Resume from the manager. The loop must run *and* still be able to finish: ask the model to quote its tool list verbatim and confirm `loop_complete`, `loop_progress` and `loop_wait` are in it. Do this separately from step 7 because it is a different code path — a paused loop restored in a new session has never activated its runtime tools, where the same-session pause/resume of step 7 has. That gap shipped once: the tools were stripped, the objective append still told the model to call `loop_complete`, and the loop re-paused itself blaming `--tools` for something pi-loop had done to itself. Step 7 passed the whole time.
-9. **Poke** — exactly one poke arrives, carrying its provenance marker (`⏰ loop wake 1 · wait elapsed`). See the pacing note below: a loop that finishes in one turn never pokes.
-10. **Completion** — let the loop call `loop_complete`. It must report `stopped` at the settle. A first call with uncited criteria being *refused* is the gate working, not a failure.
-11. **Interrupt** — press `Esc` mid-turn. The turn stops. A delivery path that breaks `Esc` is a release blocker.
-12. **Queued reviews** — issue two guarded Bash commands in one turn. The second renders `⋯ queued behind another review` immediately rather than a blank gap, and `Esc` releases it then instead of after the first review settles. The critical section spans the human prompt, so "it looks hung" is the default failure here.
-13. **Plan mode's line** — in the same session run `/plan`, draft something small, and let it complete. The footer and widget must move `◆ plan · drafting` → `◆ plan · ready → /plan` → `▶ plan · implementing`, from one formatter, in the same glyph family as the loop's.
+1. **Interrupt** — press `Esc` mid-turn. The turn stops. A delivery path that breaks `Esc` is a release blocker.
+2. **Queued reviews** — issue two guarded Bash commands in one turn. The second renders `⋯ queued behind another review` immediately rather than a blank gap, and `Esc` releases it then instead of after the first review settles. The critical section spans the human prompt, so "it looks hung" is the default failure here.
+3. **Plan mode's line** — run `/plan`, draft something small, and let it complete. The footer and widget must move `◆ plan · drafting` → `◆ plan · ready → /plan` → `▶ plan · implementing`, from one formatter.
+4. **Resume across a session boundary** — exit Pi mid-state, restart with `--continue`, and confirm the restored session still has its runtime tools. Same-session and restored-session paths are different code; test both.
 
 ### Driving the canary from Herdr
 
-The checklist above used to be a manual chore, which meant it was skipped. It is not: inside Herdr (`HERDR_ENV=1`) an agent can drive a real TUI end to end — split a pane, run Pi in it, send prompts and raw keys, and read the rendered screen back. Do it this way. It is strictly better than any headless run, because the things worth checking (the widget above the editor, an `Esc` mid-turn, a modal, a poke arriving at an idle boundary) only exist in a real terminal.
+The canary used to be a manual chore, which meant it was skipped. It is not: inside Herdr (`HERDR_ENV=1`) an agent can drive a real TUI end to end — split a pane, run Pi in it, send prompts and raw keys, and read the rendered screen back. Do it this way. It is strictly better than any headless run, because the things worth checking (the widget above the editor, an `Esc` mid-turn, a modal) only exist in a real terminal.
 
-**Credentials.** A scratch `PI_CODING_AGENT_DIR` has no `auth.json`, so `--list-models` shows only providers configured by environment variables and your intended model is simply absent. Copy the two files that carry credentials and the model registry into the temp dir; settings, sessions and ledgers still stay scratch, which is what the scratch dir is protecting.
+**Credentials.** A scratch `PI_CODING_AGENT_DIR` has no `auth.json`, so `--list-models` shows only providers configured by environment variables and your intended model is simply absent. Copy the two files that carry credentials and the model registry into the temp dir; settings and sessions still stay scratch, which is what the scratch dir is protecting.
 
 ```bash
 export PI_CODING_AGENT_DIR=$(mktemp -d) && chmod 700 "$PI_CODING_AGENT_DIR"
@@ -211,7 +198,7 @@ cp ~/.pi/agent/auth.json ~/.pi/agent/models-store.json "$PI_CODING_AGENT_DIR"/
 
 **That directory now holds a copy of real credentials — `rm -rf` it when the canary ends.** Treat it like any other secret on disk, and never point a canary at `~/.pi/agent` to avoid the copy.
 
-**Pin the canary to a free OpenRouter model** (`--model openrouter/stealth/ox-alpha` at the time of writing; check what is currently free rather than trusting that name). A canary is dozens of scripted turns whose output you throw away, so it should not be billed like real work — but cost is the smaller reason. A cheap model is the *better test*: guidance that only lands on a frontier model is guidance that will fail in the field, and a weaker model follows the loudest instruction instead of reasoning its way around a conflict between two. That is exactly the failure you want a canary to expose — the `loop_propose` bug below surfaced precisely that way. Treat "it works when the model is smart enough to figure out what I meant" as an unshipped fix.
+**Pin the canary to a free OpenRouter model** (`--model openrouter/stealth/ox-alpha` at the time of writing; check what is currently free rather than trusting that name). A canary is dozens of scripted turns whose output you throw away, so it should not be billed like real work — but cost is the smaller reason. A cheap model is the *better test*: guidance that only lands on a frontier model is guidance that will fail in the field, and a weaker model follows the loudest instruction instead of reasoning its way around a conflict between two. That is exactly the failure you want a canary to expose. Treat "it works when the model is smart enough to figure out what I meant" as an unshipped fix.
 
 The one standing exception: **when Hank names it, the canary model is `openai-codex/gpt-5.6-luna`** (note the hyphen in the registry id). An explicit instruction from Hank supersedes the free-model default for that run; absent one, stay on the cheap model.
 
@@ -223,19 +210,18 @@ herdr pane split --current --direction right --cwd "$PWD" --no-focus     # -> .r
 # or a full-size tab, in the driver's workspace and without taking focus
 herdr tab create --workspace "$HERDR_WORKSPACE_ID" --cwd "$PWD" --label <name> --no-focus
 herdr pane run <pane> 'cd '"$PWD"' && export PI_CODING_AGENT_DIR=... && pi -ne -e . --model <provider>/<id>'
-herdr pane run <pane> '/loop 1m <objective>'    # sends text + Enter atomically
+herdr pane run <pane> '/plan <objective>'       # sends text + Enter atomically
 herdr pane send-keys <pane> esc                 # logical keys: esc, enter, ctrl+d, digits
 herdr pane read <pane> --source visible --lines 20
 ```
 
-Four things that cost time to learn:
+Three things that cost time to learn:
 
-- **Pick the read source deliberately.** `visible` is the rendered viewport and the only way to catch the widget, which sits above the editor and vanishes when the loop stops. `recent-unwrapped` is the transcript with soft wraps joined — use it for tool calls and model output. `detection` gives the startup banner, which is how you confirm the extension list and that the load was diagnostic-free.
+- **Pick the read source deliberately.** `visible` is the rendered viewport and the only way to catch the widget, which sits above the editor and vanishes when its mode ends. `recent-unwrapped` is the transcript with soft wraps joined — use it for tool calls and model output. `detection` gives the startup banner, which is how you confirm the extension list and that the load was diagnostic-free.
 - **`ctrl+c` clears the composer; `ctrl+d` exits.** Get this wrong and your next `pane run` — a full `cd … && pi …` command line — is submitted to the *running* Pi as a prompt. Extension edits need a real restart to load, so this happens exactly when you are iterating fastest.
 - **Pace the reads.** A model turn takes tens of seconds; read too early and you capture `⠏ Working...`. Sleep, then read. For a state that is transient by design (the widget mid-turn) read *while* it is live rather than after.
-- **Some states need engineering.** A loop is settle-paced, so one that finishes in a single turn never pokes — continuations fire at every idle boundary instead. To see a poke, give it an objective that depends on an external event so the model calls `loop_wait`; the elapsed wait produces exactly one poke, with `wait elapsed` as its reason.
 
-The payoff is not just convenience. This workflow caught a bug no unit test in this repo could: with planning open, a conversational request for a loop produced no `loop_propose` call, because the model reached for the loud, oft-repeated prohibition against starting a loop on its own initiative and offered a `/loop` invocation instead. The plumbing was correct — asked directly, the model confirmed the planning reminder was in its prompt and the tool in its tool set. It had two rules and took the louder one. **That class of defect lives entirely in what the model does with correct instructions, which is precisely the gap the mocks cannot see.** When a canary step fails, suspect the guidance before the wiring, and ask the running model what its context actually contains.
+**When a canary step fails, suspect the guidance before the wiring.** Mocks cannot see what the model does with correct instructions: a model given two rules follows the louder one, and the plumbing can be perfect while the behavior is wrong. Ask the running model what its context actually contains.
 
 ### Hold the changeset
 

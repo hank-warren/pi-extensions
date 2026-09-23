@@ -1,6 +1,6 @@
 # pi-extensions
 
-A collection of [Pi](https://pi.dev) packages — a compact statusline, plan mode, a Bash permission guardian, long-running work loops, and more — published to npm under `@hank-warren/*`.
+A collection of [Pi](https://pi.dev) packages — a compact statusline, plan mode, a Bash permission guardian, and more — published to npm under `@hank-warren/*`.
 
 Every package stands on its own, so you can install just the one you want without taking the rest.
 
@@ -16,12 +16,10 @@ Each package under [`packages/`](packages/) is a self-contained Pi package publi
 | [`@hank-warren/pi-auto-permissions`](packages/pi-auto-permissions) | Context-aware Bash guardian with tiered trust policy, denial/evaluation logs, revocable standing approvals, and a bundled interactive setup skill; forked from [`@ogulcancelik/pi-auto-permissions`](https://github.com/ogulcancelik/pi-extensions/tree/main/packages/pi-auto-permissions) |
 | [`@hank-warren/pi-plan-mode`](packages/pi-plan-mode) | Plan mode for research and design, with a durable plan file that survives compaction and a plan-craft doc injected by path while the mode is active |
 | [`@hank-warren/pi-ask-user-question`](packages/pi-ask-user-question) | Structured questionnaire tool with numbered options, digit hotkeys, checkbox multi-select and Tab-to-comment; stripped from headless subagent runs |
-| [`@hank-warren/pi-orchestrator`](packages/pi-orchestrator) | Skill-only package: `pi-orchestrator` supervises first-class pi sessions in Herdr panes — launch, read state cheaply, answer Auto Permissions and question prompts within policy, steer, wait, verify. Replaces pi-loop |
+| [`@hank-warren/pi-orchestrator`](packages/pi-orchestrator) | Skill-only package: `pi-orchestrator` supervises first-class pi sessions in Herdr panes — launch, read state cheaply, answer Auto Permissions and question prompts within policy, steer, wait, verify |
 | [`@hank-warren/pi-simplify`](packages/pi-simplify) | Skill-only package: single-agent `simplify` skill that applies behavior-preserving cleanups to recently changed code, adapted from [Matt Devy's `pi-simplify`](https://github.com/MattDevy/pi-extensions/tree/main/packages/pi-simplify) |
 | [`@hank-warren/pi-multi-login`](packages/pi-multi-login) | Additional OAuth logins for built-in providers under aliased provider ids, managed with `/multi-login` |
-| [`@hank-warren/pi-loop`](packages/pi-loop) | **Deprecated** in favour of [`pi-orchestrator`](packages/pi-orchestrator); not loaded by the git install of this repo. `/loop` long-running work: menu-first planning to an approval card with ground rules, settle-paced continuations, a durable on-disk ledger, loop-aware compaction with its own re-anchor, `loop_wait`, no-progress breakers, completion gated on cited evidence, and a loop-craft doc injected by path while drafting or completing |
 | [`@hank-warren/pi-stash`](packages/pi-stash) | Park an unsent prompt with `Ctrl+S`, run `/model` or anything else against an empty editor, then restore it with `Ctrl+S` — in-memory, paste-preserving, never submitted |
-| [`@hank-warren/pi-muxr`](packages/pi-muxr) | **Deprecated**, no replacement; not loaded by the git install of this repo. Retired [muxr](https://github.com/hank-warren/muxr) mobile gateway bridge client; source and tests retained for reference |
 | [`@hank-warren/pi-cliproxyapi-provider`](packages/pi-cliproxyapi-provider) | Registers one [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) instance as a Pi model provider: `/v1/models` discovery, models.dev enrichment seeded from Pi's own built-in catalog, Anthropic Messages routing for Claude and Responses routing for Codex, and `xhigh`/`max` thinking levels; forked from [`pi-cliproxyapi-provider`](https://github.com/0xRichardH/pi-cliproxyapi-provider) |
 | [`@hank-warren/pi-codex-compaction`](packages/pi-codex-compaction) | Native encrypted Codex compaction through direct Codex or CLIProxyAPI, integrated with Pi's compaction lifecycle; forked from [`@ogulcancelik/pi-codex-compaction`](https://github.com/ogulcancelik/pi-extensions/tree/main/packages/pi-codex-compaction) |
 
@@ -39,7 +37,7 @@ pi -e npm:@hank-warren/<package-name>
 
 See each package's README for setup and usage, and [AGENTS.md](AGENTS.md) for the repo layout, how to add a package, and the publish workflow. New packages start from [`docs/template-package/`](docs/template-package/).
 
-Installing this repository as a git package loads the non-deprecated extensions listed in the root `pi.extensions` manifest. Do not do that on a host that also installs the npm packages, or the extensions load twice.
+Installing this repository as a git package loads the extensions listed in the root `pi.extensions` manifest. Do not do that on a host that also installs the npm packages, or the extensions load twice.
 
 ## Highlights
 

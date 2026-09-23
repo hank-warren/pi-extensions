@@ -12,7 +12,7 @@ import {
 } from "./standing-overrides.js";
 
 /**
- * Overrides persist as custom session entries the way the loop budget does,
+ * Overrides persist as custom session entries,
  * so a resumed session keeps the user's prompt decisions instead of
  * forgetting every allow and standing block constraint.
  */
@@ -81,7 +81,7 @@ export function createSessionOverrides(pi: ExtensionAPI): SessionOverrides {
     }
   }
 
-  /** Fail-open like the loop budget: unreadable state means no overrides. */
+  /** Fail-open: unreadable state means no overrides. */
   function restoreOverrides(entries: readonly unknown[]): void {
     permissionOverrides.length = 0;
     overrideSeq = 0;
@@ -141,7 +141,7 @@ export function createSessionOverrides(pi: ExtensionAPI): SessionOverrides {
 
     restore(branch: readonly unknown[]): void {
       // Restore prompt decisions from the branch: a resumed session keeps its
-      // allows and standing block constraints (parity with the loop budget).
+      // allows and standing block constraints.
       restoreOverrides(branch);
       for (const entry of branch as Array<{
         type?: string;

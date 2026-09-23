@@ -661,41 +661,7 @@ test("8 · reviewAllShell reviews an unmatched command under the generic gate, u
 	);
 });
 
-test("9 · in a loop session a revise verdict comes back as one bounded block instead of a prompt", async () => {
-	const previous = { active: process.env.PI_LOOP_ACTIVE, id: process.env.PI_LOOP_ID };
-	process.env.PI_LOOP_ACTIVE = "1";
-	process.env.PI_LOOP_ID = "loop-42";
-	try {
-		await withExtension(
-			{
-				rules: [GUARDED_RULE],
-				completeSimple: () => assistantResponse(verdictText("revise", "push to a branch, not main")),
-			},
-			async (harness) => {
-				await harness.sessionStart();
-
-				const result = await harness.toolCall("git push origin main");
-				assert.ok(result?.block);
-				assert.match(result.reason, /this session is running an unattended \/loop/u);
-				assert.match(result.reason, /push to a branch, not main/u);
-				assert.match(result.reason, /revision rounds? remains?/u);
-				assert.match(result.reason, /Do not split, obfuscate, or re-route the command/u);
-				assert.equal(harness.customCalls, 0, "an unattended loop is never asked to answer a modal");
-				assert.equal(harness.denied.length, 1);
-				assert.equal(harness.denied[0].decisionSource, "loop");
-				assert.equal(harness.denied[0].verdict, "revise");
-				assert.equal(harness.denials()[0].decisionSource, "loop");
-			},
-		);
-	} finally {
-		if (previous.active === undefined) delete process.env.PI_LOOP_ACTIVE;
-		else process.env.PI_LOOP_ACTIVE = previous.active;
-		if (previous.id === undefined) delete process.env.PI_LOOP_ID;
-		else process.env.PI_LOOP_ID = previous.id;
-	}
-});
-
-test("10 · a reviewer that throws asks the user, and blocks outright in a loop session", async () => {
+test("10 · a reviewer that throws asks the user", async () => {
 	await withExtension(
 		{
 			rules: [GUARDED_RULE],
@@ -718,33 +684,6 @@ test("10 · a reviewer that throws asks the user, and blocks outright in a loop 
 			assert.deepEqual(harness.displays.map((display) => display.state), ["waiting", "ask_user", "blocked"]);
 		},
 	);
-
-	const previous = process.env.PI_LOOP_ACTIVE;
-	process.env.PI_LOOP_ACTIVE = "1";
-	try {
-		await withExtension(
-			{
-				rules: [GUARDED_RULE],
-				completeSimple: () => {
-					throw new Error("reviewer offline");
-				},
-			},
-			async (harness) => {
-				await harness.sessionStart();
-
-				const result = await harness.toolCall("git push origin main");
-				assert.ok(result?.block);
-				assert.match(result.reason, /^Git push could not be reviewed \(reviewer offline\)/u);
-				assert.match(result.reason, /call loop_wait naming the reviewer failure/u);
-				assert.equal(harness.customCalls, 0);
-				assert.equal(harness.denied[0].decisionSource, "review_failure");
-				assert.equal(harness.denials()[0].decisionSource, "review_failure");
-			},
-		);
-	} finally {
-		if (previous === undefined) delete process.env.PI_LOOP_ACTIVE;
-		else process.env.PI_LOOP_ACTIVE = previous;
-	}
 });
 
 test("11 · a turn aborted while the reviewer is answering is cancelled, not denied", async () => {

@@ -1,10 +1,4 @@
-import { detectLoopContext } from "./loop-context.js";
 import { createReviewQueue } from "./review-queue.js";
-import {
-  LoopReviseBudget,
-  loopBlockReason,
-  type LoopReviseCharge,
-} from "./loop-revise-budget.js";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -91,17 +85,6 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   let lastConfigError: string | undefined;
   let lastEvaluationLogError: string | undefined;
   let sessionActive = true;
-  /**
-   * Revision rounds spent per guardian concern while a loop is active.
-   *
-   * Session-scoped and held here rather than in the review closure, so a
-   * context compaction (which rewrites the conversation, not this process)
-   * cannot reset it. Restored from the session branch at session_start so a
-   * resume cannot reset it either.
-   */
-  const loopReviseBudget = new LoopReviseBudget();
-  /** The loop these counts belong to, so a new loop starts with a clean budget. */
-  let loopReviseBudgetLoopId: string | undefined;
   const guardianReviewQueue = createReviewQueue();
   const display = createReviewDisplay(pi, { isSessionActive: () => sessionActive });
   const reviewer = createGuardianReviewer({ isSessionActive: () => sessionActive, overrides });
@@ -241,33 +224,6 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
         ctx.ui.notify("Auto Permissions could not append its evaluation log.", "warning");
       }
     }
-  }
-
-  /**
-   * Charge one revision round against a guardian concern and persist the
-   * budget. A loop id different from the one the counts belong to means a new
-   * loop: it inherits nothing from the last one's arguments with the guardian.
-   */
-  function chargeLoopRevision(
-    loopId: string | undefined,
-    gateLabel: string,
-    reason: string,
-  ): LoopReviseCharge {
-    if (loopReviseBudgetLoopId !== loopId) {
-      loopReviseBudget.clear();
-      loopReviseBudgetLoopId = loopId;
-    }
-    const charge = loopReviseBudget.charge(gateLabel, reason);
-    try {
-      pi.appendEntry(LoopReviseBudget.entryType, {
-        ...loopReviseBudget.snapshot(),
-        ...(loopId ? { loopId } : {}),
-      });
-    } catch {
-      // Persistence is what survives a restore; the in-memory count is what
-      // survives a compaction. Losing the former never widens the bound now.
-    }
-    return charge;
   }
 
   async function askUser(
@@ -421,31 +377,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
           return { block: true, reason: "Auto Permissions review cancelled" };
         }
         if (verdict.decision === "approve") {
-          const approved = settle(scope, { display: "approved", reason: verdict.reason });
-          // An approval ends the argument at this gate: the per-gate bound exists
-          // to stop an agent grinding, not to ration a long loop's whole session.
-          loopReviseBudget.settle(gate.label);
-          return approved;
-        }
-        // An unattended loop cannot answer a modal and must not be handed an
-        // unbounded retry loop either, so both non-approving verdicts come back
-        // as one bounded block. The verdict itself is unchanged: nothing is
-        // approved here that would not have been approved with a user present.
-        const loopContext = detectLoopContext();
-        if (loopContext) {
-          const charge = chargeLoopRevision(loopContext.loopId, gate.label, verdict.reason);
-          return settle(scope, {
-            display: verdict.decision === "revise" ? "revise" : "blocked",
-            verdict: verdict.decision === "revise" ? "revise" : "block",
-            source: "loop",
-            reason: verdict.reason,
-            block: loopBlockReason({
-              gateLabel: gate.label,
-              reason: verdict.reason,
-              decision: verdict.decision,
-              ...charge,
-            }),
-          });
+          return settle(scope, { display: "approved", reason: verdict.reason });
         }
         if (verdict.decision === "revise") {
           return settle(scope, {
@@ -463,18 +395,6 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
           return { block: true, reason: "Auto Permissions review cancelled" };
         }
         const reason = error instanceof Error ? error.message : String(error);
-        // A review that failed is an infrastructure fault, not a guardian
-        // judgment, so it charges no revision round — but it still must not open
-        // a modal in a session with nobody to answer it.
-        if (detectLoopContext()) {
-          return settle(scope, {
-            display: "blocked",
-            verdict: "block",
-            source: "review_failure",
-            reason,
-            block: `${gate.label} could not be reviewed (${reason}), and this session is running an unattended /loop, so there is no one to ask. Do not retry the same command hoping the reviewer recovers: call loop_wait naming the reviewer failure, or advance the objective another way.`,
-          });
-        }
         return askUser(scope, `Automatic review failed: ${reason}`, lifecycleSignal, "review_failure");
       }
     } finally {
@@ -590,10 +510,6 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     reviewer.resetLifecycle();
     sessionActive = true;
     overrides.restore(ctx.sessionManager.getBranch());
-    // Rebuild the revise budget before the first tool call: a resumed session
-    // that forgot its spent rounds would hand the agent a fresh set of them.
-    loopReviseBudget.restore(ctx.sessionManager.getBranch());
-    loopReviseBudgetLoopId = detectLoopContext()?.loopId;
     trustedGroups = ctx.isProjectTrusted() ? loadTrustedGroups(ctx.cwd) : new Set();
     // Snapshot the trust baseline at session start: remotes configured now are
     // inside the boundary, anything added or repointed later is not. Re-capture

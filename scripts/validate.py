@@ -21,12 +21,6 @@ EXPECTED_EXTENSION_ENTRYPOINTS = [
     "./packages/pi-cliproxyapi-provider/index.ts",
     "./packages/pi-codex-compaction/index.ts",
 ]
-# Deprecated packages stay in PUBLIC_PACKAGES (published, tested, packable)
-# but are left out of the aggregate above, so a git install of this repository
-# no longer loads them. pi-loop is deprecated in favour of the pi-orchestrator
-# skill package: a supervising session watching real pi sessions in Herdr panes does
-# by judgment what the loop engine did by pacing and gates.
-DEPRECATED_PACKAGES = {"packages/pi-loop", "packages/pi-muxr"}
 # Public resources must live in inventoried packages: a top-level extensions/
 # or skills/ directory would bypass package validation and ship through the
 # aggregate repository install. Skill and hybrid *packages* are different:
@@ -51,12 +45,11 @@ SKILL_PACKAGES = {"packages/pi-simplify", "packages/pi-orchestrator"}
 #
 # A skill earns its always-on description line only when the model should act
 # on it in sessions where nothing has been invoked yet. `auto-permissions-setup`
-# does: the user asks for it by name. pi-loop and pi-plan-mode used to be here
-# and were moved off: ~220 sessions showed every read of their skill files was
-# triggered by the mode's own prompt, never by the description, so the line
-# was a tax on every session that never entered the mode. Their craft docs now
-# ship as plain markdown under `docs/` and the mode prompt injects the absolute
-# path. Do not re-add a package here on the theory that the description will
+# does: the user asks for it by name. pi-plan-mode used to be here and was
+# moved off: ~220 sessions showed every read of its skill file was triggered
+# by the mode's own prompt, never by the description, so the line was a tax on
+# every session that never entered the mode. Its craft doc now ships as plain
+# markdown under `docs/` and the mode prompt injects the absolute path. Do not re-add a package here on the theory that the description will
 # help; add it when a session shows the model acting on it unprompted.
 HYBRID_PACKAGES = {"packages/pi-auto-permissions"}
 PUBLIC_PACKAGES = {
@@ -69,9 +62,7 @@ PUBLIC_PACKAGES = {
     "packages/pi-simplify": "@hank-warren/pi-simplify",
     "packages/pi-orchestrator": "@hank-warren/pi-orchestrator",
     "packages/pi-multi-login": "@hank-warren/pi-multi-login",
-    "packages/pi-loop": "@hank-warren/pi-loop",
     "packages/pi-stash": "@hank-warren/pi-stash",
-    "packages/pi-muxr": "@hank-warren/pi-muxr",
     "packages/pi-cliproxyapi-provider": "@hank-warren/pi-cliproxyapi-provider",
     "packages/pi-codex-compaction": "@hank-warren/pi-codex-compaction",
 }
@@ -198,15 +189,6 @@ def main() -> int:
     pi_manifest = manifest.get("pi", {})
     if pi_manifest.get("extensions") != EXPECTED_EXTENSION_ENTRYPOINTS:
         errors.append("package.json: pi.extensions must expose all expected entrypoints")
-    for rel_dir in sorted(DEPRECATED_PACKAGES):
-        if rel_dir not in PUBLIC_PACKAGES:
-            errors.append(f"{rel_dir}: deprecated package must still be in PUBLIC_PACKAGES")
-        entry = f"./{rel_dir}/index.ts"
-        if entry in EXPECTED_EXTENSION_ENTRYPOINTS or entry in pi_manifest.get("extensions", []):
-            errors.append(f"{rel_dir}: deprecated package must not be in the aggregate")
-        readme = ROOT / rel_dir / "README.md"
-        if not (readme.is_file() and "**Deprecated.**" in readme.read_text(encoding="utf-8")):
-            errors.append(f"{rel_dir}: deprecated package README must open with a **Deprecated.** block")
     if set(pi_manifest) != {"extensions", "skills"}:
         errors.append("package.json: pi manifest may expose only extensions and skills")
     for name in FORBIDDEN_DIRS:

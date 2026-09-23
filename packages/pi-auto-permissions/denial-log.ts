@@ -14,12 +14,10 @@ export type DenialVerdict = "revise" | "block";
  * - `guardian` — the reviewer's own verdict (a revise, or an ask_user with no
  *   interactive user to ask)
  * - `user` — the user chose Block at the approval prompt
- * - `loop` — a guardian verdict delivered as a bounded block because an
- *   unattended loop cannot answer a prompt
  * - `review_failure` — review infrastructure failed and the command was
  *   blocked rather than waved through
  */
-export type DenialSource = "deny" | "convention" | "guardian" | "user" | "loop" | "review_failure";
+export type DenialSource = "deny" | "convention" | "guardian" | "user" | "review_failure";
 
 export interface DenialRecord {
   v: 1;

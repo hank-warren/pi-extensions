@@ -2,9 +2,7 @@
  * The status language, in one place.
  *
  * The footer and the widget render from one view for a reason: when each
- * formatted its own, they drifted. The sibling extension shipped a loop that
- * read "waiting" in the footer and "running" above the editor, which is the
- * same bug this file exists to prevent between "ready" and "implementing".
+ * formatted its own, they could drift between "ready" and "implementing".
  */
 
 import assert from "node:assert/strict";

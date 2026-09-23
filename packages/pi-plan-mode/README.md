@@ -147,7 +147,7 @@ It used to be a skill. A skill's description line is in every system prompt, whi
 
 ## 📊 Statusline and widget
 
-The footer status and the widget above the editor render from **one formatter**, so they cannot drift, and they share a glyph vocabulary with the sibling [`pi-loop`](../pi-loop): `◆` for a state wanting a decision, `▶` for work under way.
+The footer status and the widget above the editor render from **one formatter**, so they cannot drift: `◆` for a state wanting a decision, `▶` for work under way.
 
 - `◆ plan · drafting` — planning is under way.
 - `◆ plan · revising` — feedback superseded a completed plan; the stored one is not current.
