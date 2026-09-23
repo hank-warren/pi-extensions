@@ -18,7 +18,6 @@ describe("reviewStatusFrame", () => {
       assert.equal(frame.glyph, WAITING_FRAMES[index % WAITING_FRAMES.length]);
       assert.equal(frame.label, `waiting for ${REVIEWER}`);
       assert.equal(frame.tone, "warning");
-      assert.equal(frame.done, false);
     }
   });
 
@@ -38,7 +37,6 @@ describe("reviewStatusFrame", () => {
       assert.equal(frame.glyph, "✓");
       assert.equal(frame.label, "approved");
       assert.equal(frame.tone, "success");
-      assert.equal(frame.done, true);
     }
   });
 
@@ -47,19 +45,16 @@ describe("reviewStatusFrame", () => {
       glyph: "↻",
       label: "revision requested",
       tone: "warning",
-      done: true,
     });
     assert.deepEqual(reviewStatusFrame("ask_user", REVIEWER, 0), {
       glyph: "?",
       label: "waiting for your approval",
       tone: "accent",
-      done: true,
     });
     assert.deepEqual(reviewStatusFrame("blocked", REVIEWER, 0), {
       glyph: "✗",
       label: "blocked",
       tone: "error",
-      done: true,
     });
   });
 });
@@ -93,7 +88,6 @@ describe("reviewStatusLines", () => {
       glyph: "⋯",
       label: "queued behind another review",
       tone: "muted",
-      done: true,
     });
     for (const index of [1, 2, 7, 99]) {
       assert.deepEqual(reviewStatusFrame("queued", REVIEWER, index), first, "static across frames");

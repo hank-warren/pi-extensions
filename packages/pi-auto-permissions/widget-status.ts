@@ -18,8 +18,6 @@ interface ReviewStatusFrame {
   glyph: string;
   label: string;
   tone: ReviewStatusTone;
-  /** True once no further frames are needed (state is static). */
-  done: boolean;
 }
 
 export const WAITING_FRAMES = ["✶", "✸", "✻", "✽"] as const;
@@ -41,23 +39,21 @@ export function reviewStatusFrame(
         glyph: "⋯",
         label: "queued behind another review",
         tone: "muted",
-        done: true,
       };
     case "waiting":
       return {
         glyph: WAITING_FRAMES[index % WAITING_FRAMES.length],
         label: `waiting for ${reviewer}`,
         tone: "warning",
-        done: false,
       };
     case "approved":
-      return { glyph: "✓", label: "approved", tone: "success", done: true };
+      return { glyph: "✓", label: "approved", tone: "success" };
     case "revise":
-      return { glyph: "↻", label: "revision requested", tone: "warning", done: true };
+      return { glyph: "↻", label: "revision requested", tone: "warning" };
     case "ask_user":
-      return { glyph: "?", label: "waiting for your approval", tone: "accent", done: true };
+      return { glyph: "?", label: "waiting for your approval", tone: "accent" };
     case "blocked":
-      return { glyph: "✗", label: "blocked", tone: "error", done: true };
+      return { glyph: "✗", label: "blocked", tone: "error" };
   }
 }
 

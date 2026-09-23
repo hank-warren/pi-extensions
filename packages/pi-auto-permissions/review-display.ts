@@ -219,7 +219,6 @@ export function createReviewDisplay(
         if (intervalMs !== undefined) {
           timer = setInterval(() => {
             frameIndex++;
-            if (reviewStatusFrame(state, reviewer, frameIndex).done) stopTimer();
             tui.requestRender();
           }, intervalMs);
           timer.unref?.();
