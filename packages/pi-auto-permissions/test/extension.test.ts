@@ -707,7 +707,7 @@ test("12 · a second guarded command in the same turn shows queued before it sho
 	);
 });
 
-test("13 · a SAFE prefilter approves without a full review, and a failing prefilter falls through to one", async () => {
+test("13 · a legacy reviewer.prefilter key is ignored", async () => {
 	await withExtension(
 		{
 			rules: [GUARDED_RULE],
@@ -719,45 +719,15 @@ test("13 · a SAFE prefilter approves without a full review, and a failing prefi
 					prefilter: true,
 				},
 			},
-			completeSimple: () => assistantResponse("SAFE"),
+			completeSimple: () => assistantResponse(verdictText("approve", "reviewed in full")),
 		},
 		async (harness) => {
 			await harness.sessionStart();
 
 			assert.equal(await harness.toolCall("git push origin main"), undefined);
-			assert.equal(harness.calls.length, 1, "SAFE short-circuits the full review");
-			assert.match(harness.calls[0].envelope, /PREFILTER MODE/u);
-			assert.equal(harness.calls[0].options.reasoning, "minimal");
-			assert.deepEqual(harness.displays, [
-				{ state: "waiting", detail: undefined },
-				{ state: "approved", detail: "prefilter" },
-			]);
-		},
-	);
-
-	await withExtension(
-		{
-			rules: [GUARDED_RULE],
-			config: {
-				reviewer: {
-					provider: GUARDIAN_MODEL.provider,
-					model: GUARDIAN_MODEL.id,
-					timeoutMs: 30_000,
-					prefilter: true,
-				},
-			},
-			completeSimple: (_call, index) => {
-				if (index === 0) throw new Error("prefilter offline");
-				return assistantResponse(verdictText("approve", "reviewed in full"));
-			},
-		},
-		async (harness) => {
-			await harness.sessionStart();
-
-			assert.equal(await harness.toolCall("git push origin main"), undefined);
-			assert.equal(harness.calls.length, 2, "a prefilter that cannot answer falls closed into the full review");
-			assert.doesNotMatch(harness.calls[1].envelope, /PREFILTER MODE/u);
-			assert.equal(harness.displays.at(-1)?.detail, "reviewed in full");
+			assert.equal(harness.calls.length, 1, "exactly one full review, no prefilter pass");
+			assert.doesNotMatch(harness.calls[0].envelope, /PREFILTER MODE/u);
+			assert.equal(harness.calls[0].options.reasoning, "low");
 		},
 	);
 });

@@ -11,8 +11,6 @@ import {
 	DEFAULT_EVIDENCE_CAPS,
 	FULL_REBUILD_KEEP_TOOL_RECORDS,
 	parsePermissionVerdict,
-	parsePrefilterVerdict,
-	PREFILTER_INSTRUCTION,
 	SUBAGENT_CONTEXT_SYSTEM_PROMPT,
 } from "../review.ts";
 
@@ -705,23 +703,5 @@ describe("unresolvable-target rule", () => {
 		assert.ok(AUTO_PERMISSIONS_SYSTEM_PROMPT.includes(
 			"The assignment is visible: judge it as a delete of /tmp/build-cache.",
 		));
-	});
-});
-
-describe("prefilter stage", () => {
-	test("parsePrefilterVerdict accepts only the exact word SAFE", () => {
-		assert.equal(parsePrefilterVerdict("SAFE"), "safe");
-		assert.equal(parsePrefilterVerdict("  safe \n"), "safe");
-		// Everything else — including prose containing SAFE — escalates.
-		for (const text of ["REVIEW", "", "SAFE.", "SAFE, because it is a read", "The action is SAFE", "UNSAFE", "{\"decision\":\"approve\"}"]) {
-			assert.equal(parsePrefilterVerdict(text), "review", `"${text}" must escalate to full review`);
-		}
-	});
-
-	test("the prefilter instruction demands a single word and defaults to REVIEW under uncertainty", () => {
-		assert.ok(PREFILTER_INSTRUCTION.startsWith("PREFILTER MODE"));
-		assert.ok(PREFILTER_INSTRUCTION.includes("Respond with exactly one word"));
-		assert.ok(PREFILTER_INSTRUCTION.includes("Do not return JSON"));
-		assert.ok(PREFILTER_INSTRUCTION.includes("When uncertain, respond REVIEW."));
 	});
 });

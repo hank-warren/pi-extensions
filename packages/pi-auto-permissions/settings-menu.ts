@@ -24,9 +24,9 @@ import {
   MIN_REVIEWER_TIMEOUT_MS,
   REASONING_EFFORTS,
   type ReasoningEffort,
+  type ReviewerConfig,
   type SystemPromptSource,
 } from "./config.js";
-import type { ReviewerBlock } from "./config-writer.js";
 import type { StandingApprovalRecord } from "./standing-overrides.js";
 
 const ENABLED_ID = "enabled";
@@ -48,7 +48,7 @@ const NO_REVIEWER_MESSAGE = "Select a reviewer model first";
 /** The slice of the config the menu edits, plus the read-only prompt source. */
 export interface ReviewerSettings {
   enabled: boolean;
-  reviewer?: ReviewerBlock;
+  reviewer?: ReviewerConfig;
   systemPromptSource: SystemPromptSource;
 }
 

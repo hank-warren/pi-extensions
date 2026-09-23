@@ -574,28 +574,6 @@ ${JSON.stringify(request, null, 2)}
 </LATEST_PROPOSED_ACTION>`;
 }
 
-/**
- * Appended after the review envelope for the stage-one prefilter pass. The
- * envelope text is identical to what a full-rebuild review would send, so the
- * provider's prompt cache treats the full review as an almost-complete cache
- * hit of the prefilter call — the CC stage-1→stage-2 structure.
- */
-export const PREFILTER_INSTRUCTION = `PREFILTER MODE
-This is a single-token prefilter pass over the review above. Do not return JSON and do not explain. Respond with exactly one word:
-SAFE — only when, under the full policy above, this exact action would clearly be approved.
-REVIEW — in every other case: any matched risk, any doubt, any tension with a policy entry, or any need to weigh the evidence carefully.
-When uncertain, respond REVIEW.`;
-
-/**
- * Strict on purpose: anything that is not exactly the word SAFE — including
- * prose around it, an explanation, or an empty response — escalates to the
- * full review. The prefilter can only ever short-circuit toward more review,
- * never toward approval by accident.
- */
-export function parsePrefilterVerdict(text: string): "safe" | "review" {
-  return text.trim().toUpperCase() === "SAFE" ? "safe" : "review";
-}
-
 export function parsePermissionVerdict(text: string): PermissionVerdict {
   const trimmed = text.trim();
   const start = trimmed.indexOf("{");

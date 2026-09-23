@@ -58,32 +58,6 @@ export interface PromptEvaluationRecord {
   expectedDecision: Extract<PermissionDecision, "approve" | "ask_user">;
 }
 
-/**
- * A prefilter SAFE approval, recorded so false negatives are measurable: no
- * prompt opened, so there is no user label yet — the record carries the
- * command and compact evidence for offline labelling against the same
- * criteria as prompted records.
- */
-interface PrefilterEvaluationRecord {
-  version: 2;
-  timestamp: string;
-  sessionId: string;
-  cwd: string;
-  tool: string;
-  gate: {
-    label: string;
-    group: string;
-  };
-  userRequest: string;
-  command: string;
-  relevantContext: ReviewEvidenceRecord[];
-  actualDecision: "approve";
-  actualReason: "prefilter";
-  decisionSource: "prefilter";
-}
-
-type EvaluationRecord = PromptEvaluationRecord | PrefilterEvaluationRecord;
-
 export function classifyPromptChoice(choice: string | undefined): PromptChoiceClassification | undefined {
   if (choice === "Allow") return { allowsExecution: true };
   // Plain "Block" is still live: the logging-disabled prompt offers
@@ -114,6 +88,6 @@ export function expectedDecisionForChoice(
 /** Labeled rows are large (~51 KB), so this sidecar gets a bigger cap than the others. */
 export const EVALUATION_LOG_ROTATE_BYTES = 64 * 1024 * 1024;
 
-export function appendPromptEvaluation(path: string, record: EvaluationRecord): void {
+export function appendPromptEvaluation(path: string, record: PromptEvaluationRecord): void {
   appendJsonlRecord(path, record, EVALUATION_LOG_ROTATE_BYTES);
 }

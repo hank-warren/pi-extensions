@@ -11,19 +11,11 @@
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { pid } from "node:process";
-import type { ReasoningEffort } from "./config.js";
-
-/** The subset of the config the settings UI owns. */
-export interface ReviewerBlock {
-  provider: string;
-  model: string;
-  reasoningEffort: ReasoningEffort;
-  timeoutMs: number;
-}
+import type { ReviewerConfig } from "./config.js";
 
 interface ConfigPatch {
   enabled?: boolean;
-  reviewer?: ReviewerBlock;
+  reviewer?: ReviewerConfig;
 }
 
 const DEFAULT_INDENT = "  ";

@@ -19,18 +19,18 @@ Pi Auto Permissions pauses configured Bash commands before execution. A guardian
 
 Only user messages can grant permission or impose constraints. The assistant cannot authorize its own command.
 
-The posture is review-by-default: a fresh install ships a live ruleset (deny rules for oversight bypasses and critical-path destruction, guardian review for force pushes, infrastructure destroys, credential access, and the rest of the default groups), prose trust configuration in `guardianPolicy`, a session-start trust snapshot, an optional blanket `reviewAllShell` mode with a cheap prefilter stage, a denial ledger with allow-on-retry, and a bundled setup skill that co-authors the trust config with you from observed friction.
+The posture is review-by-default: a fresh install ships a live ruleset (deny rules for oversight bypasses and critical-path destruction, guardian review for force pushes, infrastructure destroys, credential access, and the rest of the default groups), prose trust configuration in `guardianPolicy`, a session-start trust snapshot, an optional blanket `reviewAllShell` mode, a denial ledger with allow-on-retry, and a bundled setup skill that co-authors the trust config with you from observed friction.
 
 ## Compared with Claude Code auto mode
 
-The design deliberately mirrors Claude Code's auto mode (default ruleset content, trust tiers, `"$defaults"` splice, session-start remote baseline, two-stage review, denial review) while keeping the pieces pi does better. Honestly stated, both directions:
+The design deliberately mirrors Claude Code's auto mode (default ruleset content, trust tiers, `"$defaults"` splice, session-start remote baseline, denial review) while keeping the pieces pi does better. Honestly stated, both directions:
 
 | | pi-auto-permissions | Claude Code auto mode |
 |---|---|---|
 | **Verdicts and reasons** | `approve`/`revise`/`ask_user`; always a concrete one-sentence reason; `revise` tells the agent exactly how to clear the objection | Deny only; fixed `Blocked by classifier` text in most sessions |
 | **Evidence caching** | Append-only reviewer lineage: full envelope once, deltas after, fingerprint-invalidated | Stage-1→stage-2 prompt cache; no cross-review evidence cache |
 | **Deterministic surface** | Regex gates are testable; the false-positive surface is bounded by the patterns; the guardian runs only after a mechanical match | Prose rules are checkable only by running the classifier |
-| **Evaluation loop** | Labelled evaluation JSONL (three-way user labels, prefilter FNR records) + per-review cost sidecar | `/feedback`; no per-review cost or label surface |
+| **Evaluation loop** | Labelled evaluation JSONL (three-way user labels) + per-review cost sidecar | `/feedback`; no per-review cost or label surface |
 | **Coverage** | **Bash only.** Edits, writes, fetches, MCP tools, and subagent spawns are ungated (the beyond-bash plan is the named follow-up) | All tool calls Tier 3-reviewed; in-project edits skip review by design |
 | **Sandbox** | None — pair with OS sandboxing for a hard boundary | Integrated sandbox + network-domain review |
 | **Injection posture** | Keeps assistant text and tool-call summaries as (non-authorizing) evidence — better provenance, larger injection surface | Strips assistant text and tool output entirely; input-layer injection probe |
@@ -187,12 +187,6 @@ There used to be a second path here — a one-shot wizard that scanned the proje
 ## Guardian configuration
 
 By default, the guardian uses Pi's active model with low reasoning effort and a 30-second timeout. You can select a separate low-cost model.
-
-### Two-stage review
-
-Set `"prefilter": true` inside the `reviewer` block for the Claude Code stage-1/stage-2 structure: before the full lineage review, a stateless single-token pass at minimal reasoning answers `SAFE` or `REVIEW` over the same envelope text. `SAFE` approves immediately (the review row shows reason `prefilter`); `REVIEW` — and any parse or infrastructure failure — falls through to the full review unchanged, so the prefilter can only ever short-circuit toward *more* review, never approve by accident. Because the prefilter envelope matches a full-rebuild review's, the escalated call is largely a provider prompt-cache hit of the prefilter call. The lineage conversation is untouched.
-
-Prefilter calls are recorded in the usage sidecar under a distinct `prefilter` label, and — when the evaluation log is enabled — every prefilter approval is logged with `"decisionSource": "prefilter"` so its false-negative rate can be measured offline against the same labels as prompted reviews. Off by default until that data justifies flipping it; it pays off most with `reviewAllShell`, where the per-command cost matters.
 
 Giving the guardian its own account keeps reviews from competing with your interactive session for a subscription's rate limits. Pi keys OAuth credentials by provider id, so a second login needs a second provider id — which is what [`@hank-warren/pi-multi-login`](../pi-multi-login/README.md) exists to create. This package no longer registers one itself.
 

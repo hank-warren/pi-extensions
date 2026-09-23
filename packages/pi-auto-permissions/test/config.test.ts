@@ -142,7 +142,6 @@ describe("auto permissions config", () => {
 			model: "gpt-5.4",
 			reasoningEffort: "medium",
 			timeoutMs: 12_000,
-			prefilter: false,
 		});
 		assert.equal(config.systemPrompt, "custom permission policy");
 		assert.deepEqual(config.reviewEvidence, {
@@ -236,18 +235,12 @@ describe("auto permissions config", () => {
 		}
 	});
 
-	test("reviewer.prefilter defaults off, accepts true, and rejects non-booleans", () => {
+	test("reviewer.prefilter is ignored, including non-booleans", () => {
 		const reviewer = { provider: "p", model: "m" };
-		assert.equal(loadAutoPermissionsConfig(configFile({ reviewer })).reviewer?.prefilter, false);
-		assert.equal(
-			loadAutoPermissionsConfig(configFile({ reviewer: { ...reviewer, prefilter: true } })).reviewer?.prefilter,
-			true,
-		);
-		for (const prefilter of ["yes", 1, [], {}]) {
-			assert.throws(
-				() => loadAutoPermissionsConfig(configFile({ reviewer: { ...reviewer, prefilter } })),
-				/reviewer\.prefilter must be boolean/,
-			);
+		for (const prefilter of [true, "yes", 1, []]) {
+			const config = loadAutoPermissionsConfig(configFile({ reviewer: { ...reviewer, prefilter } }));
+			assert.ok(config.reviewer);
+			assert.equal(Object.hasOwn(config.reviewer, "prefilter"), false);
 		}
 	});
 

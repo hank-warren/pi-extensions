@@ -34,14 +34,6 @@ export interface AutoPermissionsConfig {
     model: string;
     reasoningEffort: ReasoningEffort;
     timeoutMs: number;
-    /**
-     * Two-stage review: a stateless single-token SAFE/REVIEW pass at minimal
-     * reasoning before the full lineage review. SAFE approves; REVIEW and
-     * every parse or infrastructure failure fall through to the full review
-     * (fail closed). Opt-in until evaluation-log data justifies default-on;
-     * recommended together with `reviewAllShell`.
-     */
-    prefilter: boolean;
   };
   systemPrompt: string;
   systemPromptSource: SystemPromptSource;
@@ -114,6 +106,8 @@ export interface AutoPermissionsConfig {
     resultDisplayMs: number;
   };
 }
+
+export type ReviewerConfig = NonNullable<AutoPermissionsConfig["reviewer"]>;
 
 interface RuleInput {
   pattern?: unknown;
@@ -332,14 +326,7 @@ function resolveReviewer(raw: Record<string, unknown>): AutoPermissionsConfig["r
     MAX_REVIEWER_TIMEOUT_MS,
     "reviewer.timeoutMs",
   );
-  const prefilter = optionalBoolean(reviewer.prefilter, "reviewer.prefilter");
-  return {
-    provider,
-    model,
-    reasoningEffort,
-    timeoutMs,
-    prefilter: prefilter === true,
-  };
+  return { provider, model, reasoningEffort, timeoutMs };
 }
 
 export function loadAutoPermissionsConfig(path = autoPermissionsConfigPath()): AutoPermissionsConfig {
