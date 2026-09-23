@@ -157,6 +157,33 @@ function optionalString(value: unknown, name: string): string | undefined {
   return value.trim();
 }
 
+function objectBlock(value: unknown, name: string): Record<string, unknown> | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${name} must be an object`);
+  return value as Record<string, unknown>;
+}
+
+function stringList(value: unknown, name: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string" || !entry.trim())) {
+    throw new Error(`${name} must be an array of non-empty strings`);
+  }
+  return [...new Set((value as string[]).map((entry) => entry.trim()))];
+}
+
+function boundedInteger(value: unknown, fallback: number, min: number, max: number, name: string): number {
+  const v = value === undefined ? fallback : value;
+  if (!Number.isInteger(v) || Number(v) < min || Number(v) > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}`);
+  }
+  return Number(v);
+}
+
+function optionalBoolean(value: unknown, name: string): boolean | undefined {
+  if (value !== undefined && typeof value !== "boolean") throw new Error(`${name} must be boolean`);
+  return value as boolean | undefined;
+}
+
 function compileRule(value: unknown, index: number): Gate {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`rules[${index}] must be an object`);
@@ -245,45 +272,18 @@ const EVIDENCE_PRUNING_DEFAULTS = {
 } as const;
 
 function resolvePruningKnob(evidence: Record<string, unknown>, name: keyof typeof EVIDENCE_PRUNING_DEFAULTS): number {
-  const value = evidence[name];
-  if (value === undefined) return EVIDENCE_PRUNING_DEFAULTS[name];
-  if (!Number.isInteger(value) || Number(value) < 0 || Number(value) > 1_000_000) {
-    throw new Error(`reviewEvidence.${name} must be an integer between 0 and 1000000`);
-  }
-  return Number(value);
+  return boundedInteger(evidence[name], EVIDENCE_PRUNING_DEFAULTS[name], 0, 1_000_000, `reviewEvidence.${name}`);
 }
 
 function resolveReviewEvidence(raw: Record<string, unknown>): AutoPermissionsConfig["reviewEvidence"] {
-  if (raw.reviewEvidence === undefined) {
-    return {
-      projectInstructions: false,
-      userAnswerTools: [],
-      userMessageTypes: [],
-      ...EVIDENCE_PRUNING_DEFAULTS,
-    };
-  }
-  if (!raw.reviewEvidence || typeof raw.reviewEvidence !== "object" || Array.isArray(raw.reviewEvidence)) {
-    throw new Error("reviewEvidence must be an object");
-  }
-  const evidence = raw.reviewEvidence as Record<string, unknown>;
-  if (evidence.projectInstructions !== undefined && typeof evidence.projectInstructions !== "boolean") {
-    throw new Error("reviewEvidence.projectInstructions must be boolean");
-  }
-  const rawTools = evidence.userAnswerTools === undefined ? [] : evidence.userAnswerTools;
-  if (!Array.isArray(rawTools) || rawTools.some((tool) => typeof tool !== "string" || !tool.trim())) {
-    throw new Error("reviewEvidence.userAnswerTools must be an array of non-empty strings");
-  }
-  const rawMessageTypes = evidence.userMessageTypes === undefined ? [] : evidence.userMessageTypes;
-  if (
-    !Array.isArray(rawMessageTypes)
-    || rawMessageTypes.some((type) => typeof type !== "string" || !type.trim())
-  ) {
-    throw new Error("reviewEvidence.userMessageTypes must be an array of non-empty strings");
-  }
+  const evidence = objectBlock(raw.reviewEvidence, "reviewEvidence") ?? {};
+  const projectInstructions = optionalBoolean(evidence.projectInstructions, "reviewEvidence.projectInstructions");
+  const userAnswerTools = stringList(evidence.userAnswerTools, "reviewEvidence.userAnswerTools");
+  const userMessageTypes = stringList(evidence.userMessageTypes, "reviewEvidence.userMessageTypes");
   return {
-    projectInstructions: evidence.projectInstructions === true,
-    userAnswerTools: [...new Set((rawTools as string[]).map((tool) => tool.trim()))],
-    userMessageTypes: [...new Set((rawMessageTypes as string[]).map((type) => type.trim()))],
+    projectInstructions: projectInstructions === true,
+    userAnswerTools,
+    userMessageTypes,
     toolRecordMaxChars: resolvePruningKnob(evidence, "toolRecordMaxChars"),
     assistantRecordMaxChars: resolvePruningKnob(evidence, "assistantRecordMaxChars"),
     compactionRecordMaxChars: resolvePruningKnob(evidence, "compactionRecordMaxChars"),
@@ -301,16 +301,9 @@ function resolveSidecar(
   configFilePath: string,
 ): { enabled: boolean; path: string } {
   const defaultPath = resolve(dirname(configFilePath), fileName);
-  const value = raw[key];
-  if (value === undefined) return { enabled: defaultEnabled, path: defaultPath };
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`${key} must be an object`);
-  }
-  const block = value as Record<string, unknown>;
-  if (block.enabled !== undefined && typeof block.enabled !== "boolean") {
-    throw new Error(`${key}.enabled must be boolean`);
-  }
-  const enabled = (block.enabled as boolean | undefined) ?? defaultEnabled;
+  const block = objectBlock(raw[key], key);
+  if (!block) return { enabled: defaultEnabled, path: defaultPath };
+  const enabled = optionalBoolean(block.enabled, `${key}.enabled`) ?? defaultEnabled;
   const configured = optionalString(block.path, `${key}.path`);
   return { enabled, path: configured ? resolveConfigRelativePath(configured, configFilePath) : defaultPath };
 }
@@ -319,24 +312,15 @@ const GUARDIAN_POLICY_KEYS = ["environment", "allow", "softDeny", "hardDeny"] as
 
 function resolveGuardianPolicy(raw: Record<string, unknown>): AutoPermissionsConfig["guardianPolicy"] {
   const empty = { environment: [], allow: [], softDeny: [], hardDeny: [] };
-  if (raw.guardianPolicy === undefined) return empty;
-  if (!raw.guardianPolicy || typeof raw.guardianPolicy !== "object" || Array.isArray(raw.guardianPolicy)) {
-    throw new Error("guardianPolicy must be an object");
-  }
-  const policy = raw.guardianPolicy as Record<string, unknown>;
+  const policy = objectBlock(raw.guardianPolicy, "guardianPolicy");
+  if (!policy) return empty;
   for (const key of Object.keys(policy)) {
     if (!(GUARDIAN_POLICY_KEYS as readonly string[]).includes(key)) {
       throw new Error(`guardianPolicy.${key} is not a recognized list (use environment, allow, softDeny, hardDeny)`);
     }
   }
-  const resolveList = (key: typeof GUARDIAN_POLICY_KEYS[number]): string[] => {
-    const value = policy[key];
-    if (value === undefined) return [];
-    if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string" || !entry.trim())) {
-      throw new Error(`guardianPolicy.${key} must be an array of non-empty strings`);
-    }
-    return [...new Set((value as string[]).map((entry) => entry.trim()))];
-  };
+  const resolveList = (key: typeof GUARDIAN_POLICY_KEYS[number]): string[] =>
+    stringList(policy[key], `guardianPolicy.${key}`);
   return {
     environment: resolveList("environment"),
     allow: resolveList("allow"),
@@ -346,31 +330,19 @@ function resolveGuardianPolicy(raw: Record<string, unknown>): AutoPermissionsCon
 }
 
 function resolveUi(raw: Record<string, unknown>): AutoPermissionsConfig["ui"] {
-  if (raw.ui === undefined) return { enabled: true, resultDisplayMs: 2500, placement: "widget" };
-  if (!raw.ui || typeof raw.ui !== "object" || Array.isArray(raw.ui)) {
-    throw new Error("ui must be an object");
-  }
-  const ui = raw.ui as Record<string, unknown>;
-  if (ui.enabled !== undefined && typeof ui.enabled !== "boolean") {
-    throw new Error("ui.enabled must be boolean");
-  }
-  const resultDisplayMs = ui.resultDisplayMs === undefined ? 2500 : ui.resultDisplayMs;
-  if (!Number.isInteger(resultDisplayMs) || Number(resultDisplayMs) < 0 || Number(resultDisplayMs) > 30_000) {
-    throw new Error("ui.resultDisplayMs must be an integer between 0 and 30000");
-  }
+  const ui = objectBlock(raw.ui, "ui") ?? {};
+  const enabled = optionalBoolean(ui.enabled, "ui.enabled");
+  const resultDisplayMs = boundedInteger(ui.resultDisplayMs, 2500, 0, 30_000, "ui.resultDisplayMs");
   const placement = ui.placement ?? "widget";
   if (placement !== "widget" && placement !== "toolRow") {
     throw new Error("ui.placement must be widget or toolRow");
   }
-  return { enabled: ui.enabled !== false, resultDisplayMs: Number(resultDisplayMs), placement };
+  return { enabled: enabled !== false, resultDisplayMs, placement };
 }
 
 function resolveReviewer(raw: Record<string, unknown>): AutoPermissionsConfig["reviewer"] {
-  if (raw.reviewer === undefined) return undefined;
-  if (!raw.reviewer || typeof raw.reviewer !== "object" || Array.isArray(raw.reviewer)) {
-    throw new Error("reviewer must be an object");
-  }
-  const reviewer = raw.reviewer as Record<string, unknown>;
+  const reviewer = objectBlock(raw.reviewer, "reviewer");
+  if (!reviewer) return undefined;
   const provider = optionalString(reviewer.provider, "reviewer.provider");
   const model = optionalString(reviewer.model, "reviewer.model");
   if (!provider || !model) throw new Error("reviewer requires both provider and model");
@@ -379,32 +351,27 @@ function resolveReviewer(raw: Record<string, unknown>): AutoPermissionsConfig["r
   if (!REASONING_EFFORTS.includes(reasoningEffort)) {
     throw new Error("reviewer.reasoningEffort is invalid");
   }
-  const timeoutMs = reviewer.timeoutMs === undefined ? DEFAULT_REVIEWER_TIMEOUT_MS : reviewer.timeoutMs;
-  if (
-    !Number.isInteger(timeoutMs)
-    || Number(timeoutMs) < MIN_REVIEWER_TIMEOUT_MS
-    || Number(timeoutMs) > MAX_REVIEWER_TIMEOUT_MS
-  ) {
-    throw new Error("reviewer.timeoutMs must be an integer between 1000 and 300000");
-  }
-  if (reviewer.prefilter !== undefined && typeof reviewer.prefilter !== "boolean") {
-    throw new Error("reviewer.prefilter must be boolean");
-  }
+  const timeoutMs = boundedInteger(
+    reviewer.timeoutMs,
+    DEFAULT_REVIEWER_TIMEOUT_MS,
+    MIN_REVIEWER_TIMEOUT_MS,
+    MAX_REVIEWER_TIMEOUT_MS,
+    "reviewer.timeoutMs",
+  );
+  const prefilter = optionalBoolean(reviewer.prefilter, "reviewer.prefilter");
   return {
     provider,
     model,
     reasoningEffort,
-    timeoutMs: Number(timeoutMs),
-    prefilter: reviewer.prefilter === true,
+    timeoutMs,
+    prefilter: prefilter === true,
   };
 }
 
 export function loadAutoPermissionsConfig(path = autoPermissionsConfigPath()): AutoPermissionsConfig {
   const raw = readObject(path);
-  if (raw.enabled !== undefined && typeof raw.enabled !== "boolean") throw new Error("enabled must be boolean");
-  if (raw.reviewAllShell !== undefined && typeof raw.reviewAllShell !== "boolean") {
-    throw new Error("reviewAllShell must be boolean");
-  }
+  optionalBoolean(raw.enabled, "enabled");
+  optionalBoolean(raw.reviewAllShell, "reviewAllShell");
   if (raw.rules !== undefined && !Array.isArray(raw.rules)) throw new Error("rules must be an array");
   // Absent means the built-in ruleset is active; an authored array replaces it
   // entirely unless it splices "$defaults" back in; an explicit [] gates

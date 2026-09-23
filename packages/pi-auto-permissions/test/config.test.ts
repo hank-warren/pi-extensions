@@ -98,6 +98,13 @@ describe("auto permissions config", () => {
 		});
 	}
 
+	test("a null config block is rejected, never treated as absent", () => {
+		for (const key of ["reviewer", "ui", "reviewEvidence", "guardianPolicy"]) {
+			const path = configFile({ [key]: null });
+			assert.throws(() => loadAutoPermissionsConfig(path), new RegExp(`^Error: ${key} must be an object$`));
+		}
+	});
+
 	test("keeps standing approvals on by default and allows opting out or relocating them", () => {
 		const defaults = configFile({});
 		assert.deepEqual(loadAutoPermissionsConfig(defaults).standingApprovals, {
