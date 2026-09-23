@@ -84,10 +84,12 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   let trustedGroups = new Set<string>();
   let lastConfigError: string | undefined;
   let lastEvaluationLogError: string | undefined;
-  let sessionActive = true;
   const guardianReviewQueue = createReviewQueue();
-  const display = createReviewDisplay(pi, { isSessionActive: () => sessionActive });
-  const reviewer = createGuardianReviewer({ isSessionActive: () => sessionActive, overrides });
+  // The session is active exactly while the reviewer lifecycle is unaborted:
+  // session_shutdown aborts it, session_start synchronously aborts and replaces
+  // it, and nothing else touches it.
+  const reviewer = createGuardianReviewer({ overrides });
+  const display = createReviewDisplay(pi, { isSessionActive: () => !reviewer.lifecycleSignal.aborted });
 
   /**
    * Record a non-approved outcome: a `pi.events` emit (the PermissionDenied
@@ -182,7 +184,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   }
 
   function reviewCancelled(signal: AbortSignal | undefined): boolean {
-    return !sessionActive || signal?.aborted === true;
+    return signal?.aborted === true;
   }
 
   function logPromptEvaluation(
@@ -276,7 +278,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
       if (lifecycleStale()) return cancelled();
       if (reviewCancelled(signal)) {
         reviewer.discardLineage();
-        if (sessionActive) display.clear(scope);
+        display.clear(scope);
         return cancelled();
       }
       const classification = classifyPromptChoice(choice);
@@ -373,7 +375,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
         }
         if (reviewCancelled(signal)) {
           reviewer.discardLineage();
-          if (sessionActive) display.clear(scope);
+          display.clear(scope);
           return { block: true, reason: "Auto Permissions review cancelled" };
         }
         if (verdict.decision === "approve") {
@@ -391,7 +393,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
         return askUser(scope, verdict.reason, lifecycleSignal, "guardian");
       } catch (error) {
         if (lifecycleStale() || reviewCancelled(signal)) {
-          if (!lifecycleStale() && sessionActive) display.clear(scope);
+          if (!lifecycleStale()) display.clear(scope);
           return { block: true, reason: "Auto Permissions review cancelled" };
         }
         const reason = error instanceof Error ? error.message : String(error);
@@ -494,9 +496,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   registerSettingsCommand(pi, { overrides, reviewer });
 
   pi.on("session_shutdown", async (_event, ctx) => {
-    sessionActive = false;
-    reviewer.abortLifecycle();
-    reviewer.discardLineage();
+    reviewer.endSession();
     display.shutdown(ctx);
     setHerdrBlocked(pi, false);
   });
@@ -505,17 +505,9 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     overrides.resetForSession();
     warnAboutMissingReviewerProvider(ctx);
 
-    reviewer.abortLifecycle();
-    reviewer.discardLineage();
-    reviewer.resetLifecycle();
-    sessionActive = true;
+    reviewer.startSession(ctx.cwd);
     overrides.restore(ctx.sessionManager.getBranch());
     trustedGroups = ctx.isProjectTrusted() ? loadTrustedGroups(ctx.cwd) : new Set();
-    // Snapshot the trust baseline at session start: remotes configured now are
-    // inside the boundary, anything added or repointed later is not. Re-capture
-    // on every session_start (resume, branch switch) so the baseline follows
-    // the session the reviews belong to; the fingerprint covers the change.
-    reviewer.captureEnvironment(ctx.cwd);
     try {
       const config = currentConfig(ctx);
       overrides.loadStanding(config, ctx);

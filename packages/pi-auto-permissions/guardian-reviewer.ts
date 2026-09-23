@@ -181,14 +181,15 @@ export interface GuardianReviewer {
   /** The evidence this reviewer would send, for the evaluation log to record. */
   collectEvidence(scope: ReviewScope): ReviewEvidenceRecord[];
   discardLineage(): void;
-  resetLifecycle(): void;
-  abortLifecycle(): void;
+  /** Abort the lifecycle and drop the lineage; the session is over. */
+  endSession(): void;
+  /** Abort the old lifecycle, start a fresh one and re-capture the environment. */
+  startSession(cwd: string): void;
   readonly lifecycleSignal: AbortSignal;
   /** True when `captured` is no longer the live lifecycle signal. */
   isStale(captured: AbortSignal): boolean;
   /** Key of the newest evidence record, used to anchor override records. */
   readonly lastEvidenceKey: string | undefined;
-  captureEnvironment(cwd: string): void;
 }
 
 /**
@@ -198,7 +199,7 @@ export interface GuardianReviewer {
  * invalidates the cached conversation the other two describe.
  */
 export function createGuardianReviewer(
-  deps: { isSessionActive: () => boolean; overrides: SessionOverrides },
+  deps: { overrides: SessionOverrides },
 ): GuardianReviewer {
   let reviewerLineage: ReviewerLineage | undefined;
   let activeReviewerSessionId: string | undefined;
@@ -402,7 +403,7 @@ export function createGuardianReviewer(
       } finally {
         cleanupReviewerSession(prefilterSessionId);
       }
-      if (!deps.isSessionActive() || signal?.aborted) throw new Error("review timed out or was cancelled");
+      if (reviewerLifecycleController.signal.aborted || signal?.aborted) throw new Error("review timed out or was cancelled");
       if (safe) {
         if (config.evaluationLog.enabled) {
           try {
@@ -466,7 +467,7 @@ export function createGuardianReviewer(
         sessionId,
         signal: reviewSignal,
         guard: () => {
-          if (!deps.isSessionActive() || reviewSignal.aborted || reviewerGeneration !== attemptGeneration) {
+          if (reviewerLifecycleController.signal.aborted || reviewSignal.aborted || reviewerGeneration !== attemptGeneration) {
             throw new Error("review timed out or was cancelled");
           }
         },
@@ -479,7 +480,7 @@ export function createGuardianReviewer(
       }
       recordReviewerUsage(config, model, response.usage, subagentContext !== undefined);
       const verdict = parsePermissionVerdict(assistantText(response.content));
-      if (!deps.isSessionActive() || signal?.aborted || reviewerGeneration !== attemptGeneration) {
+      if (reviewerLifecycleController.signal.aborted || signal?.aborted || reviewerGeneration !== attemptGeneration) {
         throw new Error("review timed out or was cancelled");
       }
       activeReviewerSessionId = undefined;
@@ -517,11 +518,19 @@ export function createGuardianReviewer(
     review,
     collectEvidence,
     discardLineage: discardReviewerLineage,
-    resetLifecycle() {
-      reviewerLifecycleController = new AbortController();
-    },
-    abortLifecycle() {
+    endSession() {
       reviewerLifecycleController.abort();
+      discardReviewerLineage();
+    },
+    startSession(cwd: string) {
+      reviewerLifecycleController.abort();
+      discardReviewerLineage();
+      reviewerLifecycleController = new AbortController();
+      // Snapshot the trust baseline at session start: remotes configured now are
+      // inside the boundary, anything added or repointed later is not. Re-capture
+      // on every session_start (resume, branch switch) so the baseline follows
+      // the session the reviews belong to; the fingerprint covers the change.
+      sessionEnvironment = captureSessionEnvironment(cwd);
     },
     get lifecycleSignal() {
       return reviewerLifecycleController.signal;
@@ -531,9 +540,6 @@ export function createGuardianReviewer(
     },
     get lastEvidenceKey() {
       return reviewerLineage?.evidenceKeys.at(-1);
-    },
-    captureEnvironment(cwd: string) {
-      sessionEnvironment = captureSessionEnvironment(cwd);
     },
   };
 }
