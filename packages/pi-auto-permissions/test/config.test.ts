@@ -41,7 +41,7 @@ describe("auto permissions config", () => {
 			enabled: true,
 			path: join(tmpdir(), "standing-approvals.jsonl"),
 		});
-		assert.deepEqual(config.ui, { enabled: true, resultDisplayMs: 2500, placement: "widget" });
+		assert.deepEqual(config.ui, { enabled: true, resultDisplayMs: 2500 });
 	});
 
 	for (const [key, file, defaultEnabled] of [
@@ -125,7 +125,7 @@ describe("auto permissions config", () => {
 			},
 			systemPrompt: "custom permission policy",
 			reviewEvidence: { projectInstructions: true },
-			ui: { enabled: true, resultDisplayMs: 5000, placement: "toolRow" },
+			ui: { enabled: true, resultDisplayMs: 5000 },
 			rules: [
 				{
 					pattern: "\\brm\\s+-rf\\b",
@@ -150,9 +150,16 @@ describe("auto permissions config", () => {
 			userAnswerTools: [],
 			userMessageTypes: [],
 		});
-		assert.deepEqual(config.ui, { enabled: true, resultDisplayMs: 5000, placement: "toolRow" });
+		assert.deepEqual(config.ui, { enabled: true, resultDisplayMs: 5000 });
 		assert.equal(config.rules.length, 1);
 		assert.equal(config.rules[0].pattern.test("rm -rf build"), true);
+	});
+
+	test("ignores a legacy ui.placement of any value", () => {
+		for (const placement of ["toolRow", "bogus", 42]) {
+			const config = loadAutoPermissionsConfig(configFile({ ui: { placement } }));
+			assert.deepEqual(config.ui, { enabled: true, resultDisplayMs: 2500 });
+		}
 	});
 
 	test("accepts, trims, and deduplicates user answer tools", () => {

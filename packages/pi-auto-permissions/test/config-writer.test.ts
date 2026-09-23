@@ -59,9 +59,9 @@ describe("config writer", () => {
 	test("keeps a concurrent edit to another key", () => {
 		const path = fixtureFile();
 		// Another session rewrites the file after this one loaded it.
-		writeFileSync(path, `${JSON.stringify({ ...FIXTURE, ui: { placement: "toolRow" } }, null, 2)}\n`, "utf8");
+		writeFileSync(path, `${JSON.stringify({ ...FIXTURE, ui: { resultDisplayMs: 5000 } }, null, 2)}\n`, "utf8");
 		patchAutoPermissionsConfig(path, { enabled: false });
-		assert.deepEqual(read(path).ui, { placement: "toolRow" });
+		assert.deepEqual(read(path).ui, { resultDisplayMs: 5000 });
 	});
 
 	test("writes enabled false and removes the key when switched back on", () => {

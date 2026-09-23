@@ -112,7 +112,6 @@ export interface AutoPermissionsConfig {
   ui: {
     enabled: boolean;
     resultDisplayMs: number;
-    placement: "widget" | "toolRow";
   };
 }
 
@@ -312,11 +311,7 @@ function resolveUi(raw: Record<string, unknown>): AutoPermissionsConfig["ui"] {
   const ui = objectBlock(raw.ui, "ui") ?? {};
   const enabled = optionalBoolean(ui.enabled, "ui.enabled");
   const resultDisplayMs = boundedInteger(ui.resultDisplayMs, 2500, 0, 30_000, "ui.resultDisplayMs");
-  const placement = ui.placement ?? "widget";
-  if (placement !== "widget" && placement !== "toolRow") {
-    throw new Error("ui.placement must be widget or toolRow");
-  }
-  return { enabled: enabled !== false, resultDisplayMs, placement };
+  return { enabled: enabled !== false, resultDisplayMs };
 }
 
 function resolveReviewer(raw: Record<string, unknown>): AutoPermissionsConfig["reviewer"] {

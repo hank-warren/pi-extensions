@@ -5,7 +5,7 @@ import type { Gate } from "./gates.js";
 /** What a permission decision hands back to Pi to stop the tool call. */
 export type BlockResult = { block: true; reason: string };
 
-/** The tool call a review belongs to, and the row it may render in. */
+/** The tool call a review belongs to. */
 export interface ReviewTarget {
   toolName: string;
   toolCallId?: string;

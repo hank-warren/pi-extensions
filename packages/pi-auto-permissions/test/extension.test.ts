@@ -70,8 +70,8 @@ interface Display {
 	detail?: string;
 }
 
-// The guarded bash renderer decorates Pi's native one, which reads the global
-// theme rather than the one it is handed.
+// The pi-tui components the settings and approval dialogs render read the
+// global theme rather than the one they are handed.
 initTheme();
 
 const PRELOAD_CONFIG_ENV = process.env.PI_AUTO_PERMISSIONS_CONFIG;
@@ -111,22 +111,6 @@ const PLAIN_THEME = {
 	fg: (_role: string, text: string) => text,
 	bold: (text: string) => text,
 };
-
-/**
- * The theme the guarded bash `renderCall` receives. Permissive because the
- * native renderer this one decorates may reach for any theme helper; every one
- * of them here answers with the text it was handed, so a rendered row is
- * readable as plain strings.
- */
-const RENDER_THEME = new Proxy(
-	{},
-	{
-		get(_target, property) {
-			if (property === "fg") return (_role: string, text: string) => text;
-			return (...args: unknown[]) => args.find((value) => typeof value === "string") ?? "";
-		},
-	},
-);
 
 function decodeDisplay(value: unknown): Display {
 	if (value === undefined) return { state: "cleared", detail: undefined };
@@ -177,15 +161,10 @@ function digitForLabel(rendered: readonly string[], label: string): string {
  * own `custom` driver for a *different* dialog and still want the approval
  * prompt answered the usual way.
  */
-function answerOptionSelector(
-	factory: unknown,
-	harness: Harness,
-	onPrompt?: (harness: Harness) => void,
-): unknown {
+function answerOptionSelector(factory: unknown, harness: Harness): unknown {
 	const selector = createCustomSelectorHarness(factory, 100);
 	const rendered = selector.render(100);
 	harness.prompts.push(rendered);
-	onPrompt?.(harness);
 	const answer = harness.answers.shift();
 	selector.handleInput(answer === undefined ? "\u001b" : digitForLabel(rendered, answer));
 	return selector.result;
@@ -250,8 +229,6 @@ interface SetupOptions {
 	completeSimple?: GuardianScript;
 	/** Replaces the OptionSelector driver, for prompts that are not selectors. */
 	custom?: (factory: unknown, harness: Harness) => Promise<unknown>;
-	/** Runs while an approval prompt is on screen, before it is answered. */
-	onPrompt?: (harness: Harness) => void;
 }
 
 interface Harness {
@@ -269,14 +246,11 @@ interface Harness {
 	answers: string[];
 	branch: unknown[];
 	customCalls: number;
-	/** Every `context.invalidate` the guarded bash renderer was asked to run. */
-	invalidations: string[];
 	sessionStart(): Promise<void>;
 	sessionShutdown(): Promise<void>;
 	toolCall(command: string, toolCallId?: string): Promise<BlockResult>;
 	requestOverride(command: string, reason: string): ReturnType<ToolExecute>;
 	settingsCommand(args?: string): Promise<void>;
-	renderToolRow(toolCallId: string, command: string): string[];
 	denials(): DenialLine[];
 	standingApprovals(): Array<{ gate: { label: string; group: string }; command: string; reason: string; project: string }>;
 	overrideEntries(): Array<{ seq: number; overrides: Array<Record<string, unknown>> }>;
@@ -309,9 +283,6 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 	const branch: unknown[] = [];
 	const script = options.completeSimple ?? (() => assistantResponse(verdictText("approve", "scripted")));
 
-	const invalidations: string[] = [];
-	const toolRowState = new Map<string, Record<string, unknown>>();
-
 	const mock = createMockPi({ activeTools: ["bash"], allTools: [builtinTool("bash")] });
 	const harness: Harness = {
 		configPath,
@@ -326,7 +297,6 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 		answers,
 		branch,
 		customCalls: 0,
-		invalidations,
 		ctx: undefined as never,
 		async sessionStart() {
 			await mock.events.get("session_start")?.[0]?.({ reason: "startup" }, harness.ctx);
@@ -350,23 +320,6 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 			const command = mock.commands.get("auto-permissions");
 			assert.ok(command, "the extension registers /auto-permissions");
 			await command.handler(args, harness.ctx);
-		},
-		renderToolRow(toolCallId: string, command: string) {
-			const tool = mock.tools.find((candidate) => candidate.name === "bash");
-			assert.ok(tool, "toolRow placement registers a guarded bash tool");
-			const renderCall = tool.renderCall as (
-				args: unknown,
-				theme: unknown,
-				context: unknown,
-			) => { render(width: number): string[] };
-			const state = toolRowState.get(toolCallId) ?? {};
-			toolRowState.set(toolCallId, state);
-			const component = renderCall({ command }, RENDER_THEME, {
-				toolCallId,
-				state,
-				invalidate: () => invalidations.push(toolCallId),
-			});
-			return component.render(120);
 		},
 		denials() {
 			if (!existsSync(harness.denialLogPath)) return [];
@@ -423,7 +376,7 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 		custom: async (factory: unknown) => {
 			harness.customCalls += 1;
 			if (options.custom) return options.custom(factory, harness);
-			return answerOptionSelector(factory, harness, options.onPrompt);
+			return answerOptionSelector(factory, harness);
 		},
 	});
 	harness.context = context;
@@ -878,113 +831,12 @@ test("14 · session_shutdown then session_start discards the lineage and restore
 });
 
 /**
- * Stage A2: the surfaces the widget-placement cases above do not reach — the
- * tool-row renderer, the standing-approval ledger, and the `/auto-permissions`
- * command.
+ * Stage A2: the surfaces the cases above do not reach — the standing-approval
+ * ledger and the `/auto-permissions` command.
  */
 
 const SETUP_HANDOFF = "Use the auto-permissions-setup skill to set up my Auto Permissions policy.";
 const ALLOW_STANDING = "Allow and stop asking about comparable commands";
-
-function stripAnsi(lines: readonly string[]): string {
-	return lines.join("\n").replace(/\u001b\[[0-9;]*m/gu, "");
-}
-
-test("15 · toolRow placement renders every guardian status under the bash call, and clears it on cancel", async () => {
-	const controller = new AbortController();
-	let releaseFirst: (() => void) | undefined;
-	let firstCalled: (() => void) | undefined;
-	const firstReached = new Promise<void>((resolve) => {
-		firstCalled = resolve;
-	});
-	let askUserRow = "";
-	await withExtension(
-		{
-			rules: [GUARDED_RULE],
-			config: { ui: { placement: "toolRow" } },
-			signal: controller.signal,
-			onPrompt: (harness) => {
-				askUserRow = stripAnsi(harness.renderToolRow("call-3", "git push origin qa"));
-			},
-			completeSimple: (_call, index) => {
-				if (index === 1) return assistantResponse(verdictText("revise", "push to a branch, not main"));
-				if (index === 2) return assistantResponse(verdictText("ask_user", "force push rewrites history"));
-				if (index === 3) {
-					controller.abort();
-					return assistantResponse(verdictText("approve", "too late"));
-				}
-				return new Promise((resolve) => {
-					releaseFirst = () => resolve(assistantResponse(verdictText("approve", "the user asked for this push")));
-					firstCalled?.();
-				});
-			},
-		},
-		async (harness) => {
-			await harness.sessionStart();
-			assert.ok(
-				harness.mock.tools.some((tool) => tool.name === "bash"),
-				"toolRow placement re-registers bash so the review status can render in its row",
-			);
-
-			// Priming the row is what registers its invalidator, exactly as Pi
-			// rendering the call for the first time would.
-			assert.doesNotMatch(
-				stripAnsi(harness.renderToolRow("call-1", "git push origin main")),
-				/guardian running/u,
-				"an un-reviewed call renders the native row alone",
-			);
-
-			const first = harness.toolCall("git push origin main", "call-1");
-			await firstReached;
-			assert.deepEqual(harness.invalidations, ["call-1"], "the row is repainted when its state changes");
-			assert.match(
-				stripAnsi(harness.renderToolRow("call-1", "git push origin main")),
-				/◌ guardian running · Git push · guardian\/reviewer-1/u,
-			);
-
-			// A second guarded command while the first review holds the queue: the
-			// row must say it is queued, in the same words the widget uses, and
-			// not fall through to the blocked branch.
-			const second = harness.toolCall("git push origin dev", "call-2");
-			assert.match(
-				stripAnsi(harness.renderToolRow("call-2", "git push origin dev")),
-				/⋯ queued behind another review · Git push/u,
-			);
-
-			releaseFirst?.();
-			assert.equal(await first, undefined);
-			const approved = stripAnsi(harness.renderToolRow("call-1", "git push origin main"));
-			assert.match(approved, /✓ approved · Git push/u);
-			assert.match(approved, /the user asked for this push/u);
-			assert.match(approved, /\$ git push origin main/u, "the native call render is kept above the status");
-
-			const revised = await second;
-			assert.ok(revised?.block);
-			const reviseRow = stripAnsi(harness.renderToolRow("call-2", "git push origin dev"));
-			assert.match(reviseRow, /↻ revision requested · Git push/u);
-			assert.match(reviseRow, /push to a branch, not main/u);
-
-			harness.answers.push("Block");
-			const asked = await harness.toolCall("git push origin qa", "call-3");
-			assert.deepEqual(asked, { block: true, reason: "Blocked by user" });
-			assert.match(askUserRow, /\? approval required · Git push/u);
-			assert.match(
-				stripAnsi(harness.renderToolRow("call-3", "git push origin qa")),
-				/✗ blocked · Git push/u,
-			);
-
-			// Cancellation is the path that takes the row away again.
-			const cancelled = await harness.toolCall("git push origin hotfix", "call-4");
-			assert.deepEqual(cancelled, { block: true, reason: "Auto Permissions review cancelled" });
-			assert.doesNotMatch(
-				stripAnsi(harness.renderToolRow("call-4", "git push origin hotfix")),
-				/guardian running|approved|blocked/u,
-			);
-
-			assert.deepEqual(harness.displays, [], "with a tool row there is nothing above the editor");
-		},
-	);
-});
 
 test("16 · a standing approval is written to the ledger, kept out of the session entry, and reloaded at session_start", async () => {
 	await withExtension(

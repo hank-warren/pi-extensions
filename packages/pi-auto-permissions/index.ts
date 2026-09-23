@@ -95,7 +95,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   // session_shutdown aborts it, session_start synchronously aborts and replaces
   // it, and nothing else touches it.
   const reviewer = createGuardianReviewer({ overrides });
-  const display = createReviewDisplay(pi, { isSessionActive: () => !reviewer.lifecycleSignal.aborted });
+  const display = createReviewDisplay({ isSessionActive: () => !reviewer.lifecycleSignal.aborted });
 
   /**
    * Record a non-approved outcome: a `pi.events` emit (the PermissionDenied
@@ -513,9 +513,6 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     reviewer.startSession(ctx.cwd);
     overrides.restore(ctx.sessionManager.getBranch());
     trustedGroups = ctx.isProjectTrusted() ? loadTrustedGroups(ctx.cwd) : new Set();
-    if (config) {
-      overrides.loadStanding(config, ctx);
-      if (config.ui.placement === "toolRow") display.registerGuardedBash(ctx);
-    }
+    if (config) overrides.loadStanding(config, ctx);
   });
 }

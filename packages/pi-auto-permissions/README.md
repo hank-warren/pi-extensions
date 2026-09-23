@@ -413,20 +413,10 @@ A sparkle spinner (`✶ ✸ ✻ ✽`) cycles while the guardian is reviewing and
 {
   "ui": {
     "enabled": true,
-    "resultDisplayMs": 2500,
-    "placement": "widget"
+    "resultDisplayMs": 2500
   }
 }
 ```
-
-Set `placement` to `toolRow` to show the review inside Pi's Bash tool row:
-
-```text
-$ git commit --dry-run -m "fix auth"
-  ◌ guardian running · Git commit · openai-codex-auto-permissions/gpt-5.6-luna
-```
-
-`toolRow` reconstructs Pi's standard local Bash definition because Pi does not expose renderer-only decoration. Do not use it with SDK-provided, remote, sandboxed, or otherwise replaced Bash backends. The extension detects non-native Bash tools and falls back to the widget instead of replacing them.
 
 Set `ui.enabled` to `false` to hide review state without disabling enforcement.
 
