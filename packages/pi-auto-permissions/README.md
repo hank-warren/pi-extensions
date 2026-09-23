@@ -407,7 +407,7 @@ The default UI shows guardian progress as a single animated status line in a tem
 auto permissions · Git commit · ✶ waiting for openai-codex-auto-permissions/gpt-5.6-luna
 ```
 
-A sparkle spinner (`✶ ✸ ✻ ✽`) cycles while the guardian is reviewing and resolves to `✓ approved`, `↻ revision requested`, `? waiting for your approval`, or `✗ blocked`. When approval is needed, the selector's leading `●` pulses between warning-bright and dim so the active prompt remains visually distinct from the transcript. The guardian's reason, when present, appears on a dim second line; the command itself is not repeated because it is already visible in the Bash tool box. Configure the widget with:
+A sparkle spinner (`✶ ✸ ✻ ✽`) cycles while the guardian is reviewing and resolves to `✓ approved`, `↻ revision requested`, `? waiting for your approval`, or `✗ blocked`. When approval is needed, a static warning-colored `●` precedes the prompt heading so the active prompt remains visually distinct from the transcript. The guardian's reason, when present, appears on a dim second line; the command itself is not repeated because it is already visible in the Bash tool box. Configure the widget with:
 
 ```json
 {

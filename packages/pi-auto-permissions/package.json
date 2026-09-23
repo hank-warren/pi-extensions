@@ -43,7 +43,6 @@
     "NOTICE.md",
     "auto-permissions-setup",
     "index.ts",
-    "approval-pulse.ts",
     "config.ts",
     "config-writer.ts",
     "default-rules.ts",
