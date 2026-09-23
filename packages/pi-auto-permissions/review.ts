@@ -301,6 +301,14 @@ function messageBlocks(content: unknown): unknown[] {
   return Array.isArray(content) ? content : [content];
 }
 
+/** Text of one user/assistant content block, or undefined when it is not text. */
+function plainText(part: unknown): string | undefined {
+  if (typeof part === "string") return part;
+  if (!part || typeof part !== "object") return undefined;
+  const block = part as { type?: unknown; text?: unknown };
+  return block.type === "text" && typeof block.text === "string" ? block.text : undefined;
+}
+
 /**
  * The text of one injected-message block. Images carry no authorization an
  * image record could express, so they are dropped rather than announced.
@@ -500,10 +508,11 @@ export function collectReviewEvidence(
 
     for (let blockIndex = 0; blockIndex < blocks.length; blockIndex++) {
       const part = blocks[blockIndex];
-      if (typeof part === "string") {
-        if (part.length > 0) {
-          const text = `${role.toUpperCase()}: ${part}`;
-          records.push({ key: evidenceKey(entryId, blockIndex, role), source: role, text: role === "assistant" ? capAssistant(text) : text });
+      const text = plainText(part);
+      if (text !== undefined) {
+        if (text.length > 0) {
+          const line = `${role.toUpperCase()}: ${text}`;
+          records.push({ key: evidenceKey(entryId, blockIndex, role), source: role, text: role === "assistant" ? capAssistant(line) : line });
         }
         continue;
       }
@@ -515,11 +524,6 @@ export function collectReviewEvidence(
         name?: string;
         arguments?: unknown;
       };
-      if (block.type === "text" && typeof block.text === "string" && block.text.length > 0) {
-        const text = `${role.toUpperCase()}: ${block.text}`;
-        records.push({ key: evidenceKey(entryId, blockIndex, role), source: role, text: role === "assistant" ? capAssistant(text) : text });
-        continue;
-      }
       if (role === "user" && block.type === "image") {
         records.push({ key: evidenceKey(entryId, blockIndex, "image"), source: "user", text: "USER: [image attached]" });
         continue;
@@ -584,13 +588,11 @@ export function parsePrefilterVerdict(text: string): "safe" | "review" {
 
 export function parsePermissionVerdict(text: string): PermissionVerdict {
   const trimmed = text.trim();
-  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)?.[1];
-  const candidate = fenced ?? trimmed;
-  const start = candidate.indexOf("{");
-  const end = candidate.lastIndexOf("}");
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
   if (start < 0 || end <= start) throw new Error("reviewer returned no JSON object");
 
-  const value = JSON.parse(candidate.slice(start, end + 1)) as {
+  const value = JSON.parse(trimmed.slice(start, end + 1)) as {
     decision?: unknown;
     reason?: unknown;
   };
