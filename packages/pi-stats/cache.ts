@@ -6,7 +6,7 @@ import { makeIndex, parseSessionText, parseUsageSidecar } from "./stats.ts";
 import type { CachedFileRecord, ScanDiagnostics, SessionRecord, StatsCacheFile, StatsIndex, UsageRecord } from "./types.ts";
 
 /** Bumped to 3 when tool-call records were added; older caches lack them and must be reparsed. */
-const CACHE_VERSION = 3 as const;
+const CACHE_VERSION = 4 as const;
 const SKIP_DIRECTORIES = new Set(["subagent-artifacts"]);
 /** Extensions record out-of-transcript model usage in <agentDir>/<extension>/usage.jsonl. */
 const USAGE_SIDECAR_NAMES = new Set(["usage.jsonl", "usage.jsonl.1"]);
@@ -143,7 +143,12 @@ function validUsageRecord(value: unknown): value is UsageRecord {
 		typeof record.fingerprint === "string" &&
 		validNumber(record.timestamp) &&
 		typeof record.model === "string" &&
-		(record.kind === "assistant" || record.kind === "tool" || record.kind === "summary" || record.kind === "sidecar") &&
+		(record.kind === "assistant" ||
+			record.kind === "tool" ||
+			record.kind === "summary" ||
+			record.kind === "usage" ||
+			record.kind === "sidecar") &&
+		(record.sharedId === undefined || typeof record.sharedId === "string") &&
 		Boolean(usage) &&
 		validNumber(usage?.input) &&
 		validNumber(usage?.output) &&

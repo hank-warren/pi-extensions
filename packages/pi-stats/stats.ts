@@ -203,6 +203,22 @@ function normalizeEntry(
 			kind: "summary",
 		};
 	}
+
+	// Pi >=0.86 appendUsage(): model usage outside the conversation, such as cache warming.
+	if (entry.type === "usage") {
+		const usage = normalizeUsage(entry.usage);
+		if (!usage) return undefined;
+		const usageKind = typeof entry.kind === "string" && entry.kind.length > 0 ? entry.kind : "usage";
+		const model = `${modelName(entry.provider, entry.model)} (${usageKind})`;
+		return {
+			fingerprint: fingerprint([id, entry.timestamp, "usage", model, usage]),
+			timestamp: entryTimestamp,
+			model,
+			usage,
+			kind: "usage",
+			...(typeof entry.id === "string" && entry.id.length > 0 ? { sharedId: `${sessionId}:${entry.id}` } : {}),
+		};
+	}
 	return undefined;
 }
 
@@ -342,6 +358,7 @@ export function parseUsageSidecar(filePath: string, text: string): { records: Us
 			usage,
 			kind: "sidecar",
 			toolName: source,
+			...(typeof entry.id === "string" && entry.id.length > 0 ? { sharedId: entry.id } : {}),
 		});
 	}
 	return { records, malformedLines };
@@ -391,9 +408,12 @@ function deduplicateToolCalls(sessions: readonly SessionRecord[]): ToolCallRecor
 export function deduplicateUsage(sessions: readonly SessionRecord[], sidecar: readonly UsageRecord[] = []): UsageRecord[] {
 	const sessionPaths = new Set(sessions.map((session) => resolve(session.path)));
 	const seen = new Set<string>();
+	const sharedIds = new Set<string>();
 	const result: UsageRecord[] = [];
 	for (const session of sessions) {
 		for (const record of session.usage) {
+			// Registered before the fork check so a copied entry still claims the original's sidecar.
+			if (record.sharedId) sharedIds.add(record.sharedId);
 			if (hasPersistedSubagentChild(record, sessionPaths)) continue;
 			if (seen.has(record.fingerprint)) continue;
 			seen.add(record.fingerprint);
@@ -401,6 +421,7 @@ export function deduplicateUsage(sessions: readonly SessionRecord[], sidecar: re
 		}
 	}
 	for (const record of sidecar) {
+		if (record.sharedId && sharedIds.has(record.sharedId)) continue;
 		if (seen.has(record.fingerprint)) continue;
 		seen.add(record.fingerprint);
 		result.push(record);

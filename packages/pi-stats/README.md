@@ -39,7 +39,7 @@ Every tab is responsive: as the terminal narrows, lower-priority columns move to
 
 ## What is counted
 
-Pi writes usage to assistant messages, usage-bearing tool results, compactions, and branch summaries. `pi-stats` recursively reads valid Pi session files and counts every recorded model call, including compacted and abandoned branches. Copied fork history is fingerprinted and counted once.
+Pi writes usage to assistant messages, usage-bearing tool results, compactions, branch summaries, and `usage` entries (Pi 0.86+, for model calls outside the conversation such as cache warming). `pi-stats` recursively reads valid Pi session files and counts every recorded model call, including compacted and abandoned branches. Copied fork history is fingerprinted and counted once.
 
 Tool calls are counted separately from tokens, because most of them record no model usage. Every tool result in a session is tallied by name, along with whether it reported an error. Provider tool-call ids are reused verbatim when a session is forked, so they double as the de-duplication key and a forked branch never inflates the counts. Namespaced names such as `functions.bash` are ranked under their base name.
 
@@ -53,7 +53,9 @@ Some extensions call a model outside the agent loop, so their usage never reache
 {"v":1,"id":"3f2b…","ts":"2026-08-11T22:41:03.118Z","source":"auto-permissions","label":"guardian","provider":"anthropic","model":"claude-fable-5","usage":{"input":812,"output":96,"cacheRead":18442,"cacheWrite":0,"reasoning":48,"cost":0.0121}}
 ```
 
-Records are de-duplicated by `id`, counted in every total, and shown as their own `provider/model (label)` row so the overhead stays visible. They never create sessions, so session counts, streaks, and session spans are unaffected. `@hank-warren/pi-auto-permissions` writes one for guardian reviews; set `PI_STATS_DISABLE_USAGE_SIDECARS=1` to ignore all of them.
+Records are de-duplicated by `id`, counted in every total, and shown as their own `provider/model (label)` row so the overhead stays visible. Session `usage` entries appear the same way as `provider/model (kind)`.
+
+An extension that records a call both ways — a session `usage` entry for Pi 0.86+ and a sidecar for older `pi-stats` versions — gives the sidecar the id `<sessionId>:<usageEntryId>` (the session header id and the usage entry id). That call is counted once, from the session entry; sidecars without a matching entry, and entries without a matching sidecar, are each counted normally. They never create sessions, so session counts, streaks, and session spans are unaffected. `@hank-warren/pi-auto-permissions` writes one for guardian reviews; set `PI_STATS_DISABLE_USAGE_SIDECARS=1` to ignore all of them.
 
 The standard Pi session root, the current external session directory, `PI_CODING_AGENT_SESSION_DIR`, and a configured `subagents.defaultSessionDir` are discovered automatically. Add unusual one-off roots with the platform-delimited `PI_STATS_SESSION_DIRS` environment variable.
 

@@ -106,7 +106,7 @@ test("atomic concurrent writers leave one valid cache and no temporary files", a
 		scanStats({ agentDir: data.agentDir, sessionRoots: [data.sessions], force: true }),
 	]);
 	const parsed = JSON.parse(await readFile(statsCachePath(data.agentDir), "utf8")) as { version: number };
-	assert.equal(parsed.version, 3);
+	assert.equal(parsed.version, 4);
 	assert.deepEqual((await readdir(join(data.agentDir, "pi-stats"))).sort(), ["cache.json"]);
 });
 
@@ -154,6 +154,43 @@ test("counts extension usage sidecars without inventing sessions", async (t) => 
 		env: { PI_STATS_DISABLE_USAGE_SIDECARS: "1" },
 	});
 	assert.equal(disabled.usage.filter((record) => record.kind === "sidecar").length, 0);
+});
+
+test("counts a Pi usage entry once when an extension sidecar mirrors it", async (t) => {
+	const data = await fixture();
+	t.after(() => rm(data.base, { recursive: true, force: true }));
+	const usageEntry = {
+		type: "usage",
+		id: "u1",
+		parentId: "assistant",
+		timestamp: "2026-08-01T00:00:03.000Z",
+		kind: "context_prune",
+		provider: "anthropic",
+		model: "claude-fable-5",
+		usage: { input: 50, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 60, cost: { total: 0.05 } },
+	};
+	await appendFile(data.file, `${JSON.stringify(usageEntry)}\n`, "utf8");
+	const sidecarDir = join(data.agentDir, "pi-context-prune");
+	await mkdir(sidecarDir, { recursive: true });
+	const mirror = { id: "session:u1", sessionId: "session", usageEntryId: "u1", ts: usageEntry.timestamp, source: "context-prune" };
+	await writeFile(
+		join(sidecarDir, "usage.jsonl"),
+		sidecarLine({ ...mirror, usage: { input: 50, output: 10, cacheRead: 0, cacheWrite: 0, reasoning: 0, cost: 0.05 } }) +
+			sidecarLine({ id: "session:u2", source: "context-prune" }),
+		"utf8",
+	);
+
+	for (const force of [true, false]) {
+		const index = await scanStats({ agentDir: data.agentDir, sessionRoots: [data.sessions], force });
+		const entries = index.usage.filter((record) => record.kind === "usage");
+		assert.equal(entries.length, 1);
+		assert.equal(entries[0]!.model, "anthropic/claude-fable-5 (context_prune)");
+		assert.deepEqual(
+			index.usage.filter((record) => record.kind === "sidecar").map((record) => record.sharedId),
+			["session:u2"],
+			"only the sidecar without a matching session entry is counted",
+		);
+	}
 });
 
 test("discovers configured and extra session roots without duplicates", async (t) => {

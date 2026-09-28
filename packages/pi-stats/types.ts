@@ -15,8 +15,10 @@ export interface UsageRecord {
 	timestamp: number;
 	model: string;
 	usage: UsageTotals;
-	kind: "assistant" | "tool" | "summary" | "sidecar";
+	kind: "assistant" | "tool" | "summary" | "usage" | "sidecar";
 	toolName?: string;
+	/** `<sessionId>:<usageEntryId>` on usage entries, the record id on sidecars; a match counts the call once. */
+	sharedId?: string;
 	childSessionFiles?: string[];
 }
 
@@ -55,7 +57,7 @@ export interface CachedFileRecord {
 }
 
 export interface StatsCacheFile {
-	version: 3;
+	version: 4;
 	files: Record<string, CachedFileRecord>;
 }
 

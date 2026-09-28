@@ -1,5 +1,15 @@
 # @hank-warren/pi-stats
 
+## 0.5.0
+
+### Minor Changes
+
+- Count Pi `usage` session entries and de-duplicate them against mirrored extension sidecars (#42).
+
+  Pi 0.86 added `SessionManager.appendUsage()`, which records model calls made outside the conversation, such as cache warming, as `type: "usage"` session entries. `/stats` now counts them in every total and shows them as `provider/model (<kind>)` rows. Unknown kinds are counted like any other usage.
+
+  An extension that also mirrors such a call into a usage sidecar for older pi-stats versions gives the sidecar the id `<sessionId>:<usageEntryId>`. That call is counted once, from the session entry. Sidecars without a matching entry, and entries without a matching sidecar, are still counted. The stats cache version is bumped, so existing caches are rescanned once.
+
 ## 0.4.2
 
 ### Patch Changes
