@@ -20,6 +20,7 @@ EXPECTED_EXTENSION_ENTRYPOINTS = [
     "./packages/pi-stash/index.ts",
     "./packages/pi-cliproxyapi-provider/index.ts",
     "./packages/pi-codex-compaction/index.ts",
+    "./packages/pi-thinking-step/index.ts",
 ]
 # Public resources must live in inventoried packages: a top-level extensions/
 # or skills/ directory would bypass package validation and ship through the
@@ -65,6 +66,7 @@ PUBLIC_PACKAGES = {
     "packages/pi-stash": "@hank-warren/pi-stash",
     "packages/pi-cliproxyapi-provider": "@hank-warren/pi-cliproxyapi-provider",
     "packages/pi-codex-compaction": "@hank-warren/pi-codex-compaction",
+    "packages/pi-thinking-step": "@hank-warren/pi-thinking-step",
 }
 # Sources deliberately duplicated byte-for-byte instead of shared through a
 # package dependency, because sharing them would cost far more than copying
