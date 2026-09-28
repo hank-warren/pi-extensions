@@ -1,7 +1,8 @@
 import type { CpaModel } from "./cpa.ts";
 import { findMetadataMatch, type MetadataMatchMethod } from "./matching.ts";
-import { getModelApiOverride, isCodexResponsesModel, type ModelApiContext } from "./model-api.ts";
+import { resolveModelWire, type ModelWire } from "./model-api.ts";
 import { getModelCapabilityOverrides, thinkingLevelMapFromMetadata } from "./model-capabilities.ts";
+import { NO_PI_PROFILES, type PiModelProfiles } from "./pi-profiles.ts";
 import type { Gpt56ContextWindowMode } from "./settings.ts";
 import type {
   InputModality,
@@ -68,41 +69,63 @@ function costFromMetadata(metadata: ModelsDevMetadata): ProviderModelConfigLike[
 }
 
 function contextWindowForModel(
-  context: ModelApiContext,
+  wire: ModelWire,
   metadataContextWindow: number | undefined,
   mode: Gpt56ContextWindowMode,
 ): number {
-  if (!isCodexResponsesModel(context)) return metadataContextWindow ?? PI_MODEL_DEFAULTS.contextWindow;
+  if (!wire.codexResponses) return metadataContextWindow ?? PI_MODEL_DEFAULTS.contextWindow;
   if (mode === "full") return metadataContextWindow ?? GPT_5_6_CANONICAL_CONTEXT_WINDOW;
   return GPT_5_6_CANONICAL_CONTEXT_WINDOW;
+}
+
+/**
+ * Compat flags taken from pi's native profile. Only per-turn effort is carried:
+ * it is the one native Anthropic capability verified end to end through
+ * CLIProxyAPI (v8.0.3 forwards the mid-conversation-output-config beta, and
+ * Opus 5/5.5 accept an effort switch across a tool loop). Mid-conversation
+ * system messages and tool changes stay off: CLIProxyAPI's OAuth tool-name
+ * aliasing misses `tool_addition`/`tool_removal` blocks (router-for-me/CLIProxyAPI#6174).
+ */
+function compatFromWire(wire: ModelWire): ProviderModelConfigLike["compat"] | undefined {
+  if (wire.api !== "anthropic-messages" || wire.profile?.supportsMidConvoEffort !== true) return undefined;
+  // Typed loosely: older pi-ai releases do not declare the flag and ignore it.
+  return { supportsMidConvoEffort: true } as ProviderModelConfigLike["compat"];
 }
 
 function modelFromMetadata(
   cpaModel: CpaModel,
   metadata: ModelsDevMetadata,
   gpt56ContextWindow: Gpt56ContextWindowMode,
+  profiles: PiModelProfiles,
 ): ProviderModelConfigLike {
   const capabilityContext = {
     availableModelId: cpaModel.id,
     metadataModelId: metadata.id,
   };
+  const wire = resolveModelWire(capabilityContext, profiles);
   const capabilityOverrides = getModelCapabilityOverrides(capabilityContext);
-  const api = getModelApiOverride(capabilityContext);
-  const reasoning = capabilityOverrides.reasoning ?? metadata.reasoning ?? PI_MODEL_DEFAULTS.reasoning;
-  // Family rules encode knowledge models.dev lacks (GPT-6's minimal→low
-  // downmap); otherwise the model's own effort list decides which levels exist.
-  const thinkingLevelMap = capabilityOverrides.thinkingLevelMap
+  const reasoning = wire.profile?.reasoning
+    ?? capabilityOverrides.reasoning
+    ?? metadata.reasoning
+    ?? PI_MODEL_DEFAULTS.reasoning;
+  // Pi's native map for the upstream CPA fronts is authoritative. Family rules
+  // cover models newer than the running pi; otherwise the metadata decides.
+  const profileMap = wire.profile?.thinkingLevelMap;
+  const thinkingLevelMap = (profileMap ? { ...profileMap } : undefined)
+    ?? capabilityOverrides.thinkingLevelMap
     ?? (reasoning ? thinkingLevelMapFromMetadata(metadata) : undefined);
+  const compat = compatFromWire(wire);
 
   return {
     id: cpaModel.id,
     name: metadata.name ?? cpaModel.id,
     reasoning,
-    ...(api ? { api } : {}),
+    ...(wire.api ? { api: wire.api } : {}),
+    ...(compat ? { compat } : {}),
     ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
     input: inputFromMetadata(metadata),
     cost: costFromMetadata(metadata),
-    contextWindow: contextWindowForModel(capabilityContext, metadata.limit?.context, gpt56ContextWindow),
+    contextWindow: contextWindowForModel(wire, metadata.limit?.context, gpt56ContextWindow),
     maxTokens: metadata.limit?.output ?? PI_MODEL_DEFAULTS.maxTokens,
   };
 }
@@ -115,18 +138,26 @@ function cloneModelDefaults(): typeof PI_MODEL_DEFAULTS {
   };
 }
 
-function defaultModel(cpaModel: CpaModel, gpt56ContextWindow: Gpt56ContextWindowMode): ProviderModelConfigLike {
+function defaultModel(
+  cpaModel: CpaModel,
+  gpt56ContextWindow: Gpt56ContextWindowMode,
+  profiles: PiModelProfiles,
+): ProviderModelConfigLike {
   const modelContext = { availableModelId: cpaModel.id };
+  const wire = resolveModelWire(modelContext, profiles);
   const capabilityOverrides = getModelCapabilityOverrides(modelContext);
-  const api = getModelApiOverride(modelContext);
+  const compat = compatFromWire(wire);
 
   return {
     id: cpaModel.id,
     name: cpaModel.id,
     ...cloneModelDefaults(),
     ...capabilityOverrides,
-    ...(api ? { api } : {}),
-    contextWindow: contextWindowForModel(modelContext, undefined, gpt56ContextWindow),
+    ...(wire.profile ? { reasoning: wire.profile.reasoning } : {}),
+    ...(wire.profile?.thinkingLevelMap ? { thinkingLevelMap: { ...wire.profile.thinkingLevelMap } } : {}),
+    ...(wire.api ? { api: wire.api } : {}),
+    ...(compat ? { compat } : {}),
+    contextWindow: contextWindowForModel(wire, undefined, gpt56ContextWindow),
   };
 }
 
@@ -167,6 +198,7 @@ export function buildProviderModels(
   gpt56ContextWindow: Gpt56ContextWindowMode = "canonical",
   overrides: ProviderModelOverrides = {},
   metadataFallbackProvider: string | null = "openrouter",
+  profiles: PiModelProfiles = NO_PI_PROFILES,
 ): BuildProviderModelsResult {
   const matchMethods = emptyMatchMethods();
   const unmatchedModelIds: string[] = [];
@@ -176,13 +208,13 @@ export function buildProviderModels(
     const match = findMetadataMatch(cpaModel, catalog, aliases, metadataFallbackProvider);
     if (!match) {
       unmatchedModelIds.push(cpaModel.id);
-      return applyModelOverride(defaultModel(cpaModel, gpt56ContextWindow), overrides);
+      return applyModelOverride(defaultModel(cpaModel, gpt56ContextWindow, profiles), overrides);
     }
 
     enriched += 1;
     matchMethods[match.method] += 1;
     return applyModelOverride(
-      modelFromMetadata(cpaModel, match.metadata, gpt56ContextWindow),
+      modelFromMetadata(cpaModel, match.metadata, gpt56ContextWindow, profiles),
       overrides,
     );
   });

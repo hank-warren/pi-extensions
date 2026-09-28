@@ -37,7 +37,7 @@ export interface BuiltinSeed {
  * renamed subpath then degrades to an empty seed instead of failing the whole
  * extension load the way a static import would.
  */
-async function piBuiltinCatalog(): Promise<BuiltinCatalogSource> {
+export async function loadBuiltinCatalogSource(): Promise<BuiltinCatalogSource> {
   const all = await import("@earendil-works/pi-ai/providers/all");
   return {
     getBuiltinProviders: () => all.getBuiltinProviders() as string[],
@@ -92,7 +92,7 @@ function metadataFromModel(provider: string, model: Model<Api>): ModelsDevMetada
  */
 export async function builtinSeedCatalog(source?: BuiltinCatalogSource): Promise<BuiltinSeed> {
   try {
-    const catalogSource = source ?? await piBuiltinCatalog();
+    const catalogSource = source ?? await loadBuiltinCatalogSource();
     const available = new Set(catalogSource.getBuiltinProviders());
     const catalog: ModelsDevCatalog = {};
 

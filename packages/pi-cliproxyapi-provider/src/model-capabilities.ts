@@ -17,9 +17,15 @@ interface ModelCapabilityRule {
   overrides: ModelCapabilityOverrides;
 }
 
+/**
+ * Fallback for GPT-5.6 models newer than the running pi's `openai-codex`
+ * catalog, whose native map wins when it knows the model. The Codex route has
+ * no `minimal` effort: CLIProxyAPI rejects it (`level "minimal" not supported`),
+ * so pi's `minimal` maps up to `low`, as pi's native definitions do.
+ */
 const GPT_5_6_THINKING_LEVEL_MAP: ThinkingLevelMap = {
   off: "none",
-  minimal: "minimal",
+  minimal: "low",
   low: "low",
   medium: "medium",
   high: "high",
@@ -28,7 +34,8 @@ const GPT_5_6_THINKING_LEVEL_MAP: ThinkingLevelMap = {
 };
 
 /**
- * GPT-6 Astra cannot switch reasoning off (its catalog entry lists only
+ * Fallback for GPT-6 models newer than the running pi's `openai-codex`
+ * catalog. GPT-6 Astra cannot switch reasoning off (its catalog entry lists only
  * low..max plus an `ultra` level pi has no slot for), and it has no `minimal`
  * effort: the lowest it accepts is `low`, so pi's `minimal` maps down to it.
  * Mirrors pi's native `openai-codex/gpt-6-astra` definition.

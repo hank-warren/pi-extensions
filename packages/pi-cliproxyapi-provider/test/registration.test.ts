@@ -112,8 +112,20 @@ test("adds the Anthropic adaptive thinking compat flag to Claude models only", (
   assert.deepEqual(models[2]?.compat, { supportsStrictMode: false });
   assert.deepEqual(models[3]?.compat, { supportsStrictMode: false });
   assert.equal(models[0]?.api, "anthropic-messages");
-  // CLIProxyAPI rejects the per-message output_config this flag would produce.
+  // Registration never adds per-turn effort itself; it comes from pi's native profile.
   assert.equal((models[0]?.compat as Record<string, unknown>).supportsMidConvoEffort, undefined);
+});
+
+test("keeps per-turn effort that the provider model already carries", () => {
+  const registration = registrationForModels([
+    claudeModel("claude-opus-5-5", { supportsMidConvoEffort: true } as ProviderModelConfigLike["compat"]),
+  ]);
+
+  assert.deepEqual(registration.config.models?.[0]?.compat, {
+    supportsMidConvoEffort: true,
+    supportsStrictMode: false,
+    forceAdaptiveThinking: true,
+  });
 });
 
 test("gives Claude models a base URL without the OpenAI-compatible /v1 suffix", () => {
