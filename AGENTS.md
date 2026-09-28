@@ -20,6 +20,7 @@ packages/                      # public, npm-published pi packages
   pi-stash/                    # park an unsent prompt with Ctrl+S and restore it
   pi-cliproxyapi-provider/     # CLIProxyAPI as a pi model provider, seeded from pi's builtin catalog (fork of 0xRichardH/pi-cliproxyapi-provider)
   pi-codex-compaction/        # native Codex compaction, directly or through CPA (fork of @ogulcancelik/pi-codex-compaction)
+  pi-thinking-step/            # step the thinking level up/down with Alt+= / Alt+-
 docs/                          # template-package/ (copy-to-create package skeleton)
 scripts/                       # validate.py, test.sh, scan-secrets.sh, smoke-load.mjs, create-releases.sh
 test/                          # cross-package composition tests and the shared test support in test/support/
