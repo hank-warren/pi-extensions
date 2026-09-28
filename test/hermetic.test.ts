@@ -42,9 +42,10 @@ const CLEARED_ENV = [
 	"CLIPROXYAPI_METADATA_FALLBACK_PROVIDER",
 ];
 
-test("every test process runs with a redirected HOME and agent dir", () => {
+test("every test process runs with a redirected HOME, agent dir and temp dir", () => {
 	const home = process.env.HOME;
 	const agentDir = process.env.PI_CODING_AGENT_DIR;
+	const root = process.env.PI_EXT_HERMETIC_ROOT;
 	// The preload stamped this pid, so the redirect below belongs to this process
 	// rather than to the runner whose environment it inherited.
 	assert.equal(
@@ -54,10 +55,12 @@ test("every test process runs with a redirected HOME and agent dir", () => {
 	);
 	assert.ok(home, "HOME is set");
 	assert.ok(agentDir, "PI_CODING_AGENT_DIR is set");
+	assert.ok(root, "PI_EXT_HERMETIC_ROOT is set");
 	assert.notEqual(home, userInfo().homedir, "HOME is not the account's real home");
-	assert.ok(home.startsWith(tmpdir()), `HOME is under the scratch root: ${home}`);
-	assert.ok(agentDir.startsWith(tmpdir()), `agent dir is under the scratch root: ${agentDir}`);
-	assert.ok(existsSync(home) && existsSync(agentDir), "both scratch dirs exist");
+	assert.ok(home.startsWith(root), `HOME is under the scratch root: ${home}`);
+	assert.ok(agentDir.startsWith(root), `agent dir is under the scratch root: ${agentDir}`);
+	assert.ok(tmpdir().startsWith(root), `os.tmpdir() is under the scratch root: ${tmpdir()}`);
+	assert.ok(existsSync(home) && existsSync(agentDir) && existsSync(tmpdir()), "the scratch dirs exist");
 });
 
 /**
@@ -209,6 +212,21 @@ test("on CI a run with no pi dir at all passes", () => {
 	rmSync(dir, { recursive: true, force: true });
 	assert.equal(result.status, 0, result.stderr);
 	assert.doesNotMatch(result.stderr, /\[hermetic]/);
+});
+
+test("a temp dir the test never removes goes with the scratch root", () => {
+	const result = runUnderPreload(`
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+const leaked = mkdtempSync(join(tmpdir(), "leaky-fixture-"));
+writeFileSync(join(leaked, "auth.json"), "{}\\n");
+console.log(JSON.stringify({ leaked, root: process.env.PI_EXT_HERMETIC_ROOT }));
+`);
+	assert.equal(result.status, 0, result.stderr);
+	const { leaked, root } = JSON.parse(result.stdout.trim());
+	assert.ok(leaked.startsWith(root), `the fixture landed under the scratch root: ${leaked}`);
+	assert.equal(existsSync(leaked), false, `the unremoved fixture survived the run: ${leaked}`);
 });
 
 test("the scratch root is removed when the process exits", () => {

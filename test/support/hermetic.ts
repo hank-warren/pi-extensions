@@ -1,6 +1,6 @@
 /**
- * Test preload: every test process gets a private HOME and agent dir, and the
- * host's real `~/.pi/agent` is watched for writes.
+ * Test preload: every test process gets a private HOME, agent dir and TMPDIR,
+ * and the host's real `~/.pi/agent` is watched for writes.
  *
  * Node propagates `--import` to the processes it forks per test file, so one
  * `--import ./test/support/hermetic.ts` on the runner covers the whole suite.
@@ -108,10 +108,16 @@ const before = snapshot(realAgentDir);
 const scratchRoot = mkdtempSync(join(tmpdir(), "pi-ext-hermetic-"));
 const scratchHome = join(scratchRoot, "home");
 const scratchAgentDir = join(scratchRoot, "agent");
+const scratchTmp = join(scratchRoot, "tmp");
 mkdirSync(scratchHome, { recursive: true });
 mkdirSync(scratchAgentDir, { recursive: true });
+mkdirSync(scratchTmp, { recursive: true });
 process.env.HOME = scratchHome;
 process.env.PI_CODING_AGENT_DIR = scratchAgentDir;
+// os.tmpdir() reads TMPDIR on every call, so a temp dir a test never removes
+// goes with the scratch root instead of piling up in the host's /tmp.
+process.env.TMPDIR = scratchTmp;
+process.env.PI_EXT_HERMETIC_ROOT = scratchRoot;
 for (const name of CLEARED_ENV) delete process.env[name];
 // Proof of which process did the redirecting. A forked test process inherits the
 // runner's mutated environment, so `HOME` alone cannot tell "the preload ran
