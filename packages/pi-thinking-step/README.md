@@ -25,7 +25,7 @@ Levels run `off → minimal → low → medium → high → xhigh → max`.
 
 - **Unsupported levels are skipped.** Pi clamps a requested level to what the current model supports, and the shortcut keeps stepping until the effective level actually changes. A model without `minimal` goes straight from `low` to `off`; one with `max` but not `xhigh` goes straight from `high` to `max`.
 - **No wrap-around.** At the model's top or bottom level the key does nothing and says so: `Thinking: high (limit)`. A non-reasoning model only has `off`.
-- **Session only.** Like Shift+Tab, a step changes the current session. Pi's `Ctrl+S` still saves the current level as the default.
+- **Session only.** Like Shift+Tab, a step changes the current session. To make a level the default, open `/thinking` and press `Ctrl+S` there.
 
 ## Terminal setup
 
