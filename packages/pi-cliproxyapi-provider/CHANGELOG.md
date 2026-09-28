@@ -1,5 +1,18 @@
 # @hank-warren/pi-cliproxyapi-provider
 
+## 0.2.0
+
+### Minor Changes
+
+- Take Claude and Codex wire profiles from pi's native catalogs, and switch Claude effort per turn.
+
+  - Claude and Codex-served GPT models now use the running pi's `anthropic` and `openai-codex` catalogs for their thinking maps, reasoning flag and context window. The hand-written GPT-5.5, GPT-5.6 and GPT-6 rules remain only as fallbacks for ids pi does not list. As a result:
+    - GPT-5.6 `minimal` sends `low` instead of being rejected by the Codex route.
+    - GPT-5.5 and every other model in pi's Codex catalog go over the Responses API.
+    - GPT-5.3 Codex Spark advertises its real 128000-token window.
+  - Opus 5, Opus 5.5 and Fable 5.1 publish `supportsMidConvoEffort`. Changing the thinking level mid-session becomes a per-turn directive, so the prompt cache survives the switch.
+  - **This requires CLIProxyAPI v8.0.3 or later.** Older releases reject the directive and fail every request to those models. Set `"perTurnEffort": false` under `pi-cliproxyapi-provider` in `settings.json`, or disable it in `/cliproxyapi config` → `Models`, to keep top-level effort.
+
 ## 0.1.1
 
 ### Patch Changes
