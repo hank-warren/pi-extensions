@@ -36,6 +36,7 @@ export interface CatalogSnapshot {
   metadataUpdatedAt?: number;
   metadataSource: MetadataSource;
   gpt56ContextWindow: Gpt56ContextWindowMode;
+  perTurnEffort: boolean;
   built: BuildProviderModelsResult;
 }
 
@@ -55,6 +56,8 @@ export interface CatalogRefreshResult {
 export interface ProviderCatalogOptions {
   config: CpaProviderConfig;
   gpt56ContextWindow: Gpt56ContextWindowMode;
+  /** Publish pi's native per-turn Claude effort. Defaults to true. */
+  perTurnEffort?: boolean;
   getApiKey: () => Promise<string | undefined>;
   backgroundTimeoutMs?: number;
   manualTimeoutMs?: number;
@@ -284,6 +287,7 @@ export class ProviderCatalog {
       metadataUpdatedAt,
       metadataSource,
       gpt56ContextWindow: this.options.gpt56ContextWindow,
+      perTurnEffort: this.options.perTurnEffort ?? true,
       built: buildProviderModels(
         cpaModels,
         metadata,
@@ -292,6 +296,7 @@ export class ProviderCatalog {
         this.options.config.modelOverrides,
         this.options.config.metadataFallbackProvider,
         this.piProfiles,
+        this.options.perTurnEffort ?? true,
       ),
     };
     return this.snapshot;

@@ -8,7 +8,7 @@
 > models.dev seed is gone; first-run metadata comes from pi's own built-in model catalog instead.
 > Never install both this package and the upstream one at once, or the provider is registered twice.
 
-`pi-cliproxyapi-provider` registers one [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) instance as a pi model provider. It discovers models from CLIProxyAPI's OpenAI-compatible `/v1/models` endpoint and enriches them with provider-specific metadata from [models.dev](https://models.dev/). Mixed catalogs use OpenAI Completions by default, while Codex-served GPT models (every model in pi's `openai-codex` catalog, plus GPT-5.6 and GPT-6 ids pi does not know yet) use the Responses API so pi can read their usage data, and Claude models use the Anthropic Messages API so signed thinking blocks and per-turn thinking effort survive a multi-turn conversation. Canonical `/v1/models` owners such as `openai` select the matching provider metadata; aliases can override that selection when a proxy routes billing differently.
+`pi-cliproxyapi-provider` registers one [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) instance as a pi model provider. It discovers models from CLIProxyAPI's OpenAI-compatible `/v1/models` endpoint and enriches them with provider-specific metadata from [models.dev](https://models.dev/). Mixed catalogs use OpenAI Completions by default, while Codex-served GPT models (every model in pi's `openai-codex` catalog, plus GPT-5.5, GPT-5.6 and GPT-6 ids the running pi does not list) use the Responses API so pi can read their usage data, and Claude models use the Anthropic Messages API so signed thinking blocks and per-turn thinking effort survive a multi-turn conversation. Canonical `/v1/models` owners such as `openai` select the matching provider metadata; aliases can override that selection when a proxy routes billing differently.
 
 ## Install
 
@@ -63,7 +63,7 @@ Project config supports `metadataFallbackProvider`, metadata aliases, and bounde
 
 ### GPT-5.6 / GPT-6 context window
 
-The provider advertises a `272000`-token context window for Codex-served GPT models (GPT-5.5, GPT-5.6 and GPT-6) by default. This matches pi's conservative canonical limit, keeps compaction behaviour consistent with native model definitions, and avoids assuming that every CLIProxyAPI upstream account or route enables the provider's full long-context limit.
+The provider advertises pi's native context window for Codex-served GPT models by default: `272000` tokens for GPT-5.5, GPT-5.6 and GPT-6, and the smaller native window where pi defines one (`128000` for GPT-5.3 Codex Spark). Ids pi does not list get `272000`. This matches pi's conservative canonical limit, keeps compaction behaviour consistent with native model definitions, and avoids assuming that every CLIProxyAPI upstream account or route enables the provider's full long-context limit.
 
 To opt into the full context limit reported by models.dev, add this package-specific setting to global `~/.pi/agent/settings.json`:
 
@@ -77,19 +77,20 @@ To opt into the full context limit reported by models.dev, add this package-spec
 
 The same setting can be placed in project `.pi/settings.json`; project settings override global settings. Supported values are:
 
-- `"canonical"` (default): advertise `272000` tokens and compact at pi's conservative boundary.
+- `"canonical"` (default): advertise pi's native window (`272000` for most models) and compact at pi's conservative boundary.
 - `"full"`: advertise the models.dev context limit, allowing pi to retain substantially more history before compaction.
 
 Use `"full"` only when the selected CLIProxyAPI route and upstream account actually support that limit. Requests above `272000` input tokens also use the higher models.dev context-pricing tier where one is defined.
 
 ### Model and display configuration
 
-Run `/cliproxyapi config` in pi's TUI to edit every package-level `settings.json` value. The tabbed panel has `Connection`, `Models`, and `Display` sections; it controls the GPT-5.6 context-window mode and whether the model selector shows the published strict tool-schema capability.
+Run `/cliproxyapi config` in pi's TUI to edit every package-level `settings.json` value. The tabbed panel has `Connection`, `Models`, and `Display` sections; it controls the GPT-5.6 context-window mode, per-turn Claude effort, and whether the model selector shows the published strict tool-schema capability.
 
 ```json
 {
   "pi-cliproxyapi-provider": {
     "gpt56ContextWindow": "canonical",
+    "perTurnEffort": true,
     "showStrictMode": false
   }
 }
@@ -131,11 +132,13 @@ Pi only offers the extended `xhigh` and `max` thinking levels when a model publi
 
 `off` follows the same data. A `none` effort maps to it, a `toggle` option leaves it available, and a model with neither (Claude Fable 5.x) marks it `null`, because the upstream rejects `thinking.type = disabled` for those models.
 
-For Claude and Codex-served GPT models, pi's own native definition wins over all of that. models.dev describes the public APIs, while CLIProxyAPI fronts Anthropic and the Codex backend, which pi's `anthropic` and `openai-codex` catalogs describe exactly — for example, the Codex route has no `minimal` effort (CLIProxyAPI rejects it), so pi's native maps send `low` for it. The package reads those two catalogs from the running pi at load, so a pi upgrade brings new models and capability changes without a release here. Hand-written GPT-5.6 and GPT-6 maps remain only as fallbacks for ids newer than the running pi.
+For Claude and Codex-served GPT models, pi's own native definition wins over all of that. models.dev describes the public APIs, while CLIProxyAPI fronts Anthropic and the Codex backend, which pi's `anthropic` and `openai-codex` catalogs describe exactly — for example, the Codex route has no `minimal` effort (CLIProxyAPI rejects it), so pi's native maps send `low` for it. The package reads those two catalogs from the running pi at load, so a pi upgrade brings new models and capability changes without a release here. Hand-written GPT-5.5, GPT-5.6 and GPT-6 maps remain only as fallbacks for ids the running pi does not list, whether they are newer than it or a later pi dropped them. Pi's native Claude maps also expose `off` for Opus 4.7 and 4.8, which CLIProxyAPI accepts as `thinking.type = disabled`.
 
 ### Per-turn effort (Claude)
 
-Claude models that pi's native catalog marks with `supportsMidConvoEffort` (Opus 5, Opus 5.5, Fable 5.1 at the time of writing) publish it here too. Changing the thinking level mid-session then becomes a per-turn directive instead of a change to the request's top-level `output_config`, so the prompt cache survives the switch: verified through CLIProxyAPI v8.0.3, where an effort switch across a tool loop kept reading the whole cached conversation while the top-level form re-wrote it. Signed thinking replays across the switch. Other Claude models keep top-level effort. Pi's native mid-conversation system messages and tool changes are *not* carried over: CLIProxyAPI's OAuth tool-name aliasing does not rewrite `tool_addition`/`tool_removal` blocks ([router-for-me/CLIProxyAPI#6174](https://github.com/router-for-me/CLIProxyAPI/issues/6174)).
+**Requires CLIProxyAPI v8.0.3 or later.** Older releases reject the per-turn directive with `messages.N.output_config: Extra inputs are not permitted`, which fails every request to these models; set `"perTurnEffort": false` (or disable it under `/cliproxyapi config` → `Models`) for them, and effort goes back to the request's top-level `output_config`.
+
+Claude models that pi's native catalog marks with `supportsMidConvoEffort` (Opus 5, Opus 5.5, Fable 5.1 at the time of writing) publish it here too, when CLIProxyAPI reports them under the `anthropic` owner. A model it serves from another upstream (Antigravity, an OpenAI-compatible provider) is translated away from the Messages shape, where the directive cannot survive, so it keeps top-level effort. Changing the thinking level mid-session then becomes a per-turn directive instead of a change to the request's top-level `output_config`, so the prompt cache survives the switch: verified through CLIProxyAPI v8.0.3, where an effort switch across a tool loop kept reading the whole cached conversation while the top-level form re-wrote it. Signed thinking replays across the switch. Other Claude models keep top-level effort. Pi's native mid-conversation system messages and tool changes are *not* carried over: CLIProxyAPI's OAuth tool-name aliasing does not rewrite `tool_addition`/`tool_removal` blocks ([router-for-me/CLIProxyAPI#6174](https://github.com/router-for-me/CLIProxyAPI/issues/6174)).
 
 ## Metadata aliases
 
@@ -218,7 +221,7 @@ On a pi whose `@earendil-works/pi-ai` does not export `providers/all` — an old
 
 Matching a CLIProxyAPI model id to a catalog entry is identity-first: an explicit alias wins, then an exact id, then a canonical `owned_by` such as `openai`, then a provider hint embedded in a noncanonical owner (`feedmob-opencode-go` → `opencode-go`, while `ken-team-litellm` implies no upstream), then a unique normalized suffix. Only if all of that is unresolved does the configured `metadataFallbackProvider` apply, and only when that provider has exactly one normalized match. Legacy flat caches without source-provider identity are ignored in favour of the seed until a refresh replaces them. Aliases are metadata-only: the registered pi model keeps the original CLIProxyAPI id so requests still route through the proxy correctly.
 
-API routing follows from the same decision. The provider defaults to OpenAI Completions for its mixed catalog; Codex-served GPT models (pi's `openai-codex` catalog, falling back to the GPT-5.6/GPT-6 id patterns) take a model-level Responses override because pi's token and cost accounting needs their Responses usage shape; and Claude models take an Anthropic Messages override because CLIProxyAPI proxies Anthropic upstreams at `/v1/messages` with signed thinking blocks intact, while the Chat Completions shape can represent neither those signatures nor per-turn thinking effort — so Claude routed through it loses reasoning continuity across a multi-turn tool loop. Those models also publish `forceAdaptiveThinking`, matching pi's native Claude definitions. Both initial registration and dynamic refreshes publish the same materialised model definitions.
+API routing follows from the same decision. The provider defaults to OpenAI Completions for its mixed catalog; Codex-served GPT models (pi's `openai-codex` catalog, falling back to the GPT-5.5/GPT-5.6/GPT-6 id patterns) take a model-level Responses override because pi's token and cost accounting needs their Responses usage shape; and Claude models take an Anthropic Messages override because CLIProxyAPI proxies Anthropic upstreams at `/v1/messages` with signed thinking blocks intact, while the Chat Completions shape can represent neither those signatures nor per-turn thinking effort — so Claude routed through it loses reasoning continuity across a multi-turn tool loop. Those models also publish `forceAdaptiveThinking`, matching pi's native Claude definitions. Both initial registration and dynamic refreshes publish the same materialised model definitions.
 
 ## Attribution
 

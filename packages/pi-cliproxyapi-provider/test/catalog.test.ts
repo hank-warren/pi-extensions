@@ -437,5 +437,17 @@ test("catalog builds models with the injected pi profiles", async () => {
     assert.equal(loads, 1, "profiles are static per process");
     assert.deepEqual(byId["claude-opus-5-5"].compat, { supportsMidConvoEffort: true });
     assert.equal(byId["gpt-5.5"].api, "openai-responses");
+    assert.equal(snapshot.perTurnEffort, true, "on by default");
+
+    const disabled = await new ProviderCatalog({
+      config: { ...config, modelsDevEnabled: false },
+      gpt56ContextWindow: "canonical",
+      perTurnEffort: false,
+      getApiKey: async () => undefined,
+      backgroundTimeoutMs: 50,
+      loadPiProfiles: async () => ({ find: (upstream) => upstream === "anthropic" ? { reasoning: true, supportsMidConvoEffort: true } : undefined }),
+    }).load();
+    assert.equal(disabled.perTurnEffort, false);
+    assert.equal(disabled.built.models.find((model) => model.id === "claude-opus-5-5")?.compat, undefined);
   });
 });

@@ -8,11 +8,14 @@ export type Gpt56ContextWindowMode = "canonical" | "full";
 
 export interface ProviderSettings {
   gpt56ContextWindow: Gpt56ContextWindowMode;
+  /** Publish pi's native per-turn Claude effort; needs CLIProxyAPI v8.0.3 or later. */
+  perTurnEffort: boolean;
   showStrictMode: boolean;
 }
 
 export const DEFAULT_PROVIDER_SETTINGS: ProviderSettings = {
   gpt56ContextWindow: "canonical",
+  perTurnEffort: true,
   showStrictMode: false,
 };
 
@@ -31,11 +34,15 @@ function parseSettingsLayer(settings: unknown, scope: string): Partial<ProviderS
       `${PROVIDER_SETTINGS_NAMESPACE}.gpt56ContextWindow must be "canonical" or "full" in ${scope} settings.json`,
     );
   }
+  if (record.perTurnEffort !== undefined && typeof record.perTurnEffort !== "boolean") {
+    throw new Error(`${PROVIDER_SETTINGS_NAMESPACE}.perTurnEffort must be a boolean in ${scope} settings.json`);
+  }
   if (record.showStrictMode !== undefined && typeof record.showStrictMode !== "boolean") {
     throw new Error(`${PROVIDER_SETTINGS_NAMESPACE}.showStrictMode must be a boolean in ${scope} settings.json`);
   }
   return {
     ...(gpt56ContextWindow !== undefined ? { gpt56ContextWindow } : {}),
+    ...(record.perTurnEffort !== undefined ? { perTurnEffort: record.perTurnEffort } : {}),
     ...(record.showStrictMode !== undefined ? { showStrictMode: record.showStrictMode } : {}),
   };
 }

@@ -6,6 +6,7 @@ export interface ModelApiContext {
   metadataModelId?: string;
 }
 
+const GPT_5_5_MODEL = /^gpt-5\.5(?:-|$)/;
 const GPT_5_6_MODEL = /^gpt-5\.6(?:-|$)/;
 const GPT_6_MODEL = /^gpt-6(?:\.\d+)?(?:-|$)/;
 const CLAUDE_MODEL = /^claude(?:-|$)/;
@@ -18,6 +19,10 @@ export function modelName(id: string): string {
 function matchesModelId(context: ModelApiContext, pattern: RegExp): boolean {
   const ids = [context.availableModelId, context.metadataModelId].filter((id): id is string => id !== undefined);
   return ids.some((id) => pattern.test(modelName(id)));
+}
+
+export function isGpt55Model(context: ModelApiContext): boolean {
+  return matchesModelId(context, GPT_5_5_MODEL);
 }
 
 export function isGpt56Model(context: ModelApiContext): boolean {
@@ -35,11 +40,14 @@ export function isGpt6Model(context: ModelApiContext): boolean {
  * Responses-only upstream, the same usage shape, and the same conservative
  * 272000 context window unless the CPA route is known to allow more.
  *
- * Membership is pi's own `openai-codex` catalog when one is supplied; the
- * GPT-5.6/GPT-6 patterns cover models newer than the running pi.
+ * Membership is pi's own `openai-codex` catalog when one is supplied. The
+ * GPT-5.5/5.6/6 patterns cover models newer than the running pi and models a
+ * later pi drops from its catalog (0.87 dropped GPT-5.4), which would otherwise
+ * fall back to Chat Completions with the models.dev window.
  */
 export function isCodexResponsesModel(context: ModelApiContext, profiles?: PiModelProfiles): boolean {
-  return isGpt56Model(context)
+  return isGpt55Model(context)
+    || isGpt56Model(context)
     || isGpt6Model(context)
     || profiles?.find("openai-codex", context) !== undefined;
 }

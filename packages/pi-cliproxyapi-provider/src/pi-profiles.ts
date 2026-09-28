@@ -17,6 +17,8 @@ const PI_UPSTREAMS: readonly PiUpstream[] = ["anthropic", "openai-codex"];
 export interface PiModelProfile {
   reasoning: boolean;
   thinkingLevelMap?: ThinkingLevelMap;
+  /** Pi's native context window; some Codex models (GPT-5.3 Codex Spark) are smaller than the family default. */
+  contextWindow?: number;
   /** Pi's native per-turn effort support (Anthropic mid-conversation `output_config`). */
   supportsMidConvoEffort?: boolean;
 }
@@ -50,6 +52,7 @@ function profileFromModel(model: Model<Api>): PiModelProfile {
   const compat = model.compat as { supportsMidConvoEffort?: boolean } | undefined;
   return {
     reasoning: model.reasoning,
+    ...(model.contextWindow > 0 ? { contextWindow: model.contextWindow } : {}),
     ...(model.thinkingLevelMap ? { thinkingLevelMap: { ...model.thinkingLevelMap } } : {}),
     ...(compat?.supportsMidConvoEffort === true ? { supportsMidConvoEffort: true } : {}),
   };

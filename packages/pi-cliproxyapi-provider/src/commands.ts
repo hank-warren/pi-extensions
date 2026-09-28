@@ -122,6 +122,7 @@ function statusText(config: ReturnType<typeof loadConfig>, snapshot: CatalogSnap
     `CPA snapshot: ${age(snapshot.cpaUpdatedAt)}`,
     metadataStatusLine(snapshot, metadataStale),
     `GPT-5.6 context window: ${snapshot.gpt56ContextWindow === "full" ? "full models.dev limit" : "canonical 272000"}`,
+    `Per-turn Claude effort: ${snapshot.perTurnEffort ? "enabled (needs CLIProxyAPI v8.0.3+)" : "disabled"}`,
   ].join("\n");
 }
 

@@ -74,8 +74,11 @@ function contextWindowForModel(
   mode: Gpt56ContextWindowMode,
 ): number {
   if (!wire.codexResponses) return metadataContextWindow ?? PI_MODEL_DEFAULTS.contextWindow;
-  if (mode === "full") return metadataContextWindow ?? GPT_5_6_CANONICAL_CONTEXT_WINDOW;
-  return GPT_5_6_CANONICAL_CONTEXT_WINDOW;
+  // Pi's native window wins in canonical mode: it is smaller for some models
+  // (Codex Spark is 128000), and overstating it makes pi compact too late.
+  const canonical = wire.profile?.contextWindow ?? GPT_5_6_CANONICAL_CONTEXT_WINDOW;
+  if (mode === "full") return metadataContextWindow ?? canonical;
+  return canonical;
 }
 
 /**
@@ -85,9 +88,21 @@ function contextWindowForModel(
  * Opus 5/5.5 accept an effort switch across a tool loop). Mid-conversation
  * system messages and tool changes stay off: CLIProxyAPI's OAuth tool-name
  * aliasing misses `tool_addition`/`tool_removal` blocks (router-for-me/CLIProxyAPI#6174).
+ *
+ * Older CLIProxyAPI releases reject the per-turn directive
+ * (`messages.N.output_config: Extra inputs are not permitted`), hence the
+ * `perTurnEffort` setting. A model CPA reports under a non-Anthropic owner
+ * (Antigravity, an OpenAI-compatible upstream) is translated away from the
+ * Messages shape, where a system-role message cannot carry the directive.
  */
-function compatFromWire(wire: ModelWire): ProviderModelConfigLike["compat"] | undefined {
+function compatFromWire(
+  wire: ModelWire,
+  cpaModel: CpaModel,
+  perTurnEffort: boolean,
+): ProviderModelConfigLike["compat"] | undefined {
+  if (!perTurnEffort) return undefined;
   if (wire.api !== "anthropic-messages" || wire.profile?.supportsMidConvoEffort !== true) return undefined;
+  if (cpaModel.owned_by !== undefined && cpaModel.owned_by !== "anthropic") return undefined;
   // Typed loosely: older pi-ai releases do not declare the flag and ignore it.
   return { supportsMidConvoEffort: true } as ProviderModelConfigLike["compat"];
 }
@@ -97,6 +112,7 @@ function modelFromMetadata(
   metadata: ModelsDevMetadata,
   gpt56ContextWindow: Gpt56ContextWindowMode,
   profiles: PiModelProfiles,
+  perTurnEffort: boolean,
 ): ProviderModelConfigLike {
   const capabilityContext = {
     availableModelId: cpaModel.id,
@@ -114,7 +130,7 @@ function modelFromMetadata(
   const thinkingLevelMap = (profileMap ? { ...profileMap } : undefined)
     ?? capabilityOverrides.thinkingLevelMap
     ?? (reasoning ? thinkingLevelMapFromMetadata(metadata) : undefined);
-  const compat = compatFromWire(wire);
+  const compat = compatFromWire(wire, cpaModel, perTurnEffort);
 
   return {
     id: cpaModel.id,
@@ -142,11 +158,12 @@ function defaultModel(
   cpaModel: CpaModel,
   gpt56ContextWindow: Gpt56ContextWindowMode,
   profiles: PiModelProfiles,
+  perTurnEffort: boolean,
 ): ProviderModelConfigLike {
   const modelContext = { availableModelId: cpaModel.id };
   const wire = resolveModelWire(modelContext, profiles);
   const capabilityOverrides = getModelCapabilityOverrides(modelContext);
-  const compat = compatFromWire(wire);
+  const compat = compatFromWire(wire, cpaModel, perTurnEffort);
 
   return {
     id: cpaModel.id,
@@ -199,6 +216,7 @@ export function buildProviderModels(
   overrides: ProviderModelOverrides = {},
   metadataFallbackProvider: string | null = "openrouter",
   profiles: PiModelProfiles = NO_PI_PROFILES,
+  perTurnEffort = true,
 ): BuildProviderModelsResult {
   const matchMethods = emptyMatchMethods();
   const unmatchedModelIds: string[] = [];
@@ -208,13 +226,13 @@ export function buildProviderModels(
     const match = findMetadataMatch(cpaModel, catalog, aliases, metadataFallbackProvider);
     if (!match) {
       unmatchedModelIds.push(cpaModel.id);
-      return applyModelOverride(defaultModel(cpaModel, gpt56ContextWindow, profiles), overrides);
+      return applyModelOverride(defaultModel(cpaModel, gpt56ContextWindow, profiles, perTurnEffort), overrides);
     }
 
     enriched += 1;
     matchMethods[match.method] += 1;
     return applyModelOverride(
-      modelFromMetadata(cpaModel, match.metadata, gpt56ContextWindow, profiles),
+      modelFromMetadata(cpaModel, match.metadata, gpt56ContextWindow, profiles, perTurnEffort),
       overrides,
     );
   });

@@ -1,5 +1,5 @@
 import type { ThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
-import { isGpt6Model } from "./model-api.ts";
+import { isGpt55Model, isGpt6Model } from "./model-api.ts";
 import type { ModelsDevMetadata } from "./types.ts";
 
 export interface ModelCapabilityContext {
@@ -16,6 +16,16 @@ interface ModelCapabilityRule {
   matches: (context: ModelCapabilityContext) => boolean;
   overrides: ModelCapabilityOverrides;
 }
+
+/**
+ * Fallback for GPT-5.5 when the running pi's `openai-codex` catalog no longer
+ * lists it. Mirrors pi's native definition: no `minimal` on the Codex route,
+ * `xhigh` but no `max`.
+ */
+const GPT_5_5_THINKING_LEVEL_MAP: ThinkingLevelMap = {
+  minimal: "low",
+  xhigh: "xhigh",
+};
 
 /**
  * Fallback for GPT-5.6 models newer than the running pi's `openai-codex`
@@ -57,6 +67,13 @@ function includesModelFamily(context: ModelCapabilityContext, family: string): b
 }
 
 const MODEL_CAPABILITY_RULES: readonly ModelCapabilityRule[] = [
+  {
+    matches: (context) => isGpt55Model(context),
+    overrides: {
+      reasoning: true,
+      thinkingLevelMap: GPT_5_5_THINKING_LEVEL_MAP,
+    },
+  },
   {
     matches: (context) => includesModelFamily(context, "gpt-5.6"),
     overrides: {

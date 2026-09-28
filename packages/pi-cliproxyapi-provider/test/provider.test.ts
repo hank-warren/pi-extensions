@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { buildProviderModels, PI_MODEL_DEFAULTS } from "../src/provider.ts";
-import { loadPiModelProfiles } from "../src/pi-profiles.ts";
+import { loadPiModelProfiles, NO_PI_PROFILES } from "../src/pi-profiles.ts";
 import type { CpaModel } from "../src/cpa.ts";
 import type { ModelsDevCatalog } from "../src/types.ts";
 
@@ -59,7 +59,8 @@ test("enriches matched models but preserves CPA model IDs", () => {
   assert.equal(result.models[0].id, "gpt-5.5");
   assert.equal(result.models[0].name, "GPT-5.5");
   assert.deepEqual(result.models[0].input, ["text", "image"]);
-  assert.equal(result.models[0].contextWindow, 1050000);
+  // GPT-5.5 is Codex-served, so it keeps the canonical window even without pi's profile.
+  assert.equal(result.models[0].contextWindow, 272000);
   assert.equal(result.models[1].id, "claude-opus-4-6-thinking");
   assert.equal(result.models[1].name, "Claude Opus 4.6");
   assert.equal(result.stats.enriched, 2);
@@ -203,7 +204,7 @@ test("routes every catalog Claude model through the Anthropic Messages API", () 
 test("leaves non-Claude, non-Codex-Responses models on the provider default API", () => {
   const result = buildProviderModels([
     { id: "gemini-3-pro" },
-    { id: "gpt-5.5" },
+    { id: "gpt-5.2" },
     { id: "gpt-image-2" },
     { id: "codex-auto-review" },
     { id: "not-claude-opus" },
@@ -375,9 +376,9 @@ const effortCatalog = {
     reasoning: true,
     reasoning_options: [{ type: "budget_tokens", min: 1024 }],
   },
-  "openai/gpt-5.5": {
-    id: "openai/gpt-5.5",
-    name: "GPT-5.5",
+  "openai/gpt-5.2": {
+    id: "openai/gpt-5.2",
+    name: "GPT-5.2",
     reasoning: true,
     reasoning_options: [{ type: "effort", values: ["none", "low", "medium", "high", "xhigh"] }],
   },
@@ -428,7 +429,7 @@ test("represents effort holes as null so pi hides only the missing level", () =>
 });
 
 test("maps a none effort onto pi's off level", () => {
-  const map = modelFor("gpt-5.5").thinkingLevelMap;
+  const map = modelFor("gpt-5.2").thinkingLevelMap;
   assert.equal(map?.off, "none");
   assert.equal(map?.xhigh, "xhigh");
   assert.equal(map?.max, null);
@@ -569,6 +570,7 @@ const piProfiles = loadPiModelProfiles({
     ],
     "openai-codex": [
       piModel("gpt-5.5", { api: "openai-codex-responses", thinkingLevelMap: { minimal: "low", xhigh: "xhigh" } }),
+      piModel("gpt-5.3-codex-spark", { api: "openai-codex-responses", contextWindow: 128000, thinkingLevelMap: { minimal: "low", xhigh: "xhigh" } }),
       piModel("gpt-5.6-sol", { api: "openai-codex-responses", thinkingLevelMap: { minimal: "low", xhigh: "xhigh", max: "max" } }),
       piModel("gpt-6-sol", { api: "openai-codex-responses", thinkingLevelMap: { off: "none", minimal: "low" } }),
     ],
@@ -651,4 +653,55 @@ test("an unreadable pi catalog degrades to family rules", async () => {
   } finally {
     console.warn = originalWarn;
   }
+});
+
+test("per-turn effort can be switched off for CLIProxyAPI releases before v8.0.3", async () => {
+  const result = buildProviderModels([{ id: "claude-opus-5-5" }], {}, {}, "canonical", {}, null, await piProfiles, false);
+
+  assert.equal(result.models[0].compat, undefined);
+  assert.equal(result.models[0].api, "anthropic-messages", "Claude keeps the Messages API");
+  assert.deepEqual(result.models[0].thinkingLevelMap, { off: null, minimal: null, xhigh: "xhigh", max: "max" });
+});
+
+test("publishes per-turn effort only when CPA serves the model from an Anthropic owner", async () => {
+  const result = buildProviderModels(
+    [
+      { id: "claude-opus-5-5", owned_by: "anthropic" },
+      { id: "ag/claude-opus-5-5", owned_by: "antigravity" },
+    ],
+    {}, {}, "canonical", {}, null, await piProfiles,
+  );
+  const [anthropic, antigravity] = result.models;
+
+  assert.deepEqual(anthropic.compat, { supportsMidConvoEffort: true });
+  assert.equal(antigravity.compat, undefined, "translated away from the Messages shape");
+});
+
+test("uses pi's native context window for Codex models smaller than the family default", async () => {
+  const metadata: ModelsDevCatalog = {
+    "openai/gpt-5.3-codex-spark": { id: "openai/gpt-5.3-codex-spark", reasoning: true, limit: { context: 400000, output: 128000 } },
+  };
+  const canonical = await withProfiles(["gpt-5.3-codex-spark", "pro/gpt-5.3-codex-spark"], metadata);
+  for (const id of ["gpt-5.3-codex-spark", "pro/gpt-5.3-codex-spark"]) {
+    assert.equal(canonical[id].api, "openai-responses", id);
+    assert.equal(canonical[id].contextWindow, 128000, id);
+  }
+
+  const profiles = await piProfiles;
+  const full = buildProviderModels([{ id: "gpt-5.3-codex-spark" }], metadata, {}, "full", {}, null, profiles);
+  assert.equal(full.models[0].contextWindow, 400000, "full opts into the models.dev limit");
+  const fullUnmatched = buildProviderModels([{ id: "gpt-5.3-codex-spark" }], {}, {}, "full", {}, null, profiles);
+  assert.equal(fullUnmatched.models[0].contextWindow, 128000, "never widened past pi without metadata");
+});
+
+test("keeps GPT-5.5 on Responses once a pi upgrade drops it from the Codex catalog", () => {
+  const result = buildProviderModels([{ id: "gpt-5.5" }, { id: "gpt-5.50" }], {
+    "openai/gpt-5.5": { id: "openai/gpt-5.5", reasoning: true, limit: { context: 1050000, output: 128000 } },
+  }, {}, "canonical", {}, null, NO_PI_PROFILES);
+  const [gpt55, lookalike] = result.models;
+
+  assert.equal(gpt55.api, "openai-responses");
+  assert.equal(gpt55.contextWindow, 272000);
+  assert.deepEqual(gpt55.thinkingLevelMap, { minimal: "low", xhigh: "xhigh" }, "mirrors pi's native map");
+  assert.equal(lookalike.api, undefined);
 });
