@@ -91,6 +91,35 @@ test("folding the in-memory session into the index keeps sidecar usage", () => {
 	assert.deepEqual(merged.diagnostics, diagnostics());
 });
 
+test("an in-memory usage entry claims the sidecar that mirrors it", () => {
+	const mirrored: UsageRecord = { ...sidecarRecord(), fingerprint: "sidecar-prune-1", sharedId: "session-live:u1" };
+	const unmatched = sidecarRecord();
+	const ctx = ctxStub();
+	const entries = ctx.sessionManager.getEntries();
+	const getEntries = () => [
+		...entries,
+		{
+			type: "usage",
+			id: "u1",
+			timestamp: "2026-08-01T04:06:00.000Z",
+			kind: "context_prune",
+			provider: "anthropic",
+			model: "claude-fable-5",
+			usage: { input: 9, output: 1, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } },
+		},
+	];
+	const merged = includeInMemorySession(makeIndex([], diagnostics(), [mirrored, unmatched]), {
+		...ctx,
+		sessionManager: { ...ctx.sessionManager, getEntries },
+	} as unknown as ExtensionCommandContext);
+
+	assert.deepEqual(
+		merged.usage.map((record) => record.kind),
+		["assistant", "usage", "sidecar"],
+	);
+	assert.equal(merged.usage.find((record) => record.kind === "sidecar"), unmatched);
+});
+
 test("an already-scanned session is returned untouched", () => {
 	const scanned = makeIndex(
 		[

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildSnapshot, deduplicateUsage, makeIndex, parseSessionText } from "../stats.ts";
+import { buildSnapshot, deduplicateUsage, makeIndex, parseSessionText, parseUsageSidecar } from "../stats.ts";
 import { totalTokens, type SessionRecord, type UsageTotals } from "../types.ts";
 
 const usage = (overrides: Record<string, unknown> = {}) => ({
@@ -140,6 +140,96 @@ test("deduplicates copied fork history but not deliberate short-id collisions", 
 	const records = deduplicateUsage([first, fork, collision]);
 	assert.equal(records.length, 2);
 	assert.equal(records.reduce((sum, record) => sum + totalTokens(record.usage), 0), 75);
+});
+
+function usageEntry(id: string, timestamp: string, extra: Record<string, unknown> = {}): string {
+	return entry({
+		type: "usage",
+		id,
+		parentId: null,
+		timestamp,
+		kind: "cache_warm",
+		provider: "anthropic",
+		model: "claude-fable-5",
+		usage: usage(),
+		...extra,
+	});
+}
+
+function sidecar(records: Record<string, unknown>[]) {
+	const text = records
+		.map((record) =>
+			JSON.stringify({
+				v: 1,
+				ts: "2026-08-01T01:00:00.000Z",
+				source: "context-prune",
+				provider: "anthropic",
+				model: "claude-fable-5",
+				usage: { input: 10, output: 5, cacheRead: 20, cacheWrite: 2, reasoning: 3, cost: 0.33 },
+				...record,
+			}),
+		)
+		.join("\n");
+	return parseUsageSidecar("/agent/pi-context-prune/usage.jsonl", text).records;
+}
+
+test("counts Pi usage entries under their provider, model, and kind", () => {
+	const session = parsed("/sessions/a.jsonl", [
+		header("a"),
+		usageEntry("u1", "2026-08-01T01:00:00.000Z"),
+		usageEntry("u2", "2026-08-01T01:00:01.000Z", { kind: "some_future_kind" }),
+		usageEntry("u3", "2026-08-01T01:00:02.000Z", { kind: undefined }),
+		usageEntry("u4", "2026-08-01T01:00:03.000Z", { usage: undefined }),
+	]);
+	assert.deepEqual(
+		session.usage.map((record) => [record.kind, record.model, record.sharedId, totalTokens(record.usage)]),
+		[
+			["usage", "anthropic/claude-fable-5 (cache_warm)", "a:u1", 37],
+			["usage", "anthropic/claude-fable-5 (some_future_kind)", "a:u2", 37],
+			["usage", "anthropic/claude-fable-5 (usage)", "a:u3", 37],
+		],
+	);
+	assert.equal(session.lastActivityAt, Date.parse("2026-08-01T01:00:03.000Z"));
+});
+
+test("counts a usage entry and its mirrored sidecar once, keeping unmatched ones from both", () => {
+	const session = parsed("/sessions/a.jsonl", [
+		header("a"),
+		usageEntry("u1", "2026-08-01T01:00:00.000Z"),
+		usageEntry("u2", "2026-08-01T01:00:01.000Z"),
+	]);
+	const records = deduplicateUsage(
+		[session],
+		sidecar([
+			{ id: "a:u1", sessionId: "a", usageEntryId: "u1" },
+			{ id: "a:u9", sessionId: "a", usageEntryId: "u9" },
+			{ id: "b:u2", sessionId: "b", usageEntryId: "u2" },
+		]),
+	);
+	assert.deepEqual(
+		records.map((record) => [record.kind, record.sharedId]),
+		[
+			["usage", "a:u1"],
+			["usage", "a:u2"],
+			["sidecar", "a:u9"],
+			["sidecar", "b:u2"],
+		],
+	);
+});
+
+test("a forked copy of a usage entry neither double-counts nor frees its sidecar", () => {
+	const copied = usageEntry("u1", "2026-08-01T01:00:00.000Z");
+	const original = parsed("/sessions/original.jsonl", [header("original"), copied]);
+	const fork = parsed("/sessions/fork.jsonl", [header("fork"), copied]);
+	const mirror = sidecar([{ id: "original:u1" }]);
+	for (const sessions of [
+		[original, fork],
+		[fork, original],
+	]) {
+		const records = deduplicateUsage(sessions, mirror);
+		assert.equal(records.length, 1);
+		assert.equal(records[0]!.kind, "usage");
+	}
 });
 
 test("prefers persisted child usage over a parent subagent summary", () => {
