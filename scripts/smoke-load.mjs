@@ -115,6 +115,9 @@ const EXPECTED_SURFACES = {
 			...(legacyCompaction ? ["turn_end", "session_compact", "agent_settled"] : []),
 		],
 	},
+	"./packages/pi-thinking-step/index.ts": {
+		shortcuts: ["alt+=", "alt+-"],
+	},
 };
 
 const CATEGORIES = ["tools", "commands", "handlers", "flags", "shortcuts"];
