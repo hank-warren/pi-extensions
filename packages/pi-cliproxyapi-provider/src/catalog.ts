@@ -3,6 +3,7 @@ import { readCache, writeCache, type CacheEnvelope } from "./cache.ts";
 import { fetchCpaModels, parseCpaModelsCache, type CpaModel } from "./cpa.ts";
 import { builtinSeedCatalog } from "./builtin-seed.ts";
 import { fetchModelsDevCatalog, hasSourceProviderMetadata, parseModelsDevCatalog } from "./models-dev.ts";
+import { loadPiModelProfiles, NO_PI_PROFILES, type PiModelProfiles } from "./pi-profiles.ts";
 import { buildProviderModels, type BuildProviderModelsResult } from "./provider.ts";
 import type { Gpt56ContextWindowMode } from "./settings.ts";
 import type { CpaProviderConfig, ModelsDevCatalog } from "./types.ts";
@@ -35,6 +36,7 @@ export interface CatalogSnapshot {
   metadataUpdatedAt?: number;
   metadataSource: MetadataSource;
   gpt56ContextWindow: Gpt56ContextWindowMode;
+  perTurnEffort: boolean;
   built: BuildProviderModelsResult;
 }
 
@@ -54,6 +56,8 @@ export interface CatalogRefreshResult {
 export interface ProviderCatalogOptions {
   config: CpaProviderConfig;
   gpt56ContextWindow: Gpt56ContextWindowMode;
+  /** Publish pi's native per-turn Claude effort. Defaults to true. */
+  perTurnEffort?: boolean;
   getApiKey: () => Promise<string | undefined>;
   backgroundTimeoutMs?: number;
   manualTimeoutMs?: number;
@@ -63,6 +67,8 @@ export interface ProviderCatalogOptions {
   metadataStaleAfterMs?: number;
   writeSnapshot?: typeof writeCache;
   now?: () => number;
+  /** Source of pi's native model profiles. Defaults to the running pi's built-in catalog. */
+  loadPiProfiles?: () => Promise<PiModelProfiles>;
 }
 
 function canonicalJson(value: unknown): string {
@@ -92,12 +98,17 @@ export class ProviderCatalog {
   private activeRefreshController?: AbortController;
   private readonly activeRefreshWaiters = new Set<symbol>();
   private readonly options: ProviderCatalogOptions;
+  private piProfiles: PiModelProfiles = NO_PI_PROFILES;
+  private piProfilesLoad?: Promise<PiModelProfiles>;
 
   constructor(options: ProviderCatalogOptions) {
     this.options = options;
   }
 
   async load(): Promise<CatalogSnapshot> {
+    // Static data shipped with the running pi, so it is read once per process.
+    this.piProfilesLoad ??= (this.options.loadPiProfiles ?? loadPiModelProfiles)();
+    this.piProfiles = await this.piProfilesLoad;
     const cpaCache = await readCache(cpaModelsCachePath(this.options.config), parseCpaModelsCache);
     const metadataSnapshot = await this.loadMetadata();
     return this.setSnapshot(cpaCache?.data ?? [], cpaCache?.fetchedAt, metadataSnapshot.data, metadataSnapshot.fetchedAt, metadataSnapshot.source);
@@ -276,6 +287,7 @@ export class ProviderCatalog {
       metadataUpdatedAt,
       metadataSource,
       gpt56ContextWindow: this.options.gpt56ContextWindow,
+      perTurnEffort: this.options.perTurnEffort ?? true,
       built: buildProviderModels(
         cpaModels,
         metadata,
@@ -283,6 +295,8 @@ export class ProviderCatalog {
         this.options.gpt56ContextWindow,
         this.options.config.modelOverrides,
         this.options.config.metadataFallbackProvider,
+        this.piProfiles,
+        this.options.perTurnEffort ?? true,
       ),
     };
     return this.snapshot;

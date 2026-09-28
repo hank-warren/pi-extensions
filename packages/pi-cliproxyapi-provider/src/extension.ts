@@ -18,6 +18,7 @@ export default async function (pi: ExtensionAPI) {
     const catalog = new ProviderCatalog({
       config,
       gpt56ContextWindow: settings.gpt56ContextWindow,
+      perTurnEffort: settings.perTurnEffort,
       getApiKey: () => getDiscoveryApiKey(config.providerName),
     });
     const runtime = new ProviderRuntime({ pi, config, catalog });

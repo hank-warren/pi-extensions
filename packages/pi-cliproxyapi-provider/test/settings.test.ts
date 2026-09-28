@@ -32,11 +32,12 @@ test("project settings override the global GPT-5.6 context window mode", async (
       [namespace]: { gpt56ContextWindow: "canonical", showStrictMode: false },
     }));
     await writeFile(join(cwd, ".pi", "settings.json"), JSON.stringify({
-      [namespace]: { gpt56ContextWindow: "full", showStrictMode: true },
+      [namespace]: { gpt56ContextWindow: "full", perTurnEffort: false, showStrictMode: true },
     }));
 
     const settings = loadProviderSettings(cwd, agentDir);
     assert.equal(settings.gpt56ContextWindow, "full");
+    assert.equal(settings.perTurnEffort, false);
     assert.equal(settings.showStrictMode, true);
   });
 });
@@ -49,6 +50,7 @@ test("saves package settings to the existing project settings file", async () =>
     assert.equal(path, join(cwd, ".pi", "settings.json"));
     assert.deepEqual(loadProviderSettings(cwd, agentDir), {
       gpt56ContextWindow: "full",
+      perTurnEffort: true,
       showStrictMode: true,
     });
   });
@@ -59,6 +61,7 @@ test("rejects unsupported provider settings", async () => {
     for (const providerSettings of [
       { gpt56ContextWindow: "unbounded" },
       { showStrictMode: "yes" },
+      { perTurnEffort: "off" },
     ]) {
       await writeFile(join(agentDir, "settings.json"), JSON.stringify({
         [namespace]: providerSettings,

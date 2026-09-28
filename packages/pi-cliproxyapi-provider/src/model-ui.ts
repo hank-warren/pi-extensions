@@ -153,6 +153,13 @@ function providerSettingsItems(
       currentValue: settings.gpt56ContextWindow,
       values: ["canonical", "full"],
     },
+    {
+      id: "perTurnEffort",
+      label: "Per-turn Claude effort",
+      description: "Switch Opus 5/5.5 and Fable 5.1 effort per turn so the prompt cache survives. Needs CLIProxyAPI v8.0.3+; disable for older proxies.",
+      currentValue: settings.perTurnEffort ? "enabled" : "disabled",
+      values: ["enabled", "disabled"],
+    },
   ];
   return [
     {
@@ -195,6 +202,9 @@ export async function openProviderConfig(
         }
         if (id === "gpt56ContextWindow" && (value === "canonical" || value === "full")) {
           edited.gpt56ContextWindow = value;
+        }
+        if (id === "perTurnEffort" && (value === "enabled" || value === "disabled")) {
+          edited.perTurnEffort = value === "enabled";
         }
         if (id === "showStrictMode" && (value === "enabled" || value === "disabled")) {
           edited.showStrictMode = value === "enabled";

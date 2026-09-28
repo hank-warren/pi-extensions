@@ -36,15 +36,10 @@ export function normalizeProviderModels(
       ...model.compat,
       supportsStrictMode: false,
       // Claude models run on the Anthropic Messages API (see model-api.ts) and
-      // use the same adaptive thinking path pi uses for anthropic/* models, so
-      // effort rides on a top-level `output_config`.
-      //
-      // `supportsMidConvoEffort` is deliberately NOT set. It makes pi attach a
-      // per-message `output_config` to synthesized system messages behind the
-      // mid-conversation-output-config beta; CLIProxyAPI does not honor that
-      // beta and rejects the request with
-      // `messages.N.output_config: Extra inputs are not permitted`. Top-level
-      // `output_config` is accepted, so adaptive thinking still works.
+      // use the same adaptive thinking path pi uses for anthropic/* models.
+      // Per-turn effort (`supportsMidConvoEffort`) arrives in model.compat only
+      // for models pi's native catalog marks as supporting it (see provider.ts);
+      // the rest keep effort on a top-level `output_config`.
       ...(isClaudeModel({ availableModelId: model.id })
         ? { forceAdaptiveThinking: true }
         : {}),

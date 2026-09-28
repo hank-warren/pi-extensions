@@ -408,3 +408,46 @@ test("a failed stale-metadata fetch keeps the previous metadata and still publis
     }
   });
 });
+
+test("catalog builds models with the injected pi profiles", async () => {
+  await withTempHome(async () => {
+    await writeCache(cpaModelsCachePath(config), [{ id: "claude-opus-5-5" }, { id: "gpt-5.5" }], Date.now());
+    let loads = 0;
+    const instance = new ProviderCatalog({
+      config: { ...config, modelsDevEnabled: false },
+      gpt56ContextWindow: "canonical",
+      getApiKey: async () => undefined,
+      backgroundTimeoutMs: 50,
+      loadPiProfiles: async () => {
+        loads += 1;
+        return {
+          find: (upstream, context) => upstream === "anthropic" && context.availableModelId === "claude-opus-5-5"
+            ? { reasoning: true, supportsMidConvoEffort: true }
+            : upstream === "openai-codex" && context.availableModelId === "gpt-5.5"
+              ? { reasoning: true }
+              : undefined,
+        };
+      },
+    });
+
+    const snapshot = await instance.load();
+    await instance.load();
+    const byId = Object.fromEntries(snapshot.built.models.map((model) => [model.id, model]));
+
+    assert.equal(loads, 1, "profiles are static per process");
+    assert.deepEqual(byId["claude-opus-5-5"].compat, { supportsMidConvoEffort: true });
+    assert.equal(byId["gpt-5.5"].api, "openai-responses");
+    assert.equal(snapshot.perTurnEffort, true, "on by default");
+
+    const disabled = await new ProviderCatalog({
+      config: { ...config, modelsDevEnabled: false },
+      gpt56ContextWindow: "canonical",
+      perTurnEffort: false,
+      getApiKey: async () => undefined,
+      backgroundTimeoutMs: 50,
+      loadPiProfiles: async () => ({ find: (upstream) => upstream === "anthropic" ? { reasoning: true, supportsMidConvoEffort: true } : undefined }),
+    }).load();
+    assert.equal(disabled.perTurnEffort, false);
+    assert.equal(disabled.built.models.find((model) => model.id === "claude-opus-5-5")?.compat, undefined);
+  });
+});

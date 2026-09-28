@@ -1,5 +1,5 @@
 import type { ThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
-import { isGpt6Model } from "./model-api.ts";
+import { isGpt55Model, isGpt6Model } from "./model-api.ts";
 import type { ModelsDevMetadata } from "./types.ts";
 
 export interface ModelCapabilityContext {
@@ -17,9 +17,25 @@ interface ModelCapabilityRule {
   overrides: ModelCapabilityOverrides;
 }
 
+/**
+ * Fallback for GPT-5.5 when the running pi's `openai-codex` catalog no longer
+ * lists it. Mirrors pi's native definition: no `minimal` on the Codex route,
+ * `xhigh` but no `max`.
+ */
+const GPT_5_5_THINKING_LEVEL_MAP: ThinkingLevelMap = {
+  minimal: "low",
+  xhigh: "xhigh",
+};
+
+/**
+ * Fallback for GPT-5.6 models newer than the running pi's `openai-codex`
+ * catalog, whose native map wins when it knows the model. The Codex route has
+ * no `minimal` effort: CLIProxyAPI rejects it (`level "minimal" not supported`),
+ * so pi's `minimal` maps up to `low`, as pi's native definitions do.
+ */
 const GPT_5_6_THINKING_LEVEL_MAP: ThinkingLevelMap = {
   off: "none",
-  minimal: "minimal",
+  minimal: "low",
   low: "low",
   medium: "medium",
   high: "high",
@@ -28,7 +44,8 @@ const GPT_5_6_THINKING_LEVEL_MAP: ThinkingLevelMap = {
 };
 
 /**
- * GPT-6 Astra cannot switch reasoning off (its catalog entry lists only
+ * Fallback for GPT-6 models newer than the running pi's `openai-codex`
+ * catalog. GPT-6 Astra cannot switch reasoning off (its catalog entry lists only
  * low..max plus an `ultra` level pi has no slot for), and it has no `minimal`
  * effort: the lowest it accepts is `low`, so pi's `minimal` maps down to it.
  * Mirrors pi's native `openai-codex/gpt-6-astra` definition.
@@ -50,6 +67,13 @@ function includesModelFamily(context: ModelCapabilityContext, family: string): b
 }
 
 const MODEL_CAPABILITY_RULES: readonly ModelCapabilityRule[] = [
+  {
+    matches: (context) => isGpt55Model(context),
+    overrides: {
+      reasoning: true,
+      thinkingLevelMap: GPT_5_5_THINKING_LEVEL_MAP,
+    },
+  },
   {
     matches: (context) => includesModelFamily(context, "gpt-5.6"),
     overrides: {
