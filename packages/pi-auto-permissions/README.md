@@ -302,6 +302,22 @@ Injected messages whose `customType` is **not** allowlisted are still visible �
 
 The allowlist matches what you wrote: a bare name such as `ask_user_question` matches that tool in any namespace (`functions.ask_user_question` included), while a dotted name matches exactly. The default is an empty list.
 
+## Parallel reviews
+
+When several guarded commands are pending at once, their guardian reviews run in parallel: a codemode script that runs `bash` calls under `Promise.all`, or several `bash` calls in one assistant message. Verdicts are still applied, and you are still asked, one command at a time.
+
+```json
+{
+  "reviewConcurrency": 4
+}
+```
+
+`reviewConcurrency` (1–16, default 4) caps how many guardian calls run at once. Set it to `1` for fully serial reviews. Parallel reviews all build on the same cached reviewer lineage, so they cost the same as serial ones; the first to finish extends the lineage and the others' exchanges are dropped, which loses nothing because prior reviewer responses are non-authoritative.
+
+- **Codemode scripts.** Pi runs each `bash` call a script makes through the same `tool_call` gate as a model-issued call, concurrently, so their reviews simply overlap.
+- **Several calls in one message.** Pi runs the `tool_call` handlers for one message's calls one after another, so the handler of the first `bash` call starts the reviews of the later guarded ones. Each call later takes its early review only when the input Pi finally hands the handler is exactly the input that was reviewed; otherwise it is reviewed afresh. An early review whose call never arrives is dropped when the turn ends. With `reviewConcurrency: 1` nothing is reviewed early.
+- **Your answers still bind.** Applying a verdict and prompting you share one slot, and a verdict whose evidence changed while it waited — because you answered another command's prompt, or a tool result landed — is reviewed again before it is applied (up to three reviews per command). A block you give on one command therefore reaches a sibling that was reviewed while your prompt was open.
+
 ## Denial log and retry
 
 Every non-approved outcome — a guardian revise, a user block at the prompt, a deny block, a review-infrastructure failure — is appended to a private `denials.jsonl` sidecar next to the config (0600, 16 MB rotation, one previous generation kept):
@@ -386,6 +402,14 @@ A sparkle spinner (`✶ ✸ ✻ ✽`) cycles while the guardian is reviewing and
   }
 }
 ```
+
+While several commands are under review at once, the widget collapses them into one summary line:
+
+```text
+auto permissions · 3 commands · ✶ 2 waiting for openai-codex-auto-permissions/gpt-5.6-luna · ⋯ 1 queued
+```
+
+`queued` counts commands waiting for a review slot, or with a verdict waiting to be applied behind another command's prompt.
 
 Set `ui.enabled` to `false` to hide review state without disabling enforcement.
 

@@ -1,21 +1,24 @@
 /**
- * FIFO serialization for guardian-backed reviews.
+ * The two gates a guarded command passes through.
  *
- * Two guarded commands issued in the same assistant turn used to open two
- * reviewer conversations at once, which raced for the same widget/bash review
- * row and let the second verdict land against the first command's display. The
- * queue serializes the *decisions* only: denies, trusted commands and
- * already-approved execution never enter it.
+ * `createReviewLimiter` bounds how many guardian model calls run at once. The
+ * calls are independent requests against one cached reviewer prefix, so
+ * running several in parallel costs the same and finishes sooner.
+ *
+ * `createReviewQueue` is the FIFO *decision* slot: applying a verdict, and
+ * asking the user when the verdict is `ask_user`, happen one command at a
+ * time. Two approval dialogs fighting over one surface is the thing it exists
+ * to prevent, and holding it while a prompt is open is what lets a sibling's
+ * verdict notice the user's answer before it is applied. Denies, trusted
+ * commands and already-approved execution never enter either.
  *
  * Every acquirer releases in a `finally`, and a release that throws (or is
  * never observed) must not poison later requests — so the tail is always a
  * settled-or-settling promise that swallows rejection.
  *
- * The critical section spans the human prompt as well as the model call, which
- * is deliberate: two approval dialogs fighting over one surface is the thing
- * this exists to prevent. That makes the wait unbounded in wall-clock time, so
- * it is cancellable (`acquire(signal)`) and visible (`busy`, which the caller
- * uses to render a "queued" row instead of a blank gap).
+ * The decision slot spans the human prompt, so its wait is unbounded in
+ * wall-clock time: it is cancellable (`acquire(signal)`) and visible (`busy`,
+ * which the caller uses to render a "queued" row instead of a blank gap).
  */
 interface ReviewQueue {
 	/**
@@ -66,6 +69,80 @@ export function createReviewQueue(): ReviewQueue {
 		},
 		get busy() {
 			return held > 0;
+		},
+	};
+}
+
+export interface ReviewLimiter {
+	/**
+	 * Waits until fewer than `capacity` slots are held, then returns this
+	 * slot's release function. Waiters are served in arrival order, each
+	 * against the capacity it asked with, so a config change applies to the
+	 * next grant rather than revoking live ones.
+	 *
+	 * Rejects with the signal's reason if `signal` aborts first; an aborted
+	 * waiter never takes a slot.
+	 */
+	acquire(capacity: number, signal?: AbortSignal): Promise<() => void>;
+	/** True when an acquire with `capacity` would have to wait. */
+	wouldWait(capacity: number): boolean;
+}
+
+interface LimiterWaiter {
+	capacity: number;
+	grant: () => void;
+}
+
+export function createReviewLimiter(): ReviewLimiter {
+	let held = 0;
+	const waiters: LimiterWaiter[] = [];
+
+	function pump(): void {
+		while (waiters.length > 0 && held < Math.max(1, waiters[0].capacity)) {
+			const next = waiters.shift()!;
+			held += 1;
+			next.grant();
+		}
+	}
+
+	function releaser(): () => void {
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			held -= 1;
+			pump();
+		};
+	}
+
+	return {
+		acquire(capacity: number, signal?: AbortSignal): Promise<() => void> {
+			if (signal?.aborted) return Promise.reject(signal.reason);
+			if (waiters.length === 0 && held < Math.max(1, capacity)) {
+				held += 1;
+				return Promise.resolve(releaser());
+			}
+			return new Promise<() => void>((resolve, reject) => {
+				const onAbort = () => {
+					const index = waiters.indexOf(waiter);
+					if (index >= 0) waiters.splice(index, 1);
+					reject(signal!.reason);
+					// The head may have been the one blocking a smaller-capacity waiter.
+					pump();
+				};
+				const waiter: LimiterWaiter = {
+					capacity,
+					grant: () => {
+						signal?.removeEventListener("abort", onAbort);
+						resolve(releaser());
+					},
+				};
+				signal?.addEventListener("abort", onAbort, { once: true });
+				waiters.push(waiter);
+			});
+		},
+		wouldWait(capacity: number): boolean {
+			return waiters.length > 0 || held >= Math.max(1, capacity);
 		},
 	};
 }

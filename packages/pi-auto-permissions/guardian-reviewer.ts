@@ -193,7 +193,13 @@ export function createGuardianReviewer(
   deps: { overrides: SessionOverrides },
 ): GuardianReviewer {
   let reviewerLineage: ReviewerLineage | undefined;
-  let activeReviewerSessionId: string | undefined;
+  /**
+   * Reviewer session ids with a request in flight, and how many. Several
+   * reviews can extend the same lineage at once, so a session's transport
+   * resources are released only when no request is using it and it is no
+   * longer the committed lineage's session.
+   */
+  const sessionsInFlight = new Map<string, number>();
   let reviewerGeneration = 0;
   let reviewerLifecycleController = new AbortController();
   /** Captured once per session; see session-environment.ts for why once. */
@@ -207,14 +213,36 @@ export function createGuardianReviewer(
     }
   }
 
+  function releaseIdleSession(sessionId: string): void {
+    if (sessionsInFlight.has(sessionId) || reviewerLineage?.sessionId === sessionId) return;
+    cleanupReviewerSession(sessionId);
+  }
+
+  function retainSession(sessionId: string): void {
+    sessionsInFlight.set(sessionId, (sessionsInFlight.get(sessionId) ?? 0) + 1);
+  }
+
+  function releaseSession(sessionId: string): void {
+    const remaining = (sessionsInFlight.get(sessionId) ?? 1) - 1;
+    if (remaining > 0) sessionsInFlight.set(sessionId, remaining);
+    else sessionsInFlight.delete(sessionId);
+    releaseIdleSession(sessionId);
+  }
+
+  function replaceLineage(next: ReviewerLineage | undefined): void {
+    const previous = reviewerLineage;
+    reviewerLineage = next;
+    if (previous && previous.sessionId !== next?.sessionId) releaseIdleSession(previous.sessionId);
+  }
+
+  /**
+   * Drop the lineage and stop any review still in flight from committing its
+   * exchange. Those reviews still return their verdicts; their sessions are
+   * released when they finish.
+   */
   function discardReviewerLineage(): void {
     reviewerGeneration++;
-    const sessionIds = new Set<string>();
-    if (reviewerLineage) sessionIds.add(reviewerLineage.sessionId);
-    if (activeReviewerSessionId) sessionIds.add(activeReviewerSessionId);
-    reviewerLineage = undefined;
-    activeReviewerSessionId = undefined;
-    for (const sessionId of sessionIds) cleanupReviewerSession(sessionId);
+    replaceLineage(undefined);
   }
 
   /**
@@ -298,13 +326,19 @@ export function createGuardianReviewer(
     const evidence = collectEvidence(scope);
     const evidenceKeys = evidence.map((record) => record.key);
     const budget = reviewContextBudget(model.contextWindow);
-    let base = reviewerLineage;
+    // Concurrent reviews may all build on the same lineage. Only the first to
+    // finish extends it; the others' exchanges are dropped, which loses nothing
+    // because prior reviewer responses are non-authoritative by policy.
+    const observedLineage = reviewerLineage;
+    const attemptGeneration = reviewerGeneration;
+    let base = observedLineage;
     if (base && (
       base.fingerprint !== fingerprint
       || !evidencePrefixMatches(base.evidenceKeys, evidence)
       || base.lastPromptTokens >= budget
     )) {
-      discardReviewerLineage();
+      // Rebuild fresh; committing replaces the stale lineage, and reviews still
+      // in flight on it finish undisturbed.
       base = undefined;
     }
 
@@ -328,20 +362,17 @@ export function createGuardianReviewer(
     let messages = base ? [...base.messages, userMessage] : [userMessage];
     let estimate = estimateReviewTokens(systemPrompt, messages);
     if (base && estimate >= budget) {
-      discardReviewerLineage();
       base = undefined;
       userMessage = makeUserMessage(fullEvidence(), "full");
       messages = [userMessage];
       estimate = estimateReviewTokens(systemPrompt, messages);
     }
     if (estimate >= budget) {
-      discardReviewerLineage();
       throw new Error("compact review evidence exceeds the review model's safe context budget");
     }
 
     const sessionId = base?.sessionId ?? reviewerSessionId(model);
-    const attemptGeneration = reviewerGeneration;
-    activeReviewerSessionId = sessionId;
+    retainSession(sessionId);
     const timeoutSignal = AbortSignal.timeout(timeoutMs);
     const lifecycleSignal = reviewerLifecycleController.signal;
     const reviewSignal = AbortSignal.any([
@@ -353,7 +384,7 @@ export function createGuardianReviewer(
     try {
       const auth = await waitForSignal(ctx.modelRegistry.getApiKeyAndHeaders(model), reviewSignal);
       if (!auth.ok) throw new Error(auth.error);
-      if (reviewerLifecycleController.signal.aborted || reviewSignal.aborted || reviewerGeneration !== attemptGeneration) {
+      if (reviewSignal.aborted) {
         throw new Error("review timed out or was cancelled");
       }
       // Dispatch through the host ModelRuntime so extension-registered provider
@@ -380,24 +411,26 @@ export function createGuardianReviewer(
       }
       recordReviewerUsage(config, model, response.usage, subagentContext !== undefined);
       const verdict = parsePermissionVerdict(assistantText(response.content));
-      if (reviewerLifecycleController.signal.aborted || signal?.aborted || reviewerGeneration !== attemptGeneration) {
+      if (lifecycleSignal.aborted || signal?.aborted) {
         throw new Error("review timed out or was cancelled");
       }
-      activeReviewerSessionId = undefined;
-      reviewerLineage = {
-        fingerprint,
-        evidenceKeys,
-        messages: [...messages, response],
-        sessionId,
-        lastPromptTokens: responsePromptTokens(response.usage),
-      };
+      if (reviewerLineage === observedLineage && reviewerGeneration === attemptGeneration) {
+        replaceLineage({
+          fingerprint,
+          evidenceKeys,
+          messages: [...messages, response],
+          sessionId,
+          lastPromptTokens: responsePromptTokens(response.usage),
+        });
+      }
       return verdict;
     } catch (error) {
-      if (reviewerGeneration === attemptGeneration) discardReviewerLineage();
-      else cleanupReviewerSession(sessionId);
+      // A failed exchange may have left the conversation it extended unusable;
+      // drop it unless a sibling review has already moved the lineage on.
+      if (base && reviewerLineage === base) replaceLineage(undefined);
       throw error;
     } finally {
-      if (activeReviewerSessionId === sessionId) activeReviewerSessionId = undefined;
+      releaseSession(sessionId);
     }
   }
 

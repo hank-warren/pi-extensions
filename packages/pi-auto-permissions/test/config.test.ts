@@ -38,6 +38,7 @@ describe("auto permissions config", () => {
 			path: join(tmpdir(), "usage.jsonl"),
 		});
 		assert.deepEqual(config.ui, { enabled: true, resultDisplayMs: 2500 });
+		assert.equal(config.reviewConcurrency, 4, "reviews overlap by default");
 	});
 
 	for (const [key, file, defaultEnabled] of [
@@ -382,5 +383,15 @@ describe("auto permissions config", () => {
 		writeFileSync(path, JSON.stringify({ systemPromptFile: "./prompt.md" }), "utf8");
 
 		assert.equal(loadAutoPermissionsConfig(path).systemPrompt, "review carefully");
+	});
+	test("reviewConcurrency accepts 1 through 16 and rejects anything else", () => {
+		assert.equal(loadAutoPermissionsConfig(configFile({ reviewConcurrency: 1 })).reviewConcurrency, 1);
+		assert.equal(loadAutoPermissionsConfig(configFile({ reviewConcurrency: 16 })).reviewConcurrency, 16);
+		for (const value of [0, 17, 2.5, "4"]) {
+			assert.throws(
+				() => loadAutoPermissionsConfig(configFile({ reviewConcurrency: value })),
+				/reviewConcurrency must be an integer between 1 and 16/u,
+			);
+		}
 	});
 });

@@ -16,6 +16,8 @@ export const DEFAULT_REVIEWER_REASONING_EFFORT: ReasoningEffort = "low";
 export const DEFAULT_REVIEWER_TIMEOUT_MS = 30_000;
 export const MIN_REVIEWER_TIMEOUT_MS = 1_000;
 export const MAX_REVIEWER_TIMEOUT_MS = 300_000;
+export const DEFAULT_REVIEW_CONCURRENCY = 4;
+export const MAX_REVIEW_CONCURRENCY = 16;
 
 /**
  * Where the active reviewer system prompt came from. The settings UI shows this
@@ -78,6 +80,13 @@ export interface AutoPermissionsConfig {
    * `classifyAllShell` — full coverage for one guardian call per command.
    */
   reviewAllShell: boolean;
+  /**
+   * How many guardian reviews may run at once when several guarded commands
+   * are pending together (parallel tool calls, codemode scripts). Verdicts are
+   * still applied, and the user still asked, one command at a time. 1 restores
+   * fully serial reviews.
+   */
+  reviewConcurrency: number;
   /**
    * Prose trust configuration, appended to the reviewer policy prompt as a
    * labeled section (outside `systemPrompt`, so customized prompt files still
@@ -348,6 +357,13 @@ export function loadAutoPermissionsConfig(path = autoPermissionsConfigPath()): A
     denialLog: resolveSidecar(raw, "denialLog", "denials.jsonl", true, path),
     rules,
     reviewAllShell: raw.reviewAllShell === true,
+    reviewConcurrency: boundedInteger(
+      raw.reviewConcurrency,
+      DEFAULT_REVIEW_CONCURRENCY,
+      1,
+      MAX_REVIEW_CONCURRENCY,
+      "reviewConcurrency",
+    ),
     guardianPolicy: resolveGuardianPolicy(raw),
     ui: resolveUi(raw),
   };

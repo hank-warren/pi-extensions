@@ -107,6 +107,14 @@ function decodeDisplay(value: unknown): Display {
 	const lines = component.render(200);
 	component.dispose?.();
 	const head = lines[0] ?? "";
+	const summary = head.match(/· (\d+) commands ·/u);
+	if (summary) {
+		const count = (pattern: RegExp) => head.match(pattern)?.[1] ?? "0";
+		return {
+			state: "summary",
+			detail: `waiting ${count(/[✶✸✻✽] (\d+) waiting for /u)} · queued ${count(/⋯ (\d+) queued/u)} · asking ${count(/\? (\d+) waiting for your approval/u)}`,
+		};
+	}
 	const state = head.includes("⋯ queued behind another review")
 		? "queued"
 		: head.includes("? waiting for your approval")
@@ -231,7 +239,10 @@ interface Harness {
 	customCalls: number;
 	sessionStart(): Promise<void>;
 	sessionShutdown(): Promise<void>;
-	toolCall(command: string, toolCallId?: string): Promise<BlockResult>;
+	toolCall(command: string, toolCallId?: string, parentToolCallId?: string): Promise<BlockResult>;
+	/** Deliver an assistant message to `message_end`, as Pi does before running its tool calls. */
+	assistantMessage(calls: Array<{ id: string; command: string; name?: string }>): Promise<void>;
+	turnEnd(): Promise<void>;
 	settingsCommand(args?: string): Promise<void>;
 	denials(): DenialLine[];
 	overrideEntries(): Array<{ seq: number; overrides: Array<Record<string, unknown>> }>;
@@ -284,10 +295,28 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 		async sessionShutdown() {
 			await mock.events.get("session_shutdown")?.[0]?.({}, harness.ctx);
 		},
-		async toolCall(command: string, toolCallId = "call-1") {
+		async toolCall(command: string, toolCallId = "call-1", parentToolCallId?: string) {
 			const handler = mock.events.get("tool_call")?.[0] as EventHandler | undefined;
 			assert.ok(handler, "the extension registers a tool_call handler");
-			return (await handler({ toolName: "bash", toolCallId, input: { command } }, harness.ctx)) as BlockResult;
+			return (await handler(
+				{ toolName: "bash", toolCallId, input: { command }, ...(parentToolCallId ? { parentToolCallId } : {}) },
+				harness.ctx,
+			)) as BlockResult;
+		},
+		async assistantMessage(calls) {
+			const message = {
+				role: "assistant",
+				content: calls.map((call) => ({
+					type: "toolCall",
+					id: call.id,
+					name: call.name ?? "bash",
+					arguments: { command: call.command },
+				})),
+			};
+			for (const handler of mock.events.get("message_end") ?? []) await handler({ type: "message_end", message }, harness.ctx);
+		},
+		async turnEnd() {
+			for (const handler of mock.events.get("turn_end") ?? []) await handler({ type: "turn_end" }, harness.ctx);
 		},
 		async settingsCommand(args = "") {
 			const command = mock.commands.get("auto-permissions");
@@ -628,7 +657,7 @@ test("11 · a turn aborted while the reviewer is answering is cancelled, not den
 	);
 });
 
-test("12 · a second guarded command in the same turn shows queued before it shows waiting", async () => {
+test("12 · with reviewConcurrency 1, a second guarded command waits queued and is reviewed after the first", async () => {
 	let releaseFirst: (() => void) | undefined;
 	let firstCalled: (() => void) | undefined;
 	const firstReached = new Promise<void>((resolve) => {
@@ -637,6 +666,7 @@ test("12 · a second guarded command in the same turn shows queued before it sho
 	await withExtension(
 		{
 			rules: [GUARDED_RULE],
+			config: { reviewConcurrency: 1 },
 			completeSimple: (_call, index) => {
 				const response = assistantResponse(verdictText("approve", `ok ${index}`));
 				if (index > 0) return response;
@@ -653,18 +683,17 @@ test("12 · a second guarded command in the same turn shows queued before it sho
 			await firstReached;
 			const second = harness.toolCall("git push origin dev", "call-2");
 			await new Promise((resolve) => setImmediate(resolve));
+			assert.equal(harness.calls.length, 1, "the second review waits for the only slot");
+			assert.deepEqual(harness.displays, [
+				{ state: "waiting", detail: undefined },
+				{ state: "summary", detail: "waiting 1 · queued 1 · asking 0" },
+			]);
 			releaseFirst?.();
 
 			assert.equal(await first, undefined);
 			assert.equal(await second, undefined);
-			assert.deepEqual(harness.displays.map((display) => display.state), [
-				"waiting",
-				"queued",
-				"approved",
-				"waiting",
-				"approved",
-			]);
-			assert.equal(harness.calls.length, 2, "the queue serializes the reviews, it does not drop one");
+			assert.equal(harness.calls.length, 2, "the limiter serializes the reviews, it does not drop one");
+			assert.deepEqual(harness.displays.at(-1), { state: "approved", detail: "ok 1" });
 		},
 	);
 });
@@ -896,6 +925,7 @@ test("19 · aborting the lifecycle or the turn releases a command waiting in the
 		await withExtension(
 			{
 				rules: [GUARDED_RULE],
+				config: { reviewConcurrency: 1 },
 				signal: controller.signal,
 				completeSimple: (_call, index) => {
 					const response = assistantResponse(verdictText("approve", "fine"));
@@ -1051,6 +1081,240 @@ test("22 · the settings menu reverts a failed save", async () => {
 				undefined,
 				"the failed edit was reverted: a still-disabled `settings` would have written enabled: false",
 			);
+		},
+	);
+});
+
+/**
+ * Parallel reviews: guardian calls overlap up to `reviewConcurrency`, while
+ * verdicts are applied, and the user asked, one command at a time.
+ */
+
+/** The action under review, without the evidence that may quote other commands. */
+function proposedAction(call: GuardianCall): string {
+	return call.envelope.split("<LATEST_PROPOSED_ACTION>")[1] ?? "";
+}
+
+test("23 · guarded commands pending together are reviewed at once, and the next review continues the lineage one of them committed", async () => {
+	const releases: Array<() => void> = [];
+	let secondReached: (() => void) | undefined;
+	const bothInFlight = new Promise<void>((resolve) => {
+		secondReached = resolve;
+	});
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			completeSimple: (_call, index) => {
+				const response = assistantResponse(verdictText("approve", `ok ${index}`));
+				if (index >= 2) return response;
+				if (index === 1) secondReached?.();
+				return new Promise((resolve) => releases.push(() => resolve(response)));
+			},
+		},
+		async (harness) => {
+			await harness.sessionStart();
+
+			const first = harness.toolCall("git push origin main", "call-1");
+			const second = harness.toolCall("git push origin dev", "call-2");
+			assert.notEqual(await settledWithin(bothInFlight, 1000), "still pending", "the second review does not wait for the first");
+			assert.deepEqual(harness.displays.at(-1), { state: "summary", detail: "waiting 2 · queued 0 · asking 0" });
+			for (const release of releases) release();
+
+			assert.equal(await first, undefined);
+			assert.equal(await second, undefined);
+			assert.equal(await harness.toolCall("git push origin feature", "call-3"), undefined);
+			assert.equal(harness.calls.length, 3);
+			assert.ok(
+				[harness.calls[0].options.sessionId, harness.calls[1].options.sessionId].includes(harness.calls[2].options.sessionId),
+				"exactly one of the concurrent reviews extended the lineage, and the next review built on it",
+			);
+			assert.match(harness.calls[2].envelope, /<EVIDENCE mode="delta">/u);
+		},
+	);
+});
+
+test("24 · bash calls a codemode script makes are gated like model-issued ones", async () => {
+	const rules = [
+		GUARDED_RULE,
+		{ pattern: "^rm -rf /", level: "deny", group: "delete", label: "Root delete", message: "Never." },
+	];
+	await withExtension(
+		{ rules, completeSimple: () => assistantResponse(verdictText("approve", "scripted")) },
+		async (harness) => {
+			await harness.sessionStart();
+
+			const denied = await harness.toolCall("rm -rf /", "code-1/1", "code-1");
+			assert.ok(denied?.block);
+			assert.match(denied.reason, /^Blocked by policy: Root delete/u);
+			assert.equal(harness.calls.length, 0);
+
+			assert.equal(await harness.toolCall("git push origin main", "code-1/2", "code-1"), undefined);
+			assert.equal(harness.calls.length, 1);
+			assert.match(proposedAction(harness.calls[0]), /git push origin main/u);
+		},
+	);
+});
+
+test("25 · a verdict that waited behind another command's prompt is reviewed again with the user's answer", async () => {
+	let releaseSecond: (() => void) | undefined;
+	let openPrompts = 0;
+	let maxOpenPrompts = 0;
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			completeSimple: (call, index) => {
+				if (proposedAction(call).includes("--force")) {
+					return assistantResponse(verdictText("ask_user", "force push rewrites history"));
+				}
+				const response = assistantResponse(verdictText("approve", `ok ${index}`));
+				if (index !== 1) return response;
+				return new Promise((resolve) => {
+					releaseSecond = () => resolve(response);
+				});
+			},
+			custom: async (factory, harness) => {
+				openPrompts += 1;
+				maxOpenPrompts = Math.max(maxOpenPrompts, openPrompts);
+				releaseSecond?.();
+				// Answer only once the second verdict is waiting for the decision slot.
+				await waitFor(() =>
+					harness.displays.some((display) => display.detail === "waiting 0 · queued 1 · asking 1"));
+				const result = answerOptionSelector(factory, harness);
+				openPrompts -= 1;
+				return result;
+			},
+		},
+		async (harness) => {
+			await harness.sessionStart();
+
+			harness.answers.push("Block");
+			const forced = harness.toolCall("git push --force origin main", "call-1");
+			const plain = harness.toolCall("git push origin dev", "call-2");
+
+			assert.deepEqual(await forced, { block: true, reason: "Blocked by user" });
+			assert.equal(await plain, undefined);
+			assert.equal(maxOpenPrompts, 1, "never two approval prompts at once");
+			assert.equal(harness.calls.length, 3, "the stale approval was reviewed again");
+			assert.match(proposedAction(harness.calls[2]), /git push origin dev/u);
+			assert.match(harness.calls[2].envelope, /USER \(permission override\)/u);
+		},
+	);
+});
+
+test("26 · later bash calls in one assistant message are reviewed while Pi is still on the first", async () => {
+	let allReached: (() => void) | undefined;
+	const threeInFlight = new Promise<void>((resolve) => {
+		allReached = resolve;
+	});
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			completeSimple: (_call, index) => {
+				const response = assistantResponse(verdictText("approve", `ok ${index}`));
+				if (index >= 3) return response;
+				if (index === 2) allReached?.();
+				return threeInFlight.then(() => response);
+			},
+		},
+		async (harness) => {
+			await harness.sessionStart();
+
+			await harness.assistantMessage([
+				{ id: "call-1", command: "git push origin a" },
+				{ id: "call-2", command: "echo not guarded" },
+				{ id: "call-3", command: "git push origin b" },
+				{ id: "call-4", command: "git push origin c" },
+			]);
+			const first = harness.toolCall("git push origin a", "call-1");
+			assert.equal(
+				await settledWithin(first, 1000),
+				undefined,
+				"the first call's review completes only because its siblings' reviews started alongside it",
+			);
+			assert.equal(harness.calls.length, 3, "the unguarded sibling is not reviewed");
+
+			assert.equal(await harness.toolCall("echo not guarded", "call-2"), undefined);
+			assert.equal(await harness.toolCall("git push origin b", "call-3"), undefined);
+			assert.equal(harness.calls.length, 3, "call-3 took the review started early");
+
+			// Changed by another handler before it reached this one: reviewed afresh.
+			assert.equal(await harness.toolCall("git push origin c --tags", "call-4"), undefined);
+			assert.equal(harness.calls.length, 4);
+			assert.match(proposedAction(harness.calls[3]), /git push origin c --tags/u);
+			assert.deepEqual(harness.displays.at(-1), { state: "approved", detail: "ok 3" });
+		},
+	);
+});
+
+test("27 · an early review whose call never arrives is dropped at turn_end, row and all", async () => {
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			config: { ui: { resultDisplayMs: 40 } },
+			completeSimple: (_call, index) => assistantResponse(verdictText("approve", `ok ${index}`)),
+		},
+		async (harness) => {
+			await harness.sessionStart();
+
+			await harness.assistantMessage([
+				{ id: "call-1", command: "git push origin a" },
+				{ id: "call-2", command: "git push origin b" },
+			]);
+			assert.equal(await harness.toolCall("git push origin a", "call-1"), undefined);
+			assert.equal(harness.calls.length, 2);
+			assert.deepEqual(harness.displays.at(-1), { state: "queued", detail: undefined }, "call-2's verdict waits for its call");
+
+			await harness.turnEnd();
+			assert.notDeepEqual(harness.displays.at(-1), { state: "queued", detail: undefined });
+			// What remains is call-1's own result, which clears on its timer.
+			await waitFor(() => harness.displays.at(-1)?.state === "cleared");
+			assert.deepEqual(harness.displays.at(-1), { state: "cleared", detail: undefined });
+			assert.deepEqual(harness.denied, []);
+		},
+	);
+});
+
+test("28 · reviewConcurrency 1 reviews nothing early", async () => {
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			config: { reviewConcurrency: 1 },
+			completeSimple: () => assistantResponse(verdictText("approve", "fine")),
+		},
+		async (harness) => {
+			await harness.sessionStart();
+
+			await harness.assistantMessage([
+				{ id: "call-1", command: "git push origin a" },
+				{ id: "call-2", command: "git push origin b" },
+			]);
+			assert.equal(await harness.toolCall("git push origin a", "call-1"), undefined);
+			assert.equal(harness.calls.length, 1);
+		},
+	);
+});
+
+test("29 · an early-reviewed call that arrives no longer guarded runs unreviewed and drops its row", async () => {
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			config: { ui: { resultDisplayMs: 40 } },
+			completeSimple: (_call, index) => assistantResponse(verdictText("approve", `ok ${index}`)),
+		},
+		async (harness) => {
+			await harness.sessionStart();
+
+			await harness.assistantMessage([
+				{ id: "call-1", command: "git push origin a" },
+				{ id: "call-2", command: "git push origin b" },
+			]);
+			assert.equal(await harness.toolCall("git push origin a", "call-1"), undefined);
+			assert.deepEqual(harness.displays.at(-1), { state: "queued", detail: undefined });
+
+			assert.equal(await harness.toolCall("echo rewritten", "call-2"), undefined);
+			assert.equal(harness.calls.length, 2, "nothing new is reviewed");
+			await waitFor(() => harness.displays.at(-1)?.state === "cleared");
+			assert.deepEqual(harness.displays.at(-1), { state: "cleared", detail: undefined });
 		},
 	);
 });
