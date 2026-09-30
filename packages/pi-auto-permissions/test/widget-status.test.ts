@@ -4,6 +4,7 @@ import {
   reviewFrameIntervalMs,
   reviewStatusFrame,
   reviewStatusLines,
+  reviewSummaryLines,
   WAITING_FRAME_INTERVAL_MS,
   WAITING_FRAMES,
   type ReviewLinePalette,
@@ -136,5 +137,18 @@ describe("reviewStatusLines", () => {
       `[h]auto permissions[/h] [m]· command review ·[/m] [w]${WAITING_FRAMES[1]} waiting for ${REVIEWER}[/w]`,
       "[m]checking[/m]",
     ]);
+  });
+});
+
+describe("reviewSummaryLines", () => {
+  it("counts unsettled reviews by state and leaves zero counts out", () => {
+    assert.deepEqual(
+      reviewSummaryLines({ waiting: 2, queued: 1, askUser: 0 }, REVIEWER, 0, PLAIN_PALETTE),
+      [`auto permissions · 3 commands · ${WAITING_FRAMES[0]} 2 waiting for ${REVIEWER} · ⋯ 1 queued`],
+    );
+    assert.deepEqual(
+      reviewSummaryLines({ waiting: 0, queued: 1, askUser: 1 }, REVIEWER, 0, PLAIN_PALETTE),
+      ["auto permissions · 2 commands · ⋯ 1 queued · ? 1 waiting for your approval"],
+    );
   });
 });

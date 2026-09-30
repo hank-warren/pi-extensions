@@ -11,6 +11,7 @@ import {
 	DEFAULT_EVIDENCE_CAPS,
 	FULL_REBUILD_KEEP_TOOL_RECORDS,
 	parsePermissionVerdict,
+	SCRIPT_EVIDENCE_SYSTEM_PROMPT,
 	SUBAGENT_CONTEXT_SYSTEM_PROMPT,
 } from "../review.ts";
 
@@ -346,7 +347,7 @@ describe("subagent execution context", () => {
 });
 
 describe("evidence pruning", () => {
-	const caps = { toolRecordMaxChars: 120, assistantRecordMaxChars: 140, compactionRecordMaxChars: 160 };
+	const caps = { toolRecordMaxChars: 120, assistantRecordMaxChars: 140, compactionRecordMaxChars: 160, scriptRecordMaxChars: 0, nestedRecordMaxChars: 0 };
 
 	test("truncateEvidenceText keeps head and tail with an explicit marker and is deterministic", async () => {
 		const { truncateEvidenceText } = await import("../review.ts");
@@ -456,6 +457,8 @@ describe("evidence pruning", () => {
 			toolRecordMaxChars: 500,
 			assistantRecordMaxChars: 1000,
 			compactionRecordMaxChars: 4000,
+			scriptRecordMaxChars: 8000,
+			nestedRecordMaxChars: 2000,
 		});
 		assert.equal(FULL_REBUILD_KEEP_TOOL_RECORDS, 60);
 	});
@@ -542,7 +545,7 @@ describe("evidence pruning", () => {
 				content: "process proc_1 exited with code 0",
 			},
 		];
-		const caps = { toolRecordMaxChars: 500, assistantRecordMaxChars: 1000, compactionRecordMaxChars: 4000 };
+		const caps = { toolRecordMaxChars: 500, assistantRecordMaxChars: 1000, compactionRecordMaxChars: 4000, scriptRecordMaxChars: 8000, nestedRecordMaxChars: 2000 };
 
 		const records = collectReviewEvidence(branch, undefined, [], caps, ["task-objective"]);
 		assert.equal(records.length, 2);
@@ -577,7 +580,7 @@ describe("evidence pruning", () => {
 			[{ id: "anchor1", type: "custom_message", customType: "task-objective", display: true, content: objective }],
 			undefined,
 			[],
-			{ toolRecordMaxChars: 20, assistantRecordMaxChars: 20, compactionRecordMaxChars: 20 },
+			{ toolRecordMaxChars: 20, assistantRecordMaxChars: 20, compactionRecordMaxChars: 20, scriptRecordMaxChars: 20, nestedRecordMaxChars: 20 },
 			["task-objective"],
 		);
 		assert.equal(records.length, 1);
@@ -699,6 +702,113 @@ describe("unresolvable-target rule", () => {
 		));
 		assert.ok(AUTO_PERMISSIONS_SYSTEM_PROMPT.includes(
 			"The assignment is visible: judge it as a delete of /tmp/build-cache.",
+		));
+	});
+});
+
+describe("script evidence", () => {
+	const script = [
+		"await tools.bash({ command: \"tar czf /backup/db.tgz /srv/db\" });",
+		"await tools.bash({ command: \"rm -rf /srv/db\" });",
+	].join("\n");
+	const user = { type: "message", id: "u1", message: { role: "user", content: [{ type: "text", text: "clean up the old db" }] } };
+	const assistant = {
+		type: "message",
+		id: "a1",
+		message: {
+			role: "assistant",
+			content: [
+				{ type: "text", text: "Backing up, then deleting." },
+				{ type: "toolCall", id: "script-1", name: "codemode", arguments: { code: script } },
+			],
+		},
+	};
+	const finished = {
+		type: "message",
+		id: "r1",
+		message: {
+			role: "toolResult",
+			toolCallId: "script-1",
+			toolName: "codemode",
+			isError: true,
+			nestedCalls: {
+				complete: true,
+				calls: [
+					{ id: "script-1/1", name: "bash", arguments: { command: "tar czf /backup/db.tgz /srv/db" }, status: "error" },
+					{ id: "script-1/2", name: "bash", arguments: { command: "rm -rf /srv/db" }, status: "unfinished" },
+				],
+			},
+		},
+	};
+
+	test("a call a running script made is reviewed with the script it came from", () => {
+		const records = collectReviewEvidence([user, assistant], "script-1/2", [], DEFAULT_EVIDENCE_CAPS);
+		const last = records.at(-1)!;
+		assert.equal(last.source, "assistant", "model-written, so it can never authorize");
+		assert.equal(last.key, "a1:1:script-1:script");
+		assert.equal(last.text, `SCRIPT codemode [script-1]:\n${script}`);
+	});
+
+	test("only a scripting tool's code is a script: another tool's code argument is not sent", () => {
+		const login = {
+			type: "message",
+			id: "a2",
+			message: { role: "assistant", content: [{ type: "toolCall", id: "login-1", name: "oauth_login", arguments: { code: "4F7K-22QX" } }] },
+		};
+		const records = collectReviewEvidence([user, login], "call-9", [], DEFAULT_EVIDENCE_CAPS);
+		assert.ok(records.every((record) => !record.text.includes("4F7K-22QX")));
+
+		const namespaced = {
+			...assistant,
+			message: { ...assistant.message, content: [{ type: "toolCall", id: "script-2", name: "functions.codemode", arguments: { code: script } }] },
+		};
+		assert.equal(
+			collectReviewEvidence([user, namespaced], "script-2/1", [], DEFAULT_EVIDENCE_CAPS).at(-1)!.text,
+			`SCRIPT functions.codemode [script-2]:\n${script}`,
+		);
+	});
+
+	test("a finished script keeps its SCRIPT record's key and adds what it ran, so the lineage prefix still matches", () => {
+		const running = collectReviewEvidence([user, assistant], "script-1/2", [], DEFAULT_EVIDENCE_CAPS);
+		const done = collectReviewEvidence([user, assistant, finished], undefined, [], DEFAULT_EVIDENCE_CAPS);
+		assert.deepEqual(done.slice(0, running.length).map((record) => record.key), running.map((record) => record.key));
+		const tool = done.at(-1)!;
+		assert.equal(tool.source, "tool");
+		assert.equal(tool.text, [
+			"TOOL codemode → error",
+			"[script-1] made these calls:",
+			"- bash {\"command\":\"tar czf /backup/db.tgz /srv/db\"} → error",
+			"- bash {\"command\":\"rm -rf /srv/db\"} → unfinished",
+		].join("\n"));
+	});
+
+	test("a long script is capped head and tail, and older scripts collapse on a full rebuild", async () => {
+		const { applyFullRebuildEviction } = await import("../review.ts");
+		const long = { ...assistant, message: { ...assistant.message, content: [{ type: "toolCall", id: "s", name: "codemode", arguments: { code: "x".repeat(20_000) } }] } };
+		const capped = collectReviewEvidence([long], "s/1", [], DEFAULT_EVIDENCE_CAPS).at(-1)!;
+		assert.ok(capped.text.length < 8200);
+		assert.ok(capped.text.includes("…[truncated"));
+
+		const scripts = Array.from({ length: 7 }, (_, index) => ({
+			key: `k${index}`,
+			source: "assistant" as const,
+			text: `SCRIPT codemode [call-${index}]:\nawait tools.bash({ command: "echo ${index}" });`,
+		}));
+		const evicted = applyFullRebuildEviction(scripts, 60);
+		assert.deepEqual(evicted.slice(0, 2).map((record) => record.text), [
+			"SCRIPT codemode [call-0] (source elided)",
+			"SCRIPT codemode [call-1] (source elided)",
+		]);
+		assert.deepEqual(evicted.slice(2), scripts.slice(2), "the newest five keep their source");
+		assert.deepEqual(evicted.map((record) => record.key), scripts.map((record) => record.key));
+	});
+
+	test("the policy tells the guardian a script is context, never authorization", () => {
+		assert.match(SCRIPT_EVIDENCE_SYSTEM_PROMPT, /never user authorization/u);
+		assert.match(SCRIPT_EVIDENCE_SYSTEM_PROMPT, /a delete that assumes a backup ran first/u);
+		// Template strings look like shell variables; the shell-variable rule must not fire on them.
+		assert.ok(SCRIPT_EVIDENCE_SYSTEM_PROMPT.includes(
+			'A "${…}" in the script is a JavaScript value already substituted, not a shell variable.',
 		));
 	});
 });

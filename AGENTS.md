@@ -174,15 +174,33 @@ Shared fakes live in `test/support/mock-pi.ts` — `createMockPi`, `createMockCo
 
 Unit tests here mock `ExtensionAPI`, so they pin what the extension *asks* Pi to do, never what Pi *does*. Every bug that shipped from this repo lived in that gap: a re-sent message that silently never dispatched, a poke Pi refused because the session was busy, a consumer fixture invented rather than transcribed. **Run the extension in a real session before releasing anything that touches session lifecycle, message delivery, or another extension's entries.**
 
+**Set it up the same way every time**, from the worktree under test, in a shell that exists only for the canary (a Herdr pane, or a terminal you close afterwards) — the block exports and unsets for the rest of that shell's life:
+
 ```bash
-# a scratch agent dir so the canary can never write real settings or sessions
-PI_CODING_AGENT_DIR=$(mktemp -d) pi -ne -e .
+export PI_CODING_AGENT_DIR=$(mktemp -d) && chmod 700 "$PI_CODING_AGENT_DIR"
+unset PI_AUTO_PERMISSIONS_CONFIG PI_MULTI_LOGIN_CONFIG PI_STASH_CONFIG PI_SUBAGENT_CHILD
+jq '{cpa}' ~/.pi/agent/auth.json > "$PI_CODING_AGENT_DIR/auth.json"
+mkdir -p "$PI_CODING_AGENT_DIR/pi-cliproxyapi-provider"
+cp ~/.pi/agent/pi-cliproxyapi-provider/config.json "$PI_CODING_AGENT_DIR/pi-cliproxyapi-provider/"
+printf '{"defaultTools":["+codemode"]}\n' > "$PI_CODING_AGENT_DIR/settings.json"
+pi -e . --model cpa/gpt-5.6-luna
 ```
+
+Every line is load-bearing:
+
+- **A scratch agent dir.** Settings, sessions, and every extension's config and sidecar files resolve under `PI_CODING_AGENT_DIR`, so nothing the canary does can write `~/.pi/agent`. Nothing is installed in it, so Pi discovers no packages and `-ne` is unnecessary — it would also drop Pi's built-in extensions, codemode among them, which a real session has.
+- **No config overrides.** `PI_AUTO_PERMISSIONS_CONFIG`, `PI_MULTI_LOGIN_CONFIG` and `PI_STASH_CONFIG` name a config file directly and win over the agent dir, so one left pointing at a live file makes the canary read and write it; `PI_SUBAGENT_CHILD` makes extensions behave as a subagent. Configure an extension the canary needs inside the scratch dir instead, e.g. `$PI_CODING_AGENT_DIR/pi-auto-permissions/config.json`.
+- **Models always come from CLIProxyAPI**, which takes two things. The `pi-cliproxyapi-provider` extension: `-e .` loads it along with every other package in the checkout, so a canary that loads a single package adds `-e ./packages/pi-cliproxyapi-provider` or has no models. And its credential and connection config: the `cpa` entry of `auth.json` (the key is the provider's configured `providerName`) and `pi-cliproxyapi-provider/config.json`. **Never copy the whole `auth.json`.** Its other entries are OAuth logins, and a refresh inside the canary can rotate a refresh token the live copy still holds, logging the live session out. If the change under test really needs a native provider, `/login` to it inside the canary.
+- **`defaultTools`** mirrors the live setting, so codemode is active as in a real session.
+
+`pi -e . --list-models cpa` in the same shell is the quick check that the provider loaded. A restart within one canary (`ctrl+d`, then the same `pi` line, plus `--continue` to resume) reuses the directory, which is why the block exports instead of prefixing the command. **`rm -rf "$PI_CODING_AGENT_DIR"` when the canary ends:** it holds a copy of a real credential.
+
+One thing the block does not isolate: `pi-cliproxyapi-provider` keeps its model snapshots in `~/.cache/pi-cliproxyapi-provider/`, outside the agent dir, and a canary refreshes them in place. That is the data the live install would fetch anyway, so it is harmless unless the change under test touches that cache; then also `export HOME="$PI_CODING_AGENT_DIR"` after the copies (git and gh inside the canary lose your config, which that canary does not need).
 
 Write the list of states to cover *before* canarying, not after — each one a state a mock cannot reach. The standing ones for this repo's shared surfaces:
 
 1. **Interrupt** — press `Esc` mid-turn. The turn stops. A delivery path that breaks `Esc` is a release blocker.
-2. **Queued reviews** — issue two guarded Bash commands in one turn. The second renders `⋯ queued behind another review` immediately rather than a blank gap, and `Esc` releases it then instead of after the first review settles. The critical section spans the human prompt, so "it looks hung" is the default failure here.
+2. **Parallel reviews** — once one guarded Bash command has been reviewed (the first review of a session builds the reviewer lineage alone), issue two guarded Bash commands in one message, the first needing approval. Both are reviewed at once — the widget collapses them into `auto permissions · 2 commands · ✶ 2 waiting for …` — and while the prompt is open the second renders as `⋯ 1 queued` rather than a blank gap. `Esc` releases both then, not after the prompt settles. The decision slot spans the human prompt, so "it looks hung" is the default failure here.
 3. **Plan mode's line** — run `/plan`, draft something small, and let it complete. The footer and widget must move `◆ plan · drafting` → `◆ plan · ready → /plan` → `▶ plan · implementing`, from one formatter.
 4. **Resume across a session boundary** — exit Pi mid-state, restart with `--continue`, and confirm the restored session still has its runtime tools. Same-session and restored-session paths are different code; test both.
 
@@ -190,18 +208,9 @@ Write the list of states to cover *before* canarying, not after — each one a s
 
 The canary used to be a manual chore, which meant it was skipped. It is not: inside Herdr (`HERDR_ENV=1`) an agent can drive a real TUI end to end — split a pane, run Pi in it, send prompts and raw keys, and read the rendered screen back. Do it this way. It is strictly better than any headless run, because the things worth checking (the widget above the editor, an `Esc` mid-turn, a modal) only exist in a real terminal.
 
-**Credentials.** A scratch `PI_CODING_AGENT_DIR` has no `auth.json`, so `--list-models` shows only providers configured by environment variables and your intended model is simply absent. Copy the two files that carry credentials and the model registry into the temp dir; settings and sessions still stay scratch, which is what the scratch dir is protecting.
+Set the pane up with the block in "The live canary" above; never point a canary at `~/.pi/agent` to skip it.
 
-```bash
-export PI_CODING_AGENT_DIR=$(mktemp -d) && chmod 700 "$PI_CODING_AGENT_DIR"
-cp ~/.pi/agent/auth.json ~/.pi/agent/models-store.json "$PI_CODING_AGENT_DIR"/
-```
-
-**That directory now holds a copy of real credentials — `rm -rf` it when the canary ends.** Treat it like any other secret on disk, and never point a canary at `~/.pi/agent` to avoid the copy.
-
-**Pin the canary to a free OpenRouter model** (`--model openrouter/stealth/ox-alpha` at the time of writing; check what is currently free rather than trusting that name). A canary is dozens of scripted turns whose output you throw away, so it should not be billed like real work — but cost is the smaller reason. A cheap model is the *better test*: guidance that only lands on a frontier model is guidance that will fail in the field, and a weaker model follows the loudest instruction instead of reasoning its way around a conflict between two. That is exactly the failure you want a canary to expose. Treat "it works when the model is smart enough to figure out what I meant" as an unshipped fix.
-
-The one standing exception: **when Hank names it, the canary model is `openai-codex/gpt-5.6-luna`** (note the hyphen in the registry id). An explicit instruction from Hank supersedes the free-model default for that run; absent one, stay on the cheap model.
+**Pin the canary to a small model served through CPA: `cpa/gpt-5.6-luna`** unless Hank names another for that run (`pi -e . --list-models cpa` shows what is available). A canary is dozens of scripted turns whose output you throw away, so it should not be billed like real work — but cost is the smaller reason. A cheap model is the *better test*: guidance that only lands on a frontier model is guidance that will fail in the field, and a weaker model follows the loudest instruction instead of reasoning its way around a conflict between two. That is exactly the failure you want a canary to expose. Treat "it works when the model is smart enough to figure out what I meant" as an unshipped fix.
 
 **Never steal focus, never leave the workspace** — `~/repos/AGENTS.md` §"Herdr panes and tabs" carries the general rule; a canary is just its loudest case. Every pane or tab takes `--no-focus`, and every one is created in the *driver's* workspace, because `herdr tab create` with no `--workspace` targets whatever workspace the human is looking at.
 
@@ -210,7 +219,7 @@ The one standing exception: **when Hank names it, the canary model is `openai-co
 herdr pane split --current --direction right --cwd "$PWD" --no-focus     # -> .result.pane.pane_id
 # or a full-size tab, in the driver's workspace and without taking focus
 herdr tab create --workspace "$HERDR_WORKSPACE_ID" --cwd "$PWD" --label <name> --no-focus
-herdr pane run <pane> 'cd '"$PWD"' && export PI_CODING_AGENT_DIR=... && pi -ne -e . --model <provider>/<id>'
+herdr pane run <pane> 'cd '"$PWD"             # then each line of the setup block, in order
 herdr pane run <pane> '/plan <objective>'       # sends text + Enter atomically
 herdr pane send-keys <pane> esc                 # logical keys: esc, enter, ctrl+d, digits
 herdr pane read <pane> --source visible --lines 20

@@ -30,10 +30,10 @@ export function reviewStatusFrame(
 ): ReviewStatusFrame {
   const index = Math.max(0, Math.floor(frameIndex));
   switch (state) {
-    // Static rather than animated: the row is replaced by `waiting` the moment
-    // the queue hands over, so a spinner here would promise progress the
-    // command is not making. It exists so a second guarded command in one turn
-    // renders *something* instead of a blank gap while it waits its turn.
+    // Static rather than animated: the row is replaced the moment the command
+    // gets its slot, so a spinner here would promise progress the command is
+    // not making. It exists so a guarded command waiting for a review slot or
+    // for another command's decision renders *something* instead of a blank gap.
     case "queued":
       return {
         glyph: "⋯",
@@ -59,6 +59,19 @@ export function reviewStatusFrame(
 
 export function reviewFrameIntervalMs(state: ReviewDisplayState): number | undefined {
   return state === "waiting" ? WAITING_FRAME_INTERVAL_MS : undefined;
+}
+
+/** The states a review is still in while it has not settled. */
+export type ActiveReviewState = Extract<ReviewDisplayState, "queued" | "waiting" | "ask_user">;
+
+export function isActiveReviewState(state: ReviewDisplayState): state is ActiveReviewState {
+  return state === "queued" || state === "waiting" || state === "ask_user";
+}
+
+export interface ReviewSummaryCounts {
+  waiting: number;
+  queued: number;
+  askUser: number;
 }
 
 export interface ReviewLinePalette {
@@ -90,4 +103,28 @@ export function reviewStatusLines(
   ];
   if (detail) lines.push(palette.muted(detail));
   return lines;
+}
+
+/**
+ * One line for several unsettled reviews at once. Per-command detail is left
+ * out: each command is visible in its own tool box, and an approval prompt
+ * carries its own reason.
+ */
+export function reviewSummaryLines(
+  counts: ReviewSummaryCounts,
+  reviewer: string,
+  frameIndex: number,
+  palette: ReviewLinePalette,
+): string[] {
+  const total = counts.waiting + counts.queued + counts.askUser;
+  const parts: string[] = [];
+  if (counts.waiting > 0) {
+    const frame = reviewStatusFrame("waiting", reviewer, frameIndex);
+    parts.push(palette.warning(`${frame.glyph} ${counts.waiting} ${frame.label}`));
+  }
+  if (counts.queued > 0) parts.push(palette.muted(`⋯ ${counts.queued} queued`));
+  if (counts.askUser > 0) parts.push(palette.accent(`? ${counts.askUser} waiting for your approval`));
+  return [
+    `${palette.header("auto permissions")} ${palette.muted(`· ${total} commands ·`)} ${parts.join(palette.muted(" · "))}`,
+  ];
 }

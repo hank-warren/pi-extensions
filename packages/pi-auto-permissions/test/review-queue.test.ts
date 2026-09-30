@@ -9,7 +9,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createReviewQueue } from "../review-queue.ts";
+import { createReviewLimiter, createReviewQueue } from "../review-queue.ts";
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
@@ -199,4 +199,54 @@ test("no abort listener survives an acquire, in either outcome", async () => {
 	await assert.rejects(() => doomed, /stop/);
 	assert.equal(count(), 0, "no listener after an aborted acquire");
 	holder();
+});
+
+test("the limiter holds at most `capacity` slots and grants waiters in arrival order", async () => {
+	const limiter = createReviewLimiter();
+	const order: string[] = [];
+	const a = await limiter.acquire(2);
+	const b = await limiter.acquire(2);
+	assert.equal(limiter.wouldWait(2), true);
+	const c = limiter.acquire(2).then((release) => {
+		order.push("c");
+		return release;
+	});
+	const d = limiter.acquire(2).then((release) => {
+		order.push("d");
+		return release;
+	});
+	await tick();
+	assert.deepEqual(order, [], "both waiters wait while two slots are held");
+	a();
+	a();
+	await tick();
+	assert.deepEqual(order, ["c"], "one release frees exactly one slot, however often it is called");
+	b();
+	await tick();
+	assert.deepEqual(order, ["c", "d"]);
+	(await c)();
+	(await d)();
+	assert.equal(limiter.wouldWait(2), false);
+});
+
+test("an aborted limiter waiter rejects without taking a slot", async () => {
+	const limiter = createReviewLimiter();
+	const held = await limiter.acquire(1);
+	const controller = new AbortController();
+	const waiting = limiter.acquire(1, controller.signal);
+	controller.abort(new Error("gone"));
+	await assert.rejects(waiting, /gone/u);
+	held();
+	assert.equal(limiter.wouldWait(1), false, "the aborted waiter never held the slot");
+	await assert.rejects(limiter.acquire(1, controller.signal), /gone/u, "an already-aborted signal is refused");
+});
+
+test("capacity is read per request, so a larger capacity is not blocked behind a full smaller one", async () => {
+	const limiter = createReviewLimiter();
+	const first = await limiter.acquire(1);
+	assert.equal(limiter.wouldWait(1), true);
+	assert.equal(limiter.wouldWait(4), false);
+	const second = await limiter.acquire(4);
+	first();
+	second();
 });

@@ -1,4 +1,4 @@
-import { createReviewQueue } from "./review-queue.js";
+import { createReviewLimiter, createReviewQueue } from "./review-queue.js";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readFileSync } from "node:fs";
@@ -19,7 +19,7 @@ import {
 } from "./evaluation-log.js";
 import type { Gate } from "./gates.js";
 import { classifyCommand } from "./classify.js";
-import type { ReviewEvidenceRecord } from "./review.js";
+import type { PermissionVerdict, ReviewEvidenceRecord } from "./review.js";
 import { promptSelect, setHerdrBlocked } from "./prompt-select.js";
 import { createReviewDisplay } from "./review-display.js";
 import { createSessionOverrides } from "./session-overrides.js";
@@ -78,12 +78,154 @@ function withLifecycle(signal: AbortSignal | undefined, lifecycle: AbortSignal):
   return signal ? AbortSignal.any([signal, lifecycle]) : lifecycle;
 }
 
+/**
+ * Settle with `promise`, or reject as soon as `signal` aborts. The promise is
+ * left to finish on its own; its outcome is then ignored.
+ */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    promise.catch(() => undefined);
+    return Promise.reject(signal.reason);
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+/** Aborts when the turn ends or, for a codemode call, when its script does. */
+function callSignalOf(scope: ReviewScope): AbortSignal | undefined {
+  const { ctx, callSignal } = scope;
+  if (!callSignal) return ctx.signal;
+  return ctx.signal ? AbortSignal.any([ctx.signal, callSignal]) : callSignal;
+}
+
+/** How one guardian review ended, before its verdict is applied. */
+type ReviewAttempt =
+  | { kind: "verdict"; verdict: PermissionVerdict; evidenceKeys: string[] }
+  | { kind: "failed"; reason: string; evidenceKeys: string[] }
+  | { kind: "cancelled" };
+
+/**
+ * A verdict whose evidence changed while it waited (the user answered another
+ * command's prompt, a tool result landed) is reviewed again before it is
+ * applied. Bounded so evidence that never settles cannot loop forever: the
+ * last review runs holding the decision slot, so no other prompt can be
+ * answered while it runs, which is the staleness window a lone review has
+ * always had.
+ */
+const MAX_REVIEWS_PER_COMMAND = 3;
+
+/** How many finished call ids are remembered for calls a script left behind. */
+const MAX_FINISHED_CALLS = 1024;
+
+/** Abort reason for an early review replaced by a fresh one for the same call. */
+const SUPERSEDED_REVIEW = "auto-permissions: superseded review";
+
+/** A review started early for a later bash call in the same assistant message. */
+interface SiblingReview {
+  scope: ReviewScope;
+  input: string;
+  gateLabel: string;
+  attempt: Promise<ReviewAttempt>;
+  controller: AbortController;
+}
+
+interface AssistantToolCall {
+  id: string;
+  name: string;
+  arguments: unknown;
+}
+
+function isBashTool(name: string): boolean {
+  return name === "bash" || name.endsWith(".bash");
+}
+
+function sameKeys(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((key, index) => key === b[index]);
+}
+
+function assistantToolCalls(message: unknown): AssistantToolCall[] {
+  const candidate = message as { role?: unknown; content?: unknown } | undefined;
+  if (candidate?.role !== "assistant" || !Array.isArray(candidate.content)) return [];
+  return candidate.content.flatMap((block) => {
+    const call = block as { type?: unknown; id?: unknown; name?: unknown; arguments?: unknown } | undefined;
+    return call?.type === "toolCall" && typeof call.id === "string" && typeof call.name === "string"
+      ? [{ id: call.id, name: call.name, arguments: call.arguments }]
+      : [];
+  });
+}
+
 export default function autoPermissionsExtension(pi: ExtensionAPI) {
   const overrides = createSessionOverrides(pi);
   let trustedGroups = new Set<string>();
   let lastConfigError: string | undefined;
   let lastEvaluationLogError: string | undefined;
-  const guardianReviewQueue = createReviewQueue();
+  // Guardian calls run in parallel up to config.reviewConcurrency; applying
+  // verdicts and prompting the user stay one command at a time.
+  const reviewSlots = createReviewLimiter();
+  const decisionQueue = createReviewQueue();
+  // Pi runs tool_call handlers for one assistant message's calls one after
+  // another, so the later bash calls' reviews are started early from here.
+  let lastAssistantCalls: AssistantToolCall[] = [];
+  const siblingReviews = new Map<string, SiblingReview>();
+  // One controller per tool call (a codemode script) that has made bash calls,
+  // aborted when Pi reports that call finished: its pending calls can no
+  // longer run, so their reviews and prompts are released.
+  const scriptsEnded = new Map<string, AbortController>();
+  // Calls that already finished, newest last. A script can end before Pi runs
+  // the tool_call hook of a call it fired without awaiting, and with sequential
+  // tool execution that hook can run after the turn is over, so this outlives
+  // the turn. Bounded: only a recently finished call can still have one pending.
+  const finishedCalls = new Set<string>();
+  // Nested call id → the model-issued call it descends from, so a call made
+  // several levels down still names the script whose SCRIPT record it shares.
+  const scriptRoots = new Map<string, string>();
+
+  function rememberFinished(toolCallId: string): void {
+    finishedCalls.delete(toolCallId);
+    finishedCalls.add(toolCallId);
+    if (finishedCalls.size > MAX_FINISHED_CALLS) {
+      finishedCalls.delete(finishedCalls.values().next().value!);
+    }
+  }
+
+  function callEndedSignal(toolCallId: string): AbortSignal {
+    if (finishedCalls.has(toolCallId)) return AbortSignal.abort();
+    let controller = scriptsEnded.get(toolCallId);
+    if (!controller) {
+      controller = new AbortController();
+      scriptsEnded.set(toolCallId, controller);
+    }
+    return controller.signal;
+  }
+
+  /**
+   * Aborts when the call that made this one ends, or the script at the top of
+   * the chain does: a tool in between may keep awaiting this call after its
+   * script has gone.
+   */
+  function scriptEndedSignal(parentToolCallId: string, scriptToolCallId: string): AbortSignal {
+    const parent = callEndedSignal(parentToolCallId);
+    return scriptToolCallId === parentToolCallId
+      ? parent
+      : AbortSignal.any([parent, callEndedSignal(scriptToolCallId)]);
+  }
+
+  function endScripts(): void {
+    for (const controller of scriptsEnded.values()) controller.abort();
+    scriptsEnded.clear();
+  }
   // The session is active exactly while the reviewer lifecycle is unaborted:
   // session_shutdown aborts it, session_start synchronously aborts and replaces
   // it, and nothing else touches it.
@@ -181,10 +323,19 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     return signal?.aborted === true;
   }
 
+  /**
+   * A cancelled turn resets the reviewer lineage. A codemode script ending
+   * does not: the reviewer conversation is intact, and dropping it would make
+   * the next reviews start cold.
+   */
+  function discardLineageIfTurnCancelled(scope: ReviewScope): void {
+    if (reviewCancelled(scope.ctx.signal)) reviewer.discardLineage();
+  }
+
   function cancelledAfterAwait(scope: ReviewScope, lifecycleSignal: AbortSignal): BlockResult | undefined {
     if (reviewer.isStale(lifecycleSignal)) return reviewCancelledResult();
-    if (!reviewCancelled(scope.ctx.signal)) return undefined;
-    reviewer.discardLineage();
+    if (!reviewCancelled(callSignalOf(scope))) return undefined;
+    discardLineageIfTurnCancelled(scope);
     display.clear(scope);
     return reviewCancelledResult();
   }
@@ -237,12 +388,12 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     decisionSource: "guardian" | "review_failure",
   ): Promise<BlockResult | undefined> {
     const { ctx, config, gate, command } = scope;
-    const signal = ctx.signal;
+    const signal = callSignalOf(scope);
     const lifecycleStale = () => reviewer.isStale(lifecycleSignal);
     const promptSignal = withLifecycle(signal, lifecycleSignal);
     const cancelled = reviewCancelledResult;
     if (lifecycleStale() || reviewCancelled(signal)) {
-      if (!lifecycleStale()) reviewer.discardLineage();
+      if (!lifecycleStale()) discardLineageIfTurnCancelled(scope);
       return cancelled();
     }
     display.show(scope, "ask_user", detail);
@@ -270,7 +421,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
         );
       } catch (error) {
         if (!lifecycleStale() && !reviewCancelled(signal)) throw error;
-        if (!lifecycleStale()) reviewer.discardLineage();
+        if (!lifecycleStale()) discardLineageIfTurnCancelled(scope);
         return cancelled();
       }
       const cancelledResult = cancelledAfterAwait(scope, lifecycleSignal);
@@ -301,11 +452,261 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     }
   }
 
+  function evidenceKeys(scope: ReviewScope): string[] {
+    return reviewer.collectEvidence(scope).map((record) => record.key);
+  }
+
+  /**
+   * One guardian review, run as soon as a review slot is free. Never applies
+   * the verdict: that waits for the decision slot in `decide`.
+   *
+   * `abandon` is set for a sibling review started early. Aborting it drops the
+   * verdict; its row is cleared too, unless the abort reason is
+   * `SUPERSEDED_REVIEW`, meaning a fresh review for the same call owns the row.
+   */
+  async function runReview(
+    scope: ReviewScope,
+    input: Record<string, unknown>,
+    lifecycleSignal: AbortSignal,
+    abandon?: AbortSignal,
+  ): Promise<ReviewAttempt> {
+    const { ctx, config } = scope;
+    const lifecycleStale = () => reviewer.isStale(lifecycleSignal);
+    const abandoned = () => abandon?.aborted === true;
+    const drop = (): ReviewAttempt => {
+      if (!lifecycleStale() && abandon?.reason !== SUPERSEDED_REVIEW) display.clear(scope);
+      return { kind: "cancelled" };
+    };
+    const callSignal = callSignalOf(scope);
+    const slotSignal = AbortSignal.any([
+      lifecycleSignal,
+      ...(callSignal ? [callSignal] : []),
+      ...(abandon ? [abandon] : []),
+    ]);
+    if (reviewSlots.wouldWait(config.reviewConcurrency)) display.show(scope, "queued");
+    let releaseSlot: () => void;
+    try {
+      releaseSlot = await reviewSlots.acquire(config.reviewConcurrency, slotSignal);
+    } catch {
+      return drop();
+    }
+    try {
+      if (lifecycleStale() || reviewCancelled(callSignal) || abandoned()) return drop();
+      display.show(scope, "waiting");
+      // Collected synchronously right before the review collects the same
+      // stream, so the keys describe exactly what the guardian judged.
+      const keys = evidenceKeys(scope);
+      let attempt: ReviewAttempt;
+      try {
+        // The reviewer already follows the turn signal. A codemode call whose
+        // script ended, or an early review nobody will take, cancels its
+        // request and gives its slot back at once.
+        const stop = scope.callSignal && abandon
+          ? AbortSignal.any([scope.callSignal, abandon])
+          : scope.callSignal ?? abandon;
+        const review = reviewer.review(scope, input, stop);
+        const verdict = await (stop ? untilAborted(review, stop) : review);
+        if (!lifecycleStale() && reviewCancelled(ctx.signal)) reviewer.discardLineage();
+        attempt = { kind: "verdict", verdict, evidenceKeys: keys };
+      } catch (error) {
+        attempt = { kind: "failed", reason: error instanceof Error ? error.message : String(error), evidenceKeys: keys };
+      }
+      if (lifecycleStale() || reviewCancelled(callSignal) || abandoned()) return drop();
+      // An early sibling review now waits for Pi to reach its call.
+      if (abandon) display.show(scope, "queued");
+      return attempt;
+    } finally {
+      releaseSlot();
+    }
+  }
+
+  /** Apply one settled review. Runs holding the decision slot. */
+  function applyReview(
+    scope: ReviewScope,
+    outcome: Exclude<ReviewAttempt, { kind: "cancelled" }>,
+    lifecycleSignal: AbortSignal,
+  ): Promise<BlockResult | undefined> | BlockResult | undefined {
+    if (outcome.kind === "failed") {
+      return askUser(scope, `Automatic review failed: ${outcome.reason}`, lifecycleSignal, "review_failure");
+    }
+    const { verdict } = outcome;
+    if (verdict.decision === "approve") {
+      return settle(scope, { display: "approved", reason: verdict.reason });
+    }
+    if (verdict.decision === "revise") {
+      return settle(scope, {
+        display: "revise",
+        verdict: "revise",
+        source: "guardian",
+        reason: verdict.reason,
+        block: `Auto Permissions requested revision: ${verdict.reason}\nRevise the command and try again.`,
+      });
+    }
+    return askUser(scope, verdict.reason, lifecycleSignal, "guardian");
+  }
+
+  /**
+   * Wait for a review, then apply it in the decision slot, one command at a
+   * time. The slot spans any approval prompt, so a verdict reached while the
+   * user was answering another command's prompt is checked against the
+   * evidence that answer added, and reviewed again when it changed. The last
+   * review `MAX_REVIEWS_PER_COMMAND` allows runs inside the slot.
+   */
+  async function decide(
+    scope: ReviewScope,
+    input: Record<string, unknown>,
+    lifecycleSignal: AbortSignal,
+    firstAttempt: Promise<ReviewAttempt>,
+  ): Promise<BlockResult | undefined> {
+    const lifecycleStale = () => reviewer.isStale(lifecycleSignal);
+    const callSignal = callSignalOf(scope);
+    // Same composite the ask path builds, so Esc, a reviewer-lifecycle reset
+    // and the end of a codemode script all release a waiting command instead
+    // of stranding it behind a prompt it is no longer waiting for.
+    const queueSignal = withLifecycle(callSignal, lifecycleSignal);
+    let attempt = firstAttempt;
+    for (let reviews = 1; ; reviews += 1) {
+      const outcome = await attempt;
+      if (outcome.kind === "cancelled") return reviewCancelledResult();
+      if (decisionQueue.busy) display.show(scope, "queued");
+      let releaseDecision: () => void;
+      try {
+        releaseDecision = await decisionQueue.acquire(queueSignal);
+      } catch {
+        if (!lifecycleStale()) display.clear(scope);
+        return reviewCancelledResult();
+      }
+      try {
+        if (lifecycleStale() || reviewCancelled(callSignal)) {
+          if (!lifecycleStale()) display.clear(scope);
+          return reviewCancelledResult();
+        }
+        if (sameKeys(outcome.evidenceKeys, evidenceKeys(scope))) {
+          return await applyReview(scope, outcome, lifecycleSignal);
+        }
+        if (reviews + 1 < MAX_REVIEWS_PER_COMMAND) {
+          attempt = runReview(scope, input, lifecycleSignal);
+          continue;
+        }
+        const last = await runReview(scope, input, lifecycleSignal);
+        if (last.kind === "cancelled") return reviewCancelledResult();
+        return await applyReview(scope, last, lifecycleSignal);
+      } finally {
+        releaseDecision();
+      }
+    }
+  }
+
+  /**
+   * Start reviews for the guarded bash calls that follow `toolCallId` in the
+   * assistant message that issued it. Pi calls tool_call handlers for one
+   * message's calls one at a time, so without this their reviews could never
+   * overlap. Each result is taken by the call's own handler, and only when the
+   * input it finally receives is exactly the input that was reviewed.
+   */
+  function startSiblingReviews(
+    toolCallId: string,
+    ctx: ExtensionContext,
+    config: AutoPermissionsConfig,
+    lifecycleSignal: AbortSignal,
+  ): void {
+    if (config.reviewConcurrency <= 1) return;
+    const index = lastAssistantCalls.findIndex((call) => call.id === toolCallId);
+    if (index < 0) return;
+    for (const call of lastAssistantCalls.slice(index + 1)) {
+      if (!isBashTool(call.name) || siblingReviews.has(call.id)) continue;
+      const input = call.arguments as Record<string, unknown> | undefined;
+      const command = input?.command;
+      if (typeof command !== "string") continue;
+      const classified = classifyCommand(command, config, trustedGroups);
+      if (classified.kind !== "review") continue;
+      const controller = new AbortController();
+      const scope: ReviewScope = {
+        ctx,
+        config,
+        gate: classified.gate,
+        command,
+        target: { toolName: call.name, toolCallId: call.id },
+      };
+      siblingReviews.set(call.id, {
+        scope,
+        input: JSON.stringify(input),
+        gateLabel: classified.gate.label,
+        attempt: runReview(scope, input!, lifecycleSignal, controller.signal),
+        controller,
+      });
+    }
+  }
+
+  /**
+   * The early review of this call, when it reviewed exactly this input under
+   * this gate. `gateLabel` is undefined when the call no longer needs review
+   * (another handler changed it), in which case the early review is dropped.
+   */
+  function takeSiblingReview(
+    toolCallId: string,
+    input: unknown,
+    gateLabel: string | undefined,
+  ): Promise<ReviewAttempt> | undefined {
+    const sibling = siblingReviews.get(toolCallId);
+    if (!sibling) return undefined;
+    siblingReviews.delete(toolCallId);
+    if (gateLabel === undefined) {
+      sibling.controller.abort();
+      display.clear(sibling.scope);
+      return undefined;
+    }
+    if (sibling.input === JSON.stringify(input) && sibling.gateLabel === gateLabel) return sibling.attempt;
+    // Changed after it was reviewed early: the fresh review owns the row.
+    sibling.controller.abort(SUPERSEDED_REVIEW);
+    return undefined;
+  }
+
+  /** Drop early reviews whose calls never reached this extension. */
+  function abandonSiblingReviews(): void {
+    for (const sibling of siblingReviews.values()) {
+      sibling.controller.abort();
+      display.clear(sibling.scope);
+    }
+    siblingReviews.clear();
+  }
+
+  pi.on("message_end", (event) => {
+    const calls = assistantToolCalls((event as { message?: unknown }).message);
+    if (calls.length > 0) lastAssistantCalls = calls;
+  });
+
+  pi.on("turn_end", () => {
+    lastAssistantCalls = [];
+    abandonSiblingReviews();
+    endScripts();
+    scriptRoots.clear();
+  });
+
+  pi.on("tool_execution_start", (event) => {
+    const { toolCallId, parentToolCallId } = event as { toolCallId?: unknown; parentToolCallId?: unknown };
+    if (typeof toolCallId !== "string") return;
+    // A provider may reuse a call id in a later turn; that call is live again.
+    finishedCalls.delete(toolCallId);
+    if (typeof parentToolCallId === "string") {
+      scriptRoots.set(toolCallId, scriptRoots.get(parentToolCallId) ?? parentToolCallId);
+    }
+  });
+
+  pi.on("tool_execution_end", (event) => {
+    const { toolCallId } = event as { toolCallId?: unknown };
+    if (typeof toolCallId !== "string") return;
+    rememberFinished(toolCallId);
+    const controller = scriptsEnded.get(toolCallId);
+    if (!controller) return;
+    scriptsEnded.delete(toolCallId);
+    controller.abort();
+  });
+
   pi.on("tool_call", async (event, ctx) => {
-    if (event.toolName !== "bash" && !event.toolName.endsWith(".bash")) return;
+    if (!isBashTool(event.toolName)) return;
     const command = (event.input as { command: string }).command;
     const lifecycleSignal = reviewer.lifecycleSignal;
-    const lifecycleStale = () => reviewer.isStale(lifecycleSignal);
 
     let config: AutoPermissionsConfig;
     try {
@@ -315,11 +716,33 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
       return { block: true, reason: error instanceof Error ? error.message : String(error) };
     }
     if (!config.enabled) return;
-    const target: ReviewTarget = { toolName: event.toolName, toolCallId: event.toolCallId };
+    const parentToolCallId = (event as { parentToolCallId?: string }).parentToolCallId;
+    if (!parentToolCallId) startSiblingReviews(event.toolCallId, ctx, config, lifecycleSignal);
+    const scriptToolCallId = parentToolCallId ? scriptRoots.get(parentToolCallId) ?? parentToolCallId : undefined;
+    const target: ReviewTarget = {
+      toolName: event.toolName,
+      toolCallId: event.toolCallId,
+      ...(scriptToolCallId ? { scriptToolCallId } : {}),
+    };
+    const input = event.input as Record<string, unknown>;
     const classified = classifyCommand(command, config, trustedGroups);
+    const early = takeSiblingReview(
+      event.toolCallId,
+      input,
+      classified.kind === "review" ? classified.gate.label : undefined,
+    );
     if (classified.kind === "pass") return;
     const gate = classified.gate;
-    const scope: ReviewScope = { ctx, config, gate, command, target };
+    const scope: ReviewScope = {
+      ctx,
+      config,
+      gate,
+      command,
+      target,
+      ...(parentToolCallId && scriptToolCallId
+        ? { callSignal: scriptEndedSignal(parentToolCallId, scriptToolCallId) }
+        : {}),
+    };
     if (classified.kind === "deny") {
       return settle(scope, {
         verdict: "block",
@@ -329,63 +752,21 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
       });
     }
 
-    // Show the queued row *before* waiting, and only when there is actually
-    // something to wait for: the critical section spans the human prompt, so a
-    // second guarded command in the same turn can sit here for as long as it
-    // takes someone to answer. Rendering nothing for that whole time reads as a
-    // hang. A lone review never flashes this, because the queue is idle.
-    if (guardianReviewQueue.busy) {
-      display.show(scope, "queued");
-    }
-    // Same composite the ask path builds, so Esc and a reviewer-lifecycle reset
-    // both release a queued command instead of stranding it behind a review it
-    // is no longer waiting for.
-    const queueSignal = withLifecycle(ctx.signal, lifecycleSignal);
-    let releaseReviewSlot: () => void;
-    try {
-      releaseReviewSlot = await guardianReviewQueue.acquire(queueSignal);
-    } catch {
-      return reviewCancelledResult();
-    }
-    try {
-      if (lifecycleStale() || reviewCancelled(ctx.signal)) {
-        return reviewCancelledResult();
-      }
-      const signal = ctx.signal;
-      display.show(scope, "waiting");
-      try {
-        const verdict = await reviewer.review(scope, event.input as Record<string, unknown>);
-        const cancelledResult = cancelledAfterAwait(scope, lifecycleSignal);
-        if (cancelledResult) return cancelledResult;
-        if (verdict.decision === "approve") {
-          return settle(scope, { display: "approved", reason: verdict.reason });
-        }
-        if (verdict.decision === "revise") {
-          return settle(scope, {
-            display: "revise",
-            verdict: "revise",
-            source: "guardian",
-            reason: verdict.reason,
-            block: `Auto Permissions requested revision: ${verdict.reason}\nRevise the command and try again.`,
-          });
-        }
-        return askUser(scope, verdict.reason, lifecycleSignal, "guardian");
-      } catch (error) {
-        if (lifecycleStale() || reviewCancelled(signal)) {
-          if (!lifecycleStale()) display.clear(scope);
-          return reviewCancelledResult();
-        }
-        const reason = error instanceof Error ? error.message : String(error);
-        return askUser(scope, `Automatic review failed: ${reason}`, lifecycleSignal, "review_failure");
-      }
-    } finally {
-      releaseReviewSlot();
-    }
+    return decide(scope, input, lifecycleSignal, early ?? runReview(scope, input, lifecycleSignal));
   });
 
   registerSettingsCommand(pi, { overrides, reviewer });
 
+  function resetCallTracking(): void {
+    lastAssistantCalls = [];
+    abandonSiblingReviews();
+    endScripts();
+    finishedCalls.clear();
+    scriptRoots.clear();
+  }
+
   pi.on("session_shutdown", async (_event, ctx) => {
+    resetCallTracking();
     reviewer.endSession();
     display.shutdown(ctx);
     setHerdrBlocked(pi, false);
@@ -400,6 +781,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     }
     if (config) warnAboutMissingReviewerProvider(ctx, config);
 
+    resetCallTracking();
     reviewer.startSession(ctx.cwd);
     overrides.restore(ctx.sessionManager.getBranch());
     trustedGroups = ctx.isProjectTrusted() ? loadTrustedGroups(ctx.cwd) : new Set();

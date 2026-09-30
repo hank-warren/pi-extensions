@@ -20,6 +20,7 @@ import {
 import {
   DEFAULT_REVIEWER_REASONING_EFFORT,
   DEFAULT_REVIEWER_TIMEOUT_MS,
+  MAX_REVIEW_CONCURRENCY,
   MAX_REVIEWER_TIMEOUT_MS,
   MIN_REVIEWER_TIMEOUT_MS,
   REASONING_EFFORTS,
@@ -32,6 +33,7 @@ const ENABLED_ID = "enabled";
 const REVIEWER_MODEL_ID = "reviewerModel";
 const THINKING_LEVEL_ID = "reasoningEffort";
 const TIMEOUT_ID = "timeoutMs";
+const REVIEW_CONCURRENCY_ID = "reviewConcurrency";
 const SYSTEM_PROMPT_ID = "systemPrompt";
 export const RECENT_DENIALS_ID = "recentDenials";
 
@@ -47,7 +49,18 @@ const NO_REVIEWER_MESSAGE = "Select a reviewer model first";
 export interface ReviewerSettings {
   enabled: boolean;
   reviewer?: ReviewerConfig;
+  reviewConcurrency: number;
   systemPromptSource: SystemPromptSource;
+}
+
+const CONCURRENCY_PRESETS = [1, 2, 4, 8, 16];
+
+/**
+ * The values the parallel-reviews row cycles through. A hand-written value
+ * outside the presets is kept in the cycle, so opening the menu never moves it.
+ */
+export function concurrencyValues(current: number): string[] {
+  return [...new Set([...CONCURRENCY_PRESETS, current])].sort((a, b) => a - b).map(String);
 }
 
 /** The subset of a pi model the menu needs; keeps tests free of pi-ai types. */
@@ -178,6 +191,13 @@ export function buildSettingItems(
       ...(submenus.timeout ? { submenu: submenus.timeout } : {}),
     },
     {
+      id: REVIEW_CONCURRENCY_ID,
+      label: "Parallel reviews",
+      description: "How many guardian reviews may run at once. 1 reviews one command at a time, none ahead of its turn.",
+      currentValue: String(settings.reviewConcurrency),
+      values: concurrencyValues(settings.reviewConcurrency),
+    },
+    {
       id: SYSTEM_PROMPT_ID,
       label: "System prompt",
       description: systemPromptDescription(settings.systemPromptSource),
@@ -239,6 +259,15 @@ export function applySettingChange(
       };
     }
     return { kind: "settings", settings: next };
+  }
+
+  if (id === REVIEW_CONCURRENCY_ID) {
+    const reviewConcurrency = Number(value);
+    if (!Number.isInteger(reviewConcurrency) || reviewConcurrency < 1 || reviewConcurrency > MAX_REVIEW_CONCURRENCY) {
+      return { kind: "error", message: `Parallel reviews must be a whole number from 1 to ${MAX_REVIEW_CONCURRENCY}` };
+    }
+    if (reviewConcurrency === settings.reviewConcurrency) return { kind: "ignored" };
+    return { kind: "settings", settings: { ...settings, reviewConcurrency } };
   }
 
   // The model and timeout submenus commit their own edit and hand back display

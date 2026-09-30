@@ -6,6 +6,7 @@ import {
 	applyTimeoutInput,
 	buildModelItems,
 	buildSettingItems,
+	concurrencyValues,
 	denialItem,
 	RECENT_DENIALS_ID,
 	filterModelItems,
@@ -22,6 +23,7 @@ function settings(overrides: Partial<ReviewerSettings> = {}): ReviewerSettings {
 	return {
 		enabled: true,
 		reviewer: { provider: "openai-codex", model: "gpt-5.6-luna", reasoningEffort: "medium", timeoutMs: 30_000 },
+		reviewConcurrency: 4,
 		systemPromptSource: { kind: "file", path: `${HOME}/.pi/agent/pi-auto-permissions/system-prompt.md` },
 		...overrides,
 	};
@@ -39,6 +41,7 @@ describe("settings rows", () => {
 			"reviewerModel",
 			"reasoningEffort",
 			"timeoutMs",
+			"reviewConcurrency",
 			"systemPrompt",
 		]);
 		assert.deepEqual(values(items), {
@@ -46,6 +49,7 @@ describe("settings rows", () => {
 			reviewerModel: "openai-codex/gpt-5.6-luna",
 			reasoningEffort: "medium",
 			timeoutMs: "30s",
+			reviewConcurrency: "4",
 			systemPrompt: "~/.pi/agent/pi-auto-permissions/system-prompt.md",
 		});
 	});
@@ -61,6 +65,7 @@ describe("settings rows", () => {
 			reviewerModel: "(unset)",
 			reasoningEffort: "low",
 			timeoutMs: "30s",
+			reviewConcurrency: "4",
 			systemPrompt: "(built-in default)",
 		});
 	});
@@ -177,6 +182,29 @@ describe("timeout", () => {
 	});
 });
 
+describe("parallel reviews", () => {
+	test("cycles through the presets, keeping a hand-written value in the cycle", () => {
+		assert.deepEqual(concurrencyValues(4), ["1", "2", "4", "8", "16"]);
+		assert.deepEqual(concurrencyValues(6), ["1", "2", "4", "6", "8", "16"]);
+		const row = buildSettingItems(settings({ reviewConcurrency: 6 }), {}, HOME).find((item) => item.id === "reviewConcurrency");
+		assert.equal(row?.currentValue, "6");
+		assert.deepEqual(row?.values, ["1", "2", "4", "6", "8", "16"]);
+	});
+
+	test("applies a valid edit without needing a reviewer model, and ignores an unchanged one", () => {
+		const change = applySettingChange(settings({ reviewer: undefined }), "reviewConcurrency", "1");
+		assert.equal(change.kind, "settings");
+		assert.equal(change.kind === "settings" && change.settings.reviewConcurrency, 1);
+		assert.deepEqual(applySettingChange(settings(), "reviewConcurrency", "4"), { kind: "ignored" });
+	});
+
+	test("rejects values the loader would reject", () => {
+		for (const value of ["0", "17", "2.5", "many"]) {
+			assert.equal(applySettingChange(settings(), "reviewConcurrency", value).kind, "error", value);
+		}
+	});
+});
+
 describe("model picker", () => {
 	const available: MenuModel[] = [
 		{ provider: "openai-codex", id: "gpt-5.6-luna", name: "GPT-5.6 Luna", contextWindow: 272_000 },
@@ -262,7 +290,7 @@ describe("submenu-owned rows", () => {
 });
 
 describe("recent denials row", () => {
-	const settings = { enabled: true, systemPromptSource: { kind: "builtin" } } as const;
+	const settings = { enabled: true, reviewConcurrency: 4, systemPromptSource: { kind: "builtin" } } as const;
 
 	test("appears only when the submenu is wired, with the count as its value", () => {
 		const submenu = (() => { throw new Error("unused"); }) as never;

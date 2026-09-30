@@ -221,6 +221,7 @@ The reviewer settings that change most often are editable from a settings menu i
 | Reviewer model | `reviewer.provider` / `reviewer.model`, picked from the models you are signed in to |
 | Thinking level | `reviewer.reasoningEffort` |
 | Review timeout | `reviewer.timeoutMs`, entered as `30s` or `45000ms` |
+| Parallel reviews | `reviewConcurrency`, cycling through 1, 2, 4, 8 and 16; a hand-written value in between stays in the cycle |
 | System prompt | read-only: the resolved path of the active `systemPromptFile`, or whether the built-in or an inline prompt is in use |
 | Recent denials | read-only view of the denial log with **Allow on retry**; shown while `denialLog` is enabled (the default) |
 
@@ -253,6 +254,16 @@ The extension also recognizes native checkpoints created by [`@ogulcancelik/pi-c
 The first review sends the complete compact evidence. Later reviews reuse the same reviewer session and append only newly finalized evidence and the latest action. The extension uses stable session identity, cache affinity, and long cache retention when supported by the provider. Branch changes, model or policy changes, failures, cancellation, and context pressure reset the reviewer session.
 
 Assistant and tool evidence provide context but never grant permission. Later user messages override earlier conflicting user instructions.
+
+### Codemode scripts
+
+A codemode script runs shell commands from inside it, so judging one of its `bash` calls alone misses what the script is doing around it: a loop over forty targets, or a delete that only makes sense because a backup runs first. The guardian therefore sees the script itself:
+
+- **The running script.** A call a script makes is reviewed with that script's source as an assistant-source `SCRIPT codemode [<call id>]` record, and the proposed action names it in `issuedByScript`. It sits in the evidence stream rather than in the proposed action, so every call from one script shares it through the cached reviewer lineage instead of re-sending it.
+- **Finished scripts.** Their `SCRIPT` record stays, and their `TOOL` record lists every call they made and whether it succeeded, from the `nestedCalls` record Pi keeps on the result.
+- **Never authorization.** The script is model-written: comments, strings and names in it grant nothing. A policy section appended outside `systemPrompt` tells the guardian to use it only for context, and to judge an action whose prerequisite was blocked, failed, or runs concurrently as if that step never happened.
+
+Scripts are capped at 8000 characters (head and tail, with an elision marker), and a full reviewer rebuild keeps the source of only the five newest; older ones collapse to `SCRIPT codemode [<call id>] (source elided)`.
 
 Trusted projects may optionally provide their root `AGENTS.md`, or `CLAUDE.md` when no `AGENTS.md` exists, as policy evidence:
 
@@ -301,6 +312,22 @@ Each text block contributes one `USER (<customType>):` record, in session order,
 Injected messages whose `customType` is **not** allowlisted are still visible — as `CUSTOM <customType>:` records with `source: "tool"`, capped like any tool record. They routinely carry the reason a command was proposed (subagent return values, CI outcomes, process notifications), so hiding them left the guardian judging commands with no visible motive; but they are extension output, and only the allowlist can promote a type to user-source, so a subagent's return value can explain a command without ever authorizing it.
 
 The allowlist matches what you wrote: a bare name such as `ask_user_question` matches that tool in any namespace (`functions.ask_user_question` included), while a dotted name matches exactly. The default is an empty list.
+
+## Parallel reviews
+
+When several guarded commands are pending at once, their guardian reviews run in parallel: a codemode script that runs `bash` calls under `Promise.all`, or several `bash` calls in one assistant message. Verdicts are still applied, and you are still asked, one command at a time.
+
+```json
+{
+  "reviewConcurrency": 4
+}
+```
+
+`reviewConcurrency` (1–16, default 4) caps how many guardian calls run at once; the **Parallel reviews** row in `/auto-permissions` sets it too. Set it to `1` for fully serial reviews. Parallel reviews all build on the same cached reviewer lineage: the first to finish extends it and the others' exchanges are dropped, which loses nothing because prior reviewer responses are non-authoritative. When there is no usable lineage yet (the first review of a session, or after a compaction, reset or cancellation), one review builds it from the full evidence and the others wait for it and extend it, so a batch pays for one cold request rather than one each. If that build fails, the waiting reviews go ahead on their own instead of queuing behind each other.
+
+- **Codemode scripts.** Pi runs each `bash` call a script makes through the same `tool_call` gate as a model-issued call, concurrently, so their reviews simply overlap. When a script ends — it returns, throws, times out or is aborted — while some of its calls are still queued, under review or waiting on your approval, those are released at once: the guardian request is cancelled (the reviewer lineage is kept) and an open prompt closes by itself. Pi never runs such a call anyway, because it hands it an already-aborted signal, so this only saves you from answering a prompt that can change nothing.
+- **Several calls in one message.** Pi runs the `tool_call` handlers for one message's calls one after another, so the handler of the first `bash` call starts the reviews of the later guarded ones. Each call later takes its early review only when the input Pi finally hands the handler is exactly the input that was reviewed; otherwise it is reviewed afresh. An early review whose call never arrives is dropped when the turn ends. With `reviewConcurrency: 1` nothing is reviewed early.
+- **Your answers still bind.** Applying a verdict and prompting you share one slot, and a verdict whose evidence changed while it waited — because you answered another command's prompt, or a tool result landed — is reviewed again before it is applied (up to three reviews per command; the third runs holding that slot, so no other prompt can be answered while it runs). A block you give on one command therefore reaches a sibling that was reviewed while your prompt was open.
 
 ## Denial log and retry
 
@@ -386,6 +413,14 @@ A sparkle spinner (`✶ ✸ ✻ ✽`) cycles while the guardian is reviewing and
   }
 }
 ```
+
+While several commands are under review at once, the widget collapses them into one summary line:
+
+```text
+auto permissions · 3 commands · ✶ 2 waiting for openai-codex-auto-permissions/gpt-5.6-luna · ⋯ 1 queued
+```
+
+`queued` counts commands waiting for a review slot, or with a verdict waiting to be applied behind another command's prompt.
 
 Set `ui.enabled` to `false` to hide review state without disabling enforcement.
 
