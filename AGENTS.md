@@ -182,7 +182,7 @@ PI_CODING_AGENT_DIR=$(mktemp -d) pi -ne -e .
 Write the list of states to cover *before* canarying, not after — each one a state a mock cannot reach. The standing ones for this repo's shared surfaces:
 
 1. **Interrupt** — press `Esc` mid-turn. The turn stops. A delivery path that breaks `Esc` is a release blocker.
-2. **Queued reviews** — issue two guarded Bash commands in one turn. The second renders `⋯ queued behind another review` immediately rather than a blank gap, and `Esc` releases it then instead of after the first review settles. The critical section spans the human prompt, so "it looks hung" is the default failure here.
+2. **Parallel reviews** — once one guarded Bash command has been reviewed (the first review of a session builds the reviewer lineage alone), issue two guarded Bash commands in one message, the first needing approval. Both are reviewed at once — the widget collapses them into `auto permissions · 2 commands · ✶ 2 waiting for …` — and while the prompt is open the second renders as `⋯ 1 queued` rather than a blank gap. `Esc` releases both then, not after the prompt settles. The decision slot spans the human prompt, so "it looks hung" is the default failure here.
 3. **Plan mode's line** — run `/plan`, draft something small, and let it complete. The footer and widget must move `◆ plan · drafting` → `◆ plan · ready → /plan` → `▶ plan · implementing`, from one formatter.
 4. **Resume across a session boundary** — exit Pi mid-state, restart with `--continue`, and confirm the restored session still has its runtime tools. Same-session and restored-session paths are different code; test both.
 
