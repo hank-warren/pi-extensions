@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import {
+	applyClassifierSelection,
 	applyModelSelection,
 	applySettingChange,
 	applyTimeoutInput,
+	buildClassifierItems,
 	buildModelItems,
 	buildSettingItems,
 	concurrencyValues,
@@ -42,6 +44,9 @@ describe("settings rows", () => {
 			"reasoningEffort",
 			"timeoutMs",
 			"reviewConcurrency",
+			"classifierModel",
+			"classifierThreshold",
+			"classifierMode",
 			"systemPrompt",
 		]);
 		assert.deepEqual(values(items), {
@@ -50,6 +55,9 @@ describe("settings rows", () => {
 			reasoningEffort: "medium",
 			timeoutMs: "30s",
 			reviewConcurrency: "4",
+			classifierModel: "(requires pi 0.99)",
+			classifierThreshold: "0.90",
+			classifierMode: "live",
 			systemPrompt: "~/.pi/agent/pi-auto-permissions/system-prompt.md",
 		});
 	});
@@ -66,6 +74,9 @@ describe("settings rows", () => {
 			reasoningEffort: "low",
 			timeoutMs: "30s",
 			reviewConcurrency: "4",
+			classifierModel: "(requires pi 0.99)",
+			classifierThreshold: "0.90",
+			classifierMode: "live",
 			systemPrompt: "(built-in default)",
 		});
 	});
@@ -213,7 +224,7 @@ describe("model picker", () => {
 	];
 
 	test("sorts by provider then id", () => {
-		const items = buildModelItems(available, settings());
+		const items = buildModelItems(available, settings().reviewer);
 		assert.deepEqual(items.map((item) => item.value), [
 			"anthropic/claude-haiku-4-5",
 			"anthropic/claude-sonnet-4-6",
@@ -223,16 +234,14 @@ describe("model picker", () => {
 	});
 
 	test("does not duplicate an available configured reviewer", () => {
-		const items = buildModelItems(available, settings());
+		const items = buildModelItems(available, settings().reviewer);
 		assert.equal(items.filter((item) => item.value === "openai-codex/gpt-5.6-luna").length, 1);
 	});
 
 	test("pins a configured reviewer the registry does not know", () => {
 		const items = buildModelItems(
 			available,
-			settings({
-				reviewer: { provider: "openai-codex-free", model: "gpt-5.6-luna", reasoningEffort: "low", timeoutMs: 30_000 },
-			}),
+			{ provider: "openai-codex-free", model: "gpt-5.6-luna" },
 		);
 		assert.equal(items[0]?.value, "openai-codex-free/gpt-5.6-luna");
 		assert.match(items[0]?.label ?? "", /\(configured, unavailable\)/);
@@ -240,7 +249,7 @@ describe("model picker", () => {
 	});
 
 	test("filters on any part of the row, not just a value prefix", () => {
-		const items = buildModelItems(available, settings());
+		const items = buildModelItems(available, settings().reviewer);
 		assert.deepEqual(filterModelItems(items, "luna").map((item) => item.value), ["openai-codex/gpt-5.6-luna"]);
 		assert.deepEqual(filterModelItems(items, "haiku").map((item) => item.value), ["anthropic/claude-haiku-4-5"]);
 		assert.equal(filterModelItems(items, "").length, items.length);
@@ -317,5 +326,65 @@ describe("recent denials row", () => {
 		assert.ok(item.label.length <= 70);
 		assert.ok(item.label.endsWith("…"));
 		assert.equal(item.description, "Force push · block · history rewrite was not requested");
+	});
+});
+
+describe("classifier rows", () => {
+	const classifier = { provider: "opencode", model: "jev-1.13-free", approveThreshold: 0.9, timeoutMs: 5_000, shadow: false };
+	const submenu = () => ({ render: () => [], invalidate() {}, handleInput() {} });
+
+	test("shows off, or the configured model, when classifiers are supported", () => {
+		const row = (value: ReviewerSettings) =>
+			buildSettingItems(value, { classifierModel: submenu }, HOME).find((item) => item.id === "classifierModel");
+		assert.equal(row(settings())?.currentValue, "off");
+		assert.equal(row(settings({ classifier }))?.currentValue, "opencode/jev-1.13-free");
+		assert.equal(row(settings())?.submenu, submenu);
+	});
+
+	test("picking a classifier creates the block with defaults; off removes it", () => {
+		const picked = applyClassifierSelection(settings(), "opencode/jev-1.13-free");
+		assert.equal(picked.kind, "settings");
+		assert.deepEqual(picked.kind === "settings" && picked.settings.classifier, classifier);
+
+		const switched = applyClassifierSelection(settings({ classifier: { ...classifier, approveThreshold: 0.8, shadow: true } }), "opencode/jev-1.13");
+		assert.deepEqual(
+			switched.kind === "settings" && switched.settings.classifier,
+			{ ...classifier, model: "jev-1.13", approveThreshold: 0.8, shadow: true },
+			"tuning carries over to the new model",
+		);
+
+		const off = applyClassifierSelection(settings({ classifier }), "off");
+		assert.equal(off.kind === "settings" && off.settings.classifier, undefined);
+		assert.deepEqual(applyClassifierSelection(settings(), "off"), { kind: "ignored" });
+		assert.equal(applyClassifierSelection(settings(), "nonsense").kind, "error");
+	});
+
+	test("the threshold and mode rows need a classifier and validate their values", () => {
+		assert.equal(applySettingChange(settings(), "classifierThreshold", "0.95").kind, "error");
+		assert.equal(applySettingChange(settings(), "classifierMode", "shadow").kind, "error");
+
+		const threshold = applySettingChange(settings({ classifier }), "classifierThreshold", "0.95");
+		assert.equal(threshold.kind === "settings" && threshold.settings.classifier?.approveThreshold, 0.95);
+		assert.equal(applySettingChange(settings({ classifier }), "classifierThreshold", "0.3").kind, "error");
+		assert.deepEqual(applySettingChange(settings({ classifier }), "classifierThreshold", "0.90"), { kind: "ignored" });
+
+		const shadow = applySettingChange(settings({ classifier }), "classifierMode", "shadow");
+		assert.equal(shadow.kind === "settings" && shadow.settings.classifier?.shadow, true);
+		assert.equal(applySettingChange(settings({ classifier }), "classifierMode", "loud").kind, "error");
+	});
+
+	test("the threshold cycle keeps a hand-written value", () => {
+		const row = buildSettingItems(settings({ classifier: { ...classifier, approveThreshold: 0.93 } }), {}, HOME)
+			.find((item) => item.id === "classifierThreshold");
+		assert.equal(row?.currentValue, "0.93");
+		assert.ok(row?.values?.includes("0.93"));
+		assert.ok(row?.values?.includes("0.90"));
+	});
+
+	test("the picker offers off first, then the available classifiers", () => {
+		const items = buildClassifierItems([{ provider: "opencode", id: "jev-1.13" }, { provider: "opencode", id: "jev-1.13-free" }], settings());
+		assert.deepEqual(items.map((item) => item.value), ["off", "opencode/jev-1.13", "opencode/jev-1.13-free"]);
+		const missing = buildClassifierItems([], settings({ classifier }));
+		assert.deepEqual(missing.map((item) => item.value), ["off", "opencode/jev-1.13-free"], "a configured but unavailable classifier stays visible");
 	});
 });

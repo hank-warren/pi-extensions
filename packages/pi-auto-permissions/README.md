@@ -141,6 +141,42 @@ Set `enabled` to `false` to disable the extension. Invalid configuration fails c
 
 Set `"reviewAllShell": true` to review every bash command that matches no rule under a generic `shell command` gate (group `all-shell`), the analogue of Claude Code's `classifyAllShell`. The rules then act as a severity layer on top of blanket coverage: deny rules still block outright, and everything else — named by a rule or not — goes to the guardian. The trade is one guardian call per command; pair it with a cheap reviewer model. A command whose matching group is listed in `.pi/trusted-ops` was explicitly waved through and is not re-captured by the blanket gate; trusting `all-shell` itself opts a project out of blanket review while keeping the ruleset live. Lineage caching and the evaluation log apply to `all-shell` reviews unchanged.
 
+### Classifier pre-screen (optional, pi 0.99+)
+
+Blanket review costs one guardian call per command. Pi 0.99 added classifier models — TypeSafe's Jev, served free as `opencode/jev-1.13-free` — that answer a typed question with label probabilities in a few hundred milliseconds. Configure one and it pre-screens the `reviewAllShell` catch-all:
+
+```json
+{
+  "reviewAllShell": true,
+  "classifier": {
+    "provider": "opencode",
+    "model": "jev-1.13-free",
+    "approveThreshold": 0.9,
+    "timeoutMs": 5000,
+    "shadow": false
+  }
+}
+```
+
+The classifier answers `approve`, `revise` or `deny` for the command. Only an approve probability at or above `approveThreshold` (0.5–1, default 0.9) runs the command without a guardian call. Everything else goes to the guardian exactly as before: `revise`, because a classifier returns no reason to tell the agent what to fix; `deny`, because a label nobody can explain is not a verdict worth enforcing alone; and any low-confidence answer, timeout, missing model or error. The widget shows `✓ approved` with `classifier <model>: approve 0.97` under it when the classifier decided.
+
+The classifier only ever sees the user-source records (typed messages, allowlisted dialog answers and injected types, permission overrides), the non-empty `guardianPolicy` lists, the working directory and the command. Assistant text, tool results and scripts are left out: a classifier cannot be told which records are untrusted the way the guardian is, so the only agent-written text it sees is the command. Commands a named rule gates are never pre-screened — a rule exists because you wanted a guardian's judgment on that operation.
+
+`shadow: true` classifies and logs but always asks the guardian, which is how to pick a threshold before trusting one. Every pre-screen appends a record to the private `classifier.jsonl` sidecar beside the config (0600, 16 MB rotation; `"classifierLog": { "enabled": false }` opts out, `path` relocates it) with the probabilities, the outcome and — when the command went on to the guardian — the guardian's decision:
+
+```json
+{"v":1,"ts":"…","command":"npm test","model":"opencode/jev-1.13-free","threshold":0.9,"shadow":true,"outcome":"fallback","latencyMs":412,"choice":"approve","probabilities":{"approve":0.93,"revise":0.05,"deny":0.02},"guardian":"approve"}
+```
+
+To see what a threshold would have done, count the records it would have fast-approved and how many of those the guardian did not approve:
+
+```bash
+jq -s --argjson t 0.9 '[.[] | select(.guardian and .probabilities.approve >= $t)]
+  | {wouldSkip: length, guardianDisagreed: map(select(.guardian != "approve")) | length}' classifier.jsonl
+```
+
+Classifier calls are recorded in the usage sidecar with the label `classifier`. On a Pi older than 0.99 a configured classifier is ignored with a one-time warning.
+
 ## Define trusted infrastructure
 
 The rules decide *which* commands are reviewed; `guardianPolicy` tells the guardian *how to judge them* against your infrastructure. All four lists are prose — write entries the way you would describe your environment to a new engineer:
@@ -222,6 +258,9 @@ The reviewer settings that change most often are editable from a settings menu i
 | Thinking level | `reviewer.reasoningEffort` |
 | Review timeout | `reviewer.timeoutMs`, entered as `30s` or `45000ms` |
 | Parallel reviews | `reviewConcurrency`, cycling through 1, 2, 4, 8 and 16; a hand-written value in between stays in the cycle |
+| Classifier | `classifier.provider` / `classifier.model`, picked from your signed-in classifier models, or `off` (pi 0.99+) |
+| Classifier threshold | `classifier.approveThreshold`, cycling through 0.50–0.99; a hand-written value stays in the cycle |
+| Classifier mode | `classifier.shadow`: `live` acts on confident approvals, `shadow` only logs them |
 | System prompt | read-only: the resolved path of the active `systemPromptFile`, or whether the built-in or an inline prompt is in use |
 | Recent denials | read-only view of the denial log with **Allow on retry**; shown while `denialLog` is enabled (the default) |
 

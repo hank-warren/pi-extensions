@@ -45,6 +45,7 @@ describe("auto permissions config", () => {
 		["usageLog", "usage.jsonl", true],
 		["denialLog", "denials.jsonl", true],
 		["evaluationLog", "review-evals.jsonl", false],
+		["classifierLog", "classifier.jsonl", true],
 	] as const) {
 		test(`resolves the ${key} sidecar block`, () => {
 			const load = (value: unknown) => loadAutoPermissionsConfig(configFile(value))[key];
@@ -392,6 +393,35 @@ describe("auto permissions config", () => {
 				() => loadAutoPermissionsConfig(configFile({ reviewConcurrency: value })),
 				/reviewConcurrency must be an integer between 1 and 16/u,
 			);
+		}
+	});
+
+	test("the classifier is off unless configured, and fills in its defaults", () => {
+		assert.equal(loadAutoPermissionsConfig(configFile({})).classifier, undefined);
+		assert.deepEqual(
+			loadAutoPermissionsConfig(configFile({ classifier: { provider: "opencode", model: "jev-1.13-free" } })).classifier,
+			{ provider: "opencode", model: "jev-1.13-free", approveThreshold: 0.9, timeoutMs: 5_000, shadow: false },
+		);
+		assert.deepEqual(
+			loadAutoPermissionsConfig(configFile({
+				classifier: { provider: "opencode", model: "jev-1.13", approveThreshold: 0.75, timeoutMs: 2_000, shadow: true },
+			})).classifier,
+			{ provider: "opencode", model: "jev-1.13", approveThreshold: 0.75, timeoutMs: 2_000, shadow: true },
+		);
+	});
+
+	test("rejects an invalid classifier block", () => {
+		const base = { provider: "opencode", model: "jev-1.13-free" };
+		for (const bad of [
+			true,
+			{ provider: "opencode" },
+			{ ...base, approveThreshold: 0.4 },
+			{ ...base, approveThreshold: 1.01 },
+			{ ...base, approveThreshold: "0.9" },
+			{ ...base, timeoutMs: 100 },
+			{ ...base, shadow: "yes" },
+		]) {
+			assert.throws(() => loadAutoPermissionsConfig(configFile({ classifier: bad })), /classifier/u, JSON.stringify(bad));
 		}
 	});
 });

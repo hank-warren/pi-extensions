@@ -174,4 +174,28 @@ describe("config writer", () => {
 		assert.equal(config.rules[0]?.label, "rm");
 		assert.deepEqual(config.systemPromptSource, { kind: "file", path: join(path, "..", "system-prompt.md") });
 	});
+
+	test("writes the classifier block sparsely and removes it when turned off", () => {
+		const path = fixtureFile({ ...FIXTURE, classifier: { provider: "opencode", model: "jev-1.13", timeoutMs: 2_000 } });
+		patchAutoPermissionsConfig(path, {
+			classifier: { provider: "opencode", model: "jev-1.13-free", approveThreshold: 0.9, timeoutMs: 5_000, shadow: false },
+		});
+		assert.deepEqual(read(path).classifier, { provider: "opencode", model: "jev-1.13-free", timeoutMs: 2_000 }, "hand-written timeout survives, defaults stay sparse");
+
+		patchAutoPermissionsConfig(path, {
+			classifier: { provider: "opencode", model: "jev-1.13-free", approveThreshold: 0.8, timeoutMs: 2_000, shadow: true },
+		});
+		assert.deepEqual(read(path).classifier, {
+			provider: "opencode",
+			model: "jev-1.13-free",
+			timeoutMs: 2_000,
+			approveThreshold: 0.8,
+			shadow: true,
+		});
+		assert.equal(loadAutoPermissionsConfig(path).classifier?.approveThreshold, 0.8);
+
+		patchAutoPermissionsConfig(path, { classifier: null });
+		assert.equal("classifier" in read(path), false);
+		assert.deepEqual(read(path).reviewer, FIXTURE.reviewer, "nothing else moved");
+	});
 });

@@ -60,6 +60,7 @@
     "usage-log.ts",
     "widget-status.ts",
     "classify.ts",
+    "classifier.ts",
     "prompt-select.ts",
     "review-display.ts",
     "review-scope.ts",

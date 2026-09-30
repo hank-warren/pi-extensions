@@ -10,12 +10,14 @@ import {
   type AutoPermissionsConfig,
 } from "./config.js";
 import { patchAutoPermissionsConfig } from "./config-writer.js";
+import { classifierRuntime } from "./classifier.js";
 import { readRecentDenials } from "./denial-log.js";
 import type { GuardianReviewer } from "./guardian-reviewer.js";
 import type { SessionOverrides } from "./session-overrides.js";
 import {
   applySettingChange,
   buildSettingItems,
+  createClassifierSubmenu,
   createDenialsSubmenu,
   createModelSubmenu,
   createTimeoutSubmenu,
@@ -76,6 +78,7 @@ export function registerSettingsCommand(
         settings = {
           enabled: config.enabled,
           reviewer: config.reviewer,
+          classifier: config.classifier,
           reviewConcurrency: config.reviewConcurrency,
           systemPromptSource: config.systemPromptSource,
         };
@@ -104,6 +107,9 @@ export function registerSettingsCommand(
             // Only when this edit changed it, so a hand-written value is never rewritten by an unrelated save.
             ...(settings.reviewConcurrency !== previous.reviewConcurrency
               ? { reviewConcurrency: settings.reviewConcurrency }
+              : {}),
+            ...(JSON.stringify(settings.classifier) !== JSON.stringify(previous.classifier)
+              ? { classifier: settings.classifier ?? null }
               : {}),
           });
         } catch (error) {
@@ -170,12 +176,24 @@ export function registerSettingsCommand(
         ctx.ui.notify("Override added for the exact command; the agent may retry it.", "info");
       };
 
+      // Fetched up front: the classifier picker renders synchronously. Absent on a Pi before 0.99.
+      const classifiers = classifierRuntime(ctx.modelRegistry);
+      let availableClassifiers: MenuModel[] = [];
+      if (classifiers) {
+        try {
+          availableClassifiers = [...await classifiers.getAvailableOfType("classifier")];
+        } catch {
+          // An unreachable catalog still lets the menu open; the picker shows only Off.
+        }
+      }
+
       await ctx.ui.custom<void>((tui, _theme, _keybindings, done) => {
         closeSettings = () => done(undefined);
         const host: SubmenuHost = {
           getSettings: () => settings,
           commit,
           availableModels: () => ctx.modelRegistry.getAvailable() as MenuModel[],
+          availableClassifiers: () => availableClassifiers,
           requestRender: () => tui.requestRender(),
           settingsTheme: getSettingsListTheme(),
           selectTheme: getSelectListTheme(),
@@ -192,6 +210,7 @@ export function registerSettingsCommand(
             settings,
             {
               reviewerModel: createModelSubmenu(host),
+              ...(classifiers ? { classifierModel: createClassifierSubmenu(host) } : {}),
               timeout: createTimeoutSubmenu(host),
               ...(denialLog.enabled ? { recentDenials: createDenialsSubmenu(denialsHost) } : {}),
             },

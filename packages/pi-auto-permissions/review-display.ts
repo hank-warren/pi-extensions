@@ -15,7 +15,8 @@ import {
 const WIDGET_KEY = "auto-permissions";
 
 export interface ReviewDisplay {
-  show(scope: ReviewScope, state: ReviewDisplayState, detail?: string, autoClear?: boolean): void;
+  /** `via` names the model working on the row, when it is not the guardian (the classifier pre-screen). */
+  show(scope: ReviewScope, state: ReviewDisplayState, detail?: string, autoClear?: boolean, via?: string): void;
   clear(scope: ReviewScope): void;
   shutdown(ctx: ExtensionContext): void;
 }
@@ -24,6 +25,7 @@ interface Row {
   scope: ReviewScope;
   state: ReviewDisplayState;
   detail?: string;
+  via?: string;
 }
 
 function rowKey(scope: ReviewScope): string {
@@ -81,7 +83,7 @@ export function createReviewDisplay(deps: { isSessionActive: () => boolean }): R
       return;
     }
     const latest = rows.at(-1) ?? settled!;
-    const reviewer = reviewerLabel(latest.scope);
+    const reviewer = latest.via ?? reviewerLabel(latest.scope);
     const counts: ReviewSummaryCounts = { waiting: 0, queued: 0, askUser: 0 };
     for (const row of rows) {
       if (row.state === "waiting") counts.waiting += 1;
@@ -140,12 +142,12 @@ export function createReviewDisplay(deps: { isSessionActive: () => boolean }): R
   }
 
   return {
-    show(scope: ReviewScope, state: ReviewDisplayState, detail?: string, autoClear = false): void {
+    show(scope: ReviewScope, state: ReviewDisplayState, detail?: string, autoClear = false, via?: string): void {
       if (!visible(scope)) return;
       const key = rowKey(scope);
       stopClearTimer();
       if (isActiveReviewState(state)) {
-        active.set(key, { scope, state, detail });
+        active.set(key, { scope, state, detail, ...(via ? { via } : {}) });
         settled = undefined;
       } else {
         active.delete(key);
