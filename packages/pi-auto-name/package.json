@@ -1,6 +1,6 @@
 {
   "name": "@hank-warren/pi-auto-name",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Names each Pi session after its work (3-5 words) once the first turn settles, using the session's own model; /rename regenerates it.",
   "type": "module",
   "keywords": [
@@ -34,6 +34,7 @@
   "files": [
     "index.ts",
     "guardian-transport.ts",
+    "herdr.ts",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"

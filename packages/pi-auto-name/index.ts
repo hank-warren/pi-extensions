@@ -10,10 +10,14 @@
  * context, and it shares no session id or prompt-cache entry with the session.
  * The only write is the `session_info` entry `setSessionName` appends, which
  * never reaches the model.
+ *
+ * Inside Herdr the name is also reported as the pane token `$session_name`
+ * (see herdr.ts), so a sidebar row can show it without pi's title decoration.
  */
 import path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resolveGuardianCompleteSimple } from "./guardian-transport.ts";
+import { reportSessionName } from "./herdr.ts";
 
 const MAX_TITLE_CHARS = 40;
 const MAX_EXCERPT_CHARS = 400;
@@ -128,11 +132,20 @@ export default function autoName(pi: ExtensionAPI): void {
 		}
 	}
 
-	pi.on("session_start", () => {
+	// Herdr gets the name on every session change (so a stale one never carries
+	// over), on every rename, and a clear on quit. TUI only, like the auto name.
+	pi.on("session_start", (_event, ctx) => {
 		cancel();
 		autoTried = false;
+		if (ctx.mode === "tui") void reportSessionName(pi.getSessionName());
 	});
-	pi.on("session_shutdown", cancel);
+	pi.on("session_info_changed", (event, ctx) => {
+		if (ctx.mode === "tui") void reportSessionName(event.name);
+	});
+	pi.on("session_shutdown", async (event, ctx) => {
+		cancel();
+		if (event.reason === "quit" && ctx.mode === "tui") await reportSessionName(undefined);
+	});
 
 	// One automatic attempt per session, and only while it has no name: a name
 	// from `/name`, a fork's parent, or an earlier run is never replaced.

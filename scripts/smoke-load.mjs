@@ -122,7 +122,7 @@ const EXPECTED_SURFACES = {
 	},
 	"./packages/pi-auto-name/index.ts": {
 		commands: ["rename"],
-		handlers: ["agent_settled", "session_shutdown", "session_start"],
+		handlers: ["agent_settled", "session_info_changed", "session_shutdown", "session_start"],
 	},
 };
 
