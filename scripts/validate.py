@@ -21,6 +21,7 @@ EXPECTED_EXTENSION_ENTRYPOINTS = [
     "./packages/pi-cliproxyapi-provider/index.ts",
     "./packages/pi-codex-compaction/index.ts",
     "./packages/pi-thinking-step/index.ts",
+    "./packages/pi-auto-name/index.ts",
 ]
 # Public resources must live in inventoried packages: a top-level extensions/
 # or skills/ directory would bypass package validation and ship through the
@@ -67,14 +68,18 @@ PUBLIC_PACKAGES = {
     "packages/pi-cliproxyapi-provider": "@hank-warren/pi-cliproxyapi-provider",
     "packages/pi-codex-compaction": "@hank-warren/pi-codex-compaction",
     "packages/pi-thinking-step": "@hank-warren/pi-thinking-step",
+    "packages/pi-auto-name": "@hank-warren/pi-auto-name",
 }
 # Sources deliberately duplicated byte-for-byte instead of shared through a
 # package dependency, because sharing them would cost far more than copying
-# them. Empty since pi-herdr-auto-title was removed: `guardian-transport.ts`
-# now has exactly one home in pi-auto-permissions. Add a pair here rather than
-# reaching for a relative import into a sibling package, and keep every
-# package-specific detail behind a parameter so the copies can stay identical.
-DUPLICATED_SOURCES: list[tuple[str, str]] = []
+# them. `guardian-transport.ts` (~40 lines) is shared by pi-auto-permissions and
+# pi-auto-name; importing it would make a session-naming extension depend on the
+# whole permissions engine. Add a pair here rather than reaching for a relative
+# import into a sibling package, and keep every package-specific detail behind a
+# parameter so the copies can stay identical.
+DUPLICATED_SOURCES: list[tuple[str, str]] = [
+    ("packages/pi-auto-permissions/guardian-transport.ts", "packages/pi-auto-name/guardian-transport.ts"),
+]
 # Pi's own floor, so a package that advertises less is advertising a lie: a host
 # on Node 20 installs it and the extension fails to load. Every extension and
 # library package carries this exact string, plus the copy-to-create template.
