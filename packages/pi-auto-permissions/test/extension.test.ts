@@ -1676,6 +1676,27 @@ test("34 · a call from a codemode script is reviewed with the script, under the
 			// A model-issued call carries no script link.
 			assert.equal(await harness.toolCall("git push origin main", "call-9"), undefined);
 			assert.doesNotMatch(proposedAction(harness.calls[1]), /issuedByScript/u);
+
+			// A call made by a tool the script called still names the script.
+			await harness.toolExecutionStart("code-1/2", "code-1");
+			assert.equal(await harness.toolCall("git push origin main", "code-1/2/1", "code-1/2"), undefined);
+			assert.match(proposedAction(harness.calls[2]), /"issuedByScript": "code-1"/u);
+		},
+	);
+});
+
+test("34b · a call several levels down is released when its script ends, even while the tool in between still runs", async () => {
+	await withExtension(
+		{ rules: [GUARDED_RULE], completeSimple: () => new Promise(() => undefined) },
+		async (harness) => {
+			await harness.sessionStart();
+
+			await harness.toolExecutionStart("code-1");
+			await harness.toolExecutionStart("code-1/1", "code-1");
+			const deep = harness.toolCall("git push origin main", "code-1/1/1", "code-1/1");
+			await waitFor(() => harness.calls.length === 1);
+			await harness.toolExecutionEnd("code-1");
+			assert.deepEqual(await settledWithin(deep, 250), { block: true, reason: "Auto Permissions review cancelled" });
 		},
 	);
 });

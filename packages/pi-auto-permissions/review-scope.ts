@@ -9,8 +9,11 @@ export type BlockResult = { block: true; reason: string };
 export interface ReviewTarget {
   toolName: string;
   toolCallId?: string;
-  /** The tool call (a codemode script) that made this call, when one did. */
-  parentToolCallId?: string;
+  /**
+   * The model-issued call (a codemode script) this call was made from, when
+   * one was: the top of the chain, however many tool calls sit in between.
+   */
+  scriptToolCallId?: string;
 }
 
 /**

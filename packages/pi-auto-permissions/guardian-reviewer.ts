@@ -351,7 +351,7 @@ export function createGuardianReviewer(
       gate: gate.label,
       group: gate.group,
       ...(subagentContext ? { execution: subagentContext } : {}),
-      ...(scope.target.parentToolCallId ? { issuedByScript: scope.target.parentToolCallId } : {}),
+      ...(scope.target.scriptToolCallId ? { issuedByScript: scope.target.scriptToolCallId } : {}),
     };
     const makeUserMessage = (records: readonly ReviewEvidenceRecord[], mode: "full" | "delta"): Message => ({
       role: "user",

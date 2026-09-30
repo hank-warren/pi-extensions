@@ -188,6 +188,9 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   // tool execution that hook can run after the turn is over, so this outlives
   // the turn. Bounded: only a recently finished call can still have one pending.
   const finishedCalls = new Set<string>();
+  // Nested call id → the model-issued call it descends from, so a call made
+  // several levels down still names the script whose SCRIPT record it shares.
+  const scriptRoots = new Map<string, string>();
 
   function rememberFinished(toolCallId: string): void {
     finishedCalls.delete(toolCallId);
@@ -197,14 +200,26 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     }
   }
 
-  function scriptEndedSignal(parentToolCallId: string): AbortSignal {
-    if (finishedCalls.has(parentToolCallId)) return AbortSignal.abort();
-    let controller = scriptsEnded.get(parentToolCallId);
+  function callEndedSignal(toolCallId: string): AbortSignal {
+    if (finishedCalls.has(toolCallId)) return AbortSignal.abort();
+    let controller = scriptsEnded.get(toolCallId);
     if (!controller) {
       controller = new AbortController();
-      scriptsEnded.set(parentToolCallId, controller);
+      scriptsEnded.set(toolCallId, controller);
     }
     return controller.signal;
+  }
+
+  /**
+   * Aborts when the call that made this one ends, or the script at the top of
+   * the chain does: a tool in between may keep awaiting this call after its
+   * script has gone.
+   */
+  function scriptEndedSignal(parentToolCallId: string, scriptToolCallId: string): AbortSignal {
+    const parent = callEndedSignal(parentToolCallId);
+    return scriptToolCallId === parentToolCallId
+      ? parent
+      : AbortSignal.any([parent, callEndedSignal(scriptToolCallId)]);
   }
 
   function endScripts(): void {
@@ -665,12 +680,17 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     lastAssistantCalls = [];
     abandonSiblingReviews();
     endScripts();
+    scriptRoots.clear();
   });
 
   pi.on("tool_execution_start", (event) => {
-    const { toolCallId } = event as { toolCallId?: unknown };
+    const { toolCallId, parentToolCallId } = event as { toolCallId?: unknown; parentToolCallId?: unknown };
+    if (typeof toolCallId !== "string") return;
     // A provider may reuse a call id in a later turn; that call is live again.
-    if (typeof toolCallId === "string") finishedCalls.delete(toolCallId);
+    finishedCalls.delete(toolCallId);
+    if (typeof parentToolCallId === "string") {
+      scriptRoots.set(toolCallId, scriptRoots.get(parentToolCallId) ?? parentToolCallId);
+    }
   });
 
   pi.on("tool_execution_end", (event) => {
@@ -698,10 +718,11 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     if (!config.enabled) return;
     const parentToolCallId = (event as { parentToolCallId?: string }).parentToolCallId;
     if (!parentToolCallId) startSiblingReviews(event.toolCallId, ctx, config, lifecycleSignal);
+    const scriptToolCallId = parentToolCallId ? scriptRoots.get(parentToolCallId) ?? parentToolCallId : undefined;
     const target: ReviewTarget = {
       toolName: event.toolName,
       toolCallId: event.toolCallId,
-      ...(parentToolCallId ? { parentToolCallId } : {}),
+      ...(scriptToolCallId ? { scriptToolCallId } : {}),
     };
     const input = event.input as Record<string, unknown>;
     const classified = classifyCommand(command, config, trustedGroups);
@@ -718,7 +739,9 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
       gate,
       command,
       target,
-      ...(parentToolCallId ? { callSignal: scriptEndedSignal(parentToolCallId) } : {}),
+      ...(parentToolCallId && scriptToolCallId
+        ? { callSignal: scriptEndedSignal(parentToolCallId, scriptToolCallId) }
+        : {}),
     };
     if (classified.kind === "deny") {
       return settle(scope, {
@@ -739,6 +762,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     abandonSiblingReviews();
     endScripts();
     finishedCalls.clear();
+    scriptRoots.clear();
   }
 
   pi.on("session_shutdown", async (_event, ctx) => {
