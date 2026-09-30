@@ -40,8 +40,8 @@ export function registerSettingsCommand(
   { overrides, reviewer }: { overrides: SessionOverrides; reviewer: GuardianReviewer },
 ): void {
   /**
-   * `/auto-permissions`: edit the reviewer model, thinking level, timeout and
-   * the enabled flag without hand-editing config.json.
+   * `/auto-permissions`: edit the reviewer model, thinking level, timeout,
+   * parallel reviews and the enabled flag without hand-editing config.json.
    *
    * There is no live-apply step: every tool call re-reads the config through
    * currentConfig(), so a saved edit is in force immediately -- in this session
@@ -76,6 +76,7 @@ export function registerSettingsCommand(
         settings = {
           enabled: config.enabled,
           reviewer: config.reviewer,
+          reviewConcurrency: config.reviewConcurrency,
           systemPromptSource: config.systemPromptSource,
         };
         denialLog = config.denialLog;
@@ -97,7 +98,14 @@ export function registerSettingsCommand(
         const previous = settings;
         settings = change.settings;
         try {
-          patchAutoPermissionsConfig(path, { enabled: settings.enabled, reviewer: settings.reviewer });
+          patchAutoPermissionsConfig(path, {
+            enabled: settings.enabled,
+            reviewer: settings.reviewer,
+            // Only when this edit changed it, so a hand-written value is never rewritten by an unrelated save.
+            ...(settings.reviewConcurrency !== previous.reviewConcurrency
+              ? { reviewConcurrency: settings.reviewConcurrency }
+              : {}),
+          });
         } catch (error) {
           settings = previous;
           const message = error instanceof Error ? error.message : String(error);

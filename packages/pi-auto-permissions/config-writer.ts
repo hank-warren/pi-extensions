@@ -11,11 +11,12 @@
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { pid } from "node:process";
-import type { ReviewerConfig } from "./config.js";
+import { DEFAULT_REVIEW_CONCURRENCY, type ReviewerConfig } from "./config.js";
 
 interface ConfigPatch {
   enabled?: boolean;
   reviewer?: ReviewerConfig;
+  reviewConcurrency?: number;
 }
 
 const DEFAULT_INDENT = "  ";
@@ -55,7 +56,8 @@ function parseObject(text: string): Record<string, unknown> {
  * Sparse `enabled`: the loader reads a missing key as enabled, so turning the
  * guardian back on deletes the key rather than writing `true`. That keeps a
  * default flip reaching hosts that never touched the setting, matching how
- * pi-statusline serializes its settings.
+ * pi-statusline serializes its settings. `reviewConcurrency` is sparse the
+ * same way: setting it back to the default deletes the key.
  *
  * Throws on an unparsable or non-object file rather than clobbering it; the
  * caller surfaces that as a notification.
@@ -67,6 +69,10 @@ export function patchAutoPermissionsConfig(path: string, patch: ConfigPatch): vo
   if (patch.enabled !== undefined) {
     if (patch.enabled) delete merged.enabled;
     else merged.enabled = false;
+  }
+  if (patch.reviewConcurrency !== undefined) {
+    if (patch.reviewConcurrency === DEFAULT_REVIEW_CONCURRENCY) delete merged.reviewConcurrency;
+    else merged.reviewConcurrency = patch.reviewConcurrency;
   }
   if (patch.reviewer !== undefined) {
     // Preserve every file-only reviewer key the menu does not edit: this writer must never silently drop what the human wrote by hand.

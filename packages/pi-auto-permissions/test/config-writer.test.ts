@@ -73,6 +73,17 @@ describe("config writer", () => {
 		assert.equal(Object.hasOwn(read(path), "enabled"), false);
 	});
 
+	test("writes reviewConcurrency and removes the key when set back to the default", () => {
+		const path = fixtureFile();
+		patchAutoPermissionsConfig(path, { reviewConcurrency: 1 });
+		assert.equal(read(path).reviewConcurrency, 1);
+		assert.equal(loadAutoPermissionsConfig(path).reviewConcurrency, 1);
+
+		patchAutoPermissionsConfig(path, { reviewConcurrency: 4 });
+		assert.equal(Object.hasOwn(read(path), "reviewConcurrency"), false);
+		assert.equal(loadAutoPermissionsConfig(path).reviewConcurrency, 4);
+	});
+
 	test("preserves the file's indentation and trailing newline", () => {
 		const spaces = fixtureFile(FIXTURE, 2);
 		patchAutoPermissionsConfig(spaces, { enabled: false });

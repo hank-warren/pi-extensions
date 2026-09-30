@@ -186,8 +186,9 @@ const MENU_ROW = {
 	reviewerModel: 1,
 	thinkingLevel: 2,
 	timeout: 3,
-	systemPrompt: 4,
-	recentDenials: 5,
+	reviewConcurrency: 4,
+	systemPrompt: 5,
+	recentDenials: 6,
 } as const;
 
 /** Resolve with the promise's value, or the sentinel while it is still pending. */
@@ -1105,6 +1106,32 @@ test("22 · the settings menu reverts a failed save", async () => {
 				undefined,
 				"the failed edit was reverted: a still-disabled `settings` would have written enabled: false",
 			);
+		},
+	);
+});
+
+test("22b · the settings menu sets parallel reviews, and setting the default back removes the key", async () => {
+	const saved: unknown[] = [];
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			custom: async (factory, harness) => {
+				const menu = buildMenuComponent(factory, () => {});
+				for (let row = MENU_ROW.enabled; row < MENU_ROW.reviewConcurrency; row += 1) menu.handleInput(KEY_DOWN);
+				// 4 -> 8 -> 16 -> 1 -> 2 -> 4
+				for (let step = 0; step < 5; step += 1) {
+					menu.handleInput(KEY_ENTER);
+					saved.push(JSON.parse(readFileSync(harness.configPath, "utf8")).reviewConcurrency);
+				}
+				return undefined;
+			},
+		},
+		async (harness) => {
+			await harness.sessionStart();
+			await harness.settingsCommand();
+
+			assert.deepEqual(saved, [8, 16, 1, 2, undefined]);
+			assert.deepEqual(harness.context.notifications.filter((notification) => notification.level === "warning"), []);
 		},
 	);
 });

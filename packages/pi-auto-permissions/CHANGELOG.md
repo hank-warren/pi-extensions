@@ -6,7 +6,7 @@
 
 - Review pending guarded commands in parallel, and show the guardian the codemode script a command came from.
 
-  - When several guarded commands are pending at once, their guardian reviews now overlap, up to the new `reviewConcurrency` setting (1–16, default 4; `1` restores fully serial reviews). Verdicts are still applied, and you are still asked, one command at a time. A codemode script running 50 guarded commands under `Promise.all` went from about 64 s of reviews to about 13 s.
+  - When several guarded commands are pending at once, their guardian reviews now overlap, up to the new `reviewConcurrency` setting (1–16, default 4; `1` restores fully serial reviews), also editable as **Parallel reviews** in `/auto-permissions`. Verdicts are still applied, and you are still asked, one command at a time. A codemode script running 50 guarded commands under `Promise.all` went from about 64 s of reviews to about 13 s.
   - Several `bash` calls in one assistant message are reviewed together too: the first call's handler starts the reviews of the later guarded ones, and each call uses its early review only if its input is unchanged when Pi reaches it.
   - A verdict that waited behind another command's approval prompt is reviewed again when your answer changed the evidence, so blocking one command still reaches the commands queued behind it.
   - When a codemode script ends (it returns, throws, times out or is aborted), its calls still queued, under review or waiting on an approval prompt are released at once, and an open prompt closes by itself. Pi never runs those calls, so this only removes reviews and prompts that could change nothing.
