@@ -193,6 +193,7 @@ test(
 		});
 		let agentTurns = 0;
 		let reviews = 0;
+		let reviewRequest = "";
 		// Fires the guarded call without awaiting it, lets it reach review while an
 		// unguarded call runs, then ends the script. (Ending it at once would let Pi
 		// abort the call before any tool_call hook ran, which proves nothing here.)
@@ -204,6 +205,10 @@ test(
 		const respond: FauxResponseStep = async (context) => {
 			if (isReviewerRequest(context)) {
 				reviews += 1;
+				reviewRequest = context.messages
+					.flatMap((message) => (Array.isArray(message.content) ? message.content : []) as Array<{ type: string; text?: string }>)
+					.map((part) => (part.type === "text" ? part.text ?? "" : ""))
+					.join("\n");
 				await reviewerHeld;
 				return fauxAssistantMessage(fauxText(JSON.stringify({ decision: "approve", reason: "contract test" })));
 			}
@@ -271,6 +276,11 @@ test(
 
 			assert.equal(scriptEnded, true);
 			assert.equal(reviews, 1, "the orphan was under review when its script ended");
+			// The running script is already in the session when its calls are
+			// reviewed, so the guardian sees it and knows which script issued the call.
+			assert.ok(reviewRequest.includes("SCRIPT codemode [script-1]:"), "the guardian was shown the running script");
+			assert.ok(reviewRequest.includes("tools.bash({ command: "), "with its source");
+			assert.ok(reviewRequest.includes('"issuedByScript": "script-1"'), "and the call is linked to it");
 			// Pi reports its own abort for a call whose signal is already aborted,
 			// whatever the hook returned; what matters is that the hook let go.
 			assert.deepEqual(orphanResults, ["Operation aborted"], "the orphan finished while its review was still unanswered");

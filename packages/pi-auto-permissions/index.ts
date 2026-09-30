@@ -660,7 +660,11 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     if (!config.enabled) return;
     const parentToolCallId = (event as { parentToolCallId?: string }).parentToolCallId;
     if (!parentToolCallId) startSiblingReviews(event.toolCallId, ctx, config, lifecycleSignal);
-    const target: ReviewTarget = { toolName: event.toolName, toolCallId: event.toolCallId };
+    const target: ReviewTarget = {
+      toolName: event.toolName,
+      toolCallId: event.toolCallId,
+      ...(parentToolCallId ? { parentToolCallId } : {}),
+    };
     const input = event.input as Record<string, unknown>;
     const classified = classifyCommand(command, config, trustedGroups);
     const early = takeSiblingReview(

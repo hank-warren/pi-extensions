@@ -23,6 +23,7 @@ import {
   INJECTED_USER_MESSAGE_SYSTEM_PROMPT,
   OVERRIDE_FEEDBACK_SYSTEM_PROMPT,
   parsePermissionVerdict,
+  SCRIPT_EVIDENCE_SYSTEM_PROMPT,
   SUBAGENT_CONTEXT_SYSTEM_PROMPT,
   type PermissionVerdict,
   type ReviewEvidenceRecord,
@@ -319,6 +320,7 @@ export function createGuardianReviewer(
       ...(guardianPolicySection ? [guardianPolicySection] : []),
       buildSessionEnvironmentSection(sessionEnvironment),
       OVERRIDE_FEEDBACK_SYSTEM_PROMPT,
+      SCRIPT_EVIDENCE_SYSTEM_PROMPT,
       ...(config.reviewEvidence.userMessageTypes.length ? [INJECTED_USER_MESSAGE_SYSTEM_PROMPT] : []),
     ].join("\n\n");
     const systemPrompt = buildReviewerSystemPrompt(policyPrompt, projectInstructions);
@@ -349,6 +351,7 @@ export function createGuardianReviewer(
       gate: gate.label,
       group: gate.group,
       ...(subagentContext ? { execution: subagentContext } : {}),
+      ...(scope.target.parentToolCallId ? { issuedByScript: scope.target.parentToolCallId } : {}),
     };
     const makeUserMessage = (records: readonly ReviewEvidenceRecord[], mode: "full" | "delta"): Message => ({
       role: "user",

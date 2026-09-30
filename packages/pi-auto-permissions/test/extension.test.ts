@@ -236,6 +236,8 @@ interface Harness {
 	/** Option labels answered, in order; a missing answer cancels the prompt. */
 	answers: string[];
 	branch: unknown[];
+	/** What `buildContextEntries` returns: the evidence the guardian is built from. */
+	contextEntries: unknown[];
 	customCalls: number;
 	sessionStart(): Promise<void>;
 	sessionShutdown(): Promise<void>;
@@ -275,6 +277,7 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 	const prompts: string[][] = [];
 	const answers: string[] = [];
 	const branch: unknown[] = [];
+	const contextEntries: unknown[] = [];
 	const script = options.completeSimple ?? (() => assistantResponse(verdictText("approve", "scripted")));
 
 	const mock = createMockPi({ activeTools: ["bash"], allTools: [builtinTool("bash")] });
@@ -289,6 +292,7 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 		prompts,
 		answers,
 		branch,
+		contextEntries,
 		customCalls: 0,
 		ctx: undefined as never,
 		async sessionStart() {
@@ -357,7 +361,7 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 			getSessionName: () => undefined,
 			getBranch: () => branch,
 			getEntries: () => branch,
-			buildContextEntries: () => [],
+			buildContextEntries: () => contextEntries,
 		},
 		completeSimple: (...args: unknown[]) => {
 			const [model, request, callOptions] = args as [
@@ -1440,6 +1444,34 @@ test("33 · a call whose script had already ended by the time its tool_call arri
 			await harness.turnEnd();
 			assert.equal(await harness.toolCall("git push origin main", "code-1/2", "code-1"), undefined);
 			assert.equal(harness.calls.length, 1);
+		},
+	);
+});
+
+test("34 · a call from a codemode script is reviewed with the script, under the script-evidence policy", async () => {
+	const script = 'await tools.bash({ command: "git push origin main" });';
+	await withExtension(
+		{ rules: [GUARDED_RULE], completeSimple: () => assistantResponse(verdictText("approve", "fine")) },
+		async (harness) => {
+			await harness.sessionStart();
+			harness.contextEntries.push(
+				{ type: "message", id: "u1", message: { role: "user", content: [{ type: "text", text: "push main" }] } },
+				{
+					type: "message",
+					id: "a1",
+					message: { role: "assistant", content: [{ type: "toolCall", id: "code-1", name: "codemode", arguments: { code: script } }] },
+				},
+			);
+
+			assert.equal(await harness.toolCall("git push origin main", "code-1/1", "code-1"), undefined);
+			const [call] = harness.calls;
+			assert.ok(call.envelope.includes(JSON.stringify({ source: "assistant", evidence: `SCRIPT codemode [code-1]:\n${script}` })));
+			assert.match(proposedAction(call), /"issuedByScript": "code-1"/u);
+			assert.match(call.request.systemPrompt, /^SCRIPT RECORDS$/mu);
+
+			// A model-issued call carries no script link.
+			assert.equal(await harness.toolCall("git push origin main", "call-9"), undefined);
+			assert.doesNotMatch(proposedAction(harness.calls[1]), /issuedByScript/u);
 		},
 	);
 });

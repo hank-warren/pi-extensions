@@ -254,6 +254,16 @@ The first review sends the complete compact evidence. Later reviews reuse the sa
 
 Assistant and tool evidence provide context but never grant permission. Later user messages override earlier conflicting user instructions.
 
+### Codemode scripts
+
+A codemode script runs shell commands from inside it, so judging one of its `bash` calls alone misses what the script is doing around it: a loop over forty targets, or a delete that only makes sense because a backup runs first. The guardian therefore sees the script itself:
+
+- **The running script.** A call a script makes is reviewed with that script's source as an assistant-source `SCRIPT codemode [<call id>]` record, and the proposed action names it in `issuedByScript`. It sits in the evidence stream rather than in the proposed action, so every call from one script shares it through the cached reviewer lineage instead of re-sending it.
+- **Finished scripts.** Their `SCRIPT` record stays, and their `TOOL` record lists every call they made and whether it succeeded, from the `nestedCalls` record Pi keeps on the result.
+- **Never authorization.** The script is model-written: comments, strings and names in it grant nothing. A policy section appended outside `systemPrompt` tells the guardian to use it only for context, and to judge an action whose prerequisite was blocked, failed, or runs concurrently as if that step never happened.
+
+Scripts are capped at 8000 characters (head and tail, with an elision marker), and a full reviewer rebuild keeps the source of only the five newest; older ones collapse to `SCRIPT codemode [<call id>] (source elided)`.
+
 Trusted projects may optionally provide their root `AGENTS.md`, or `CLAUDE.md` when no `AGENTS.md` exists, as policy evidence:
 
 ```json
