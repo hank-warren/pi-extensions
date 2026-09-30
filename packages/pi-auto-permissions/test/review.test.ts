@@ -787,5 +787,9 @@ describe("script evidence", () => {
 	test("the policy tells the guardian a script is context, never authorization", () => {
 		assert.match(SCRIPT_EVIDENCE_SYSTEM_PROMPT, /never user authorization/u);
 		assert.match(SCRIPT_EVIDENCE_SYSTEM_PROMPT, /a delete that assumes a backup ran first/u);
+		// Template strings look like shell variables; the shell-variable rule must not fire on them.
+		assert.ok(SCRIPT_EVIDENCE_SYSTEM_PROMPT.includes(
+			'A "${…}" in the script is a JavaScript value already substituted, not a shell variable.',
+		));
 	});
 });
