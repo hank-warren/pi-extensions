@@ -84,13 +84,16 @@ export interface ModelsDevReasoningOption {
 
 export type ModelsDevCatalog = Record<string, ModelsDevMetadata>;
 
+// pi 0.99 made ProviderModelConfig a chat | image | classifier union; only chat has compat.
+type ProviderChatModelConfigLike = Extract<ProviderModelConfig, { reasoning: boolean }>;
+
 export interface ProviderModelConfigLike {
   id: string;
   name: string;
   reasoning: boolean;
-  api?: ProviderModelConfig["api"];
+  api?: ProviderChatModelConfigLike["api"];
   baseUrl?: string;
-  compat?: ProviderModelConfig["compat"];
+  compat?: ProviderChatModelConfigLike["compat"];
   thinkingLevelMap?: ThinkingLevelMap;
   input: InputModality[];
   cost: {
