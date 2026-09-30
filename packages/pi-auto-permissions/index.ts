@@ -308,10 +308,19 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     return signal?.aborted === true;
   }
 
+  /**
+   * A cancelled turn resets the reviewer lineage. A codemode script ending
+   * does not: the reviewer conversation is intact, and dropping it would make
+   * the next reviews start cold.
+   */
+  function discardLineageIfTurnCancelled(scope: ReviewScope): void {
+    if (reviewCancelled(scope.ctx.signal)) reviewer.discardLineage();
+  }
+
   function cancelledAfterAwait(scope: ReviewScope, lifecycleSignal: AbortSignal): BlockResult | undefined {
     if (reviewer.isStale(lifecycleSignal)) return reviewCancelledResult();
     if (!reviewCancelled(callSignalOf(scope))) return undefined;
-    reviewer.discardLineage();
+    discardLineageIfTurnCancelled(scope);
     display.clear(scope);
     return reviewCancelledResult();
   }
@@ -369,7 +378,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     const promptSignal = withLifecycle(signal, lifecycleSignal);
     const cancelled = reviewCancelledResult;
     if (lifecycleStale() || reviewCancelled(signal)) {
-      if (!lifecycleStale()) reviewer.discardLineage();
+      if (!lifecycleStale()) discardLineageIfTurnCancelled(scope);
       return cancelled();
     }
     display.show(scope, "ask_user", detail);
@@ -397,7 +406,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
         );
       } catch (error) {
         if (!lifecycleStale() && !reviewCancelled(signal)) throw error;
-        if (!lifecycleStale()) reviewer.discardLineage();
+        if (!lifecycleStale()) discardLineageIfTurnCancelled(scope);
         return cancelled();
       }
       const cancelledResult = cancelledAfterAwait(scope, lifecycleSignal);
@@ -474,10 +483,14 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
       const keys = evidenceKeys(scope);
       let attempt: ReviewAttempt;
       try {
-        // The reviewer already follows the turn signal; a codemode call whose
-        // script ended is let go at once rather than after the model answers.
-        const review = reviewer.review(scope, input);
-        const verdict = await (scope.callSignal ? untilAborted(review, scope.callSignal) : review);
+        // The reviewer already follows the turn signal. A codemode call whose
+        // script ended, or an early review nobody will take, cancels its
+        // request and gives its slot back at once.
+        const stop = scope.callSignal && abandon
+          ? AbortSignal.any([scope.callSignal, abandon])
+          : scope.callSignal ?? abandon;
+        const review = reviewer.review(scope, input, stop);
+        const verdict = await (stop ? untilAborted(review, stop) : review);
         if (!lifecycleStale() && reviewCancelled(ctx.signal)) reviewer.discardLineage();
         attempt = { kind: "verdict", verdict, evidenceKeys: keys };
       } catch (error) {

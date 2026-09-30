@@ -49,7 +49,7 @@ interface DenialLine {
 interface GuardianCall {
 	model: { provider: string; id: string };
 	request: { systemPrompt: string; messages: Array<{ content: Array<{ text?: string }> }> };
-	options: { sessionId: string; reasoning: string };
+	options: { sessionId: string; reasoning: string; signal?: AbortSignal };
 	/** The envelope text of the last user message — what the reviewer is asked about. */
 	envelope: string;
 }
@@ -1517,12 +1517,43 @@ test("30 · when a codemode script ends, its call under review is released at on
 	);
 });
 
-test("31 · when a codemode script ends, an approval prompt for one of its calls closes by itself", async () => {
+test("30b · a script ending cancels its call's guardian request and keeps the reviewer lineage", async () => {
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			completeSimple: (call, index) => {
+				if (index !== 1) return assistantResponse(verdictText("approve", `ok ${index}`));
+				// Answers only by honouring its abort signal, as a provider does.
+				return new Promise((resolve) => {
+					call.options.signal?.addEventListener("abort", () => resolve({ ...assistantResponse(""), stopReason: "aborted" }), { once: true });
+				});
+			},
+		},
+		async (harness) => {
+			await harness.sessionStart();
+			assert.equal(await harness.toolCall("git push origin seed", "call-0"), undefined);
+
+			const orphan = harness.toolCall("git push origin main", "code-1/1", "code-1");
+			await waitFor(() => harness.calls.length === 2);
+			await harness.toolExecutionEnd("code-1");
+			assert.deepEqual(await orphan, { block: true, reason: "Auto Permissions review cancelled" });
+			assert.equal(harness.calls[1].options.signal?.aborted, true, "the guardian request itself was cancelled");
+
+			assert.equal(await harness.toolCall("git push origin dev", "call-2"), undefined);
+			assert.equal(harness.calls[2].options.sessionId, harness.calls[0].options.sessionId, "the lineage survived");
+			assert.match(harness.calls[2].envelope, /<EVIDENCE mode="delta">/u);
+		},
+	);
+});
+
+test("31 · when a codemode script ends, an approval prompt for one of its calls closes by itself, and the lineage stays", async () => {
 	let promptReleased = false;
 	await withExtension(
 		{
 			rules: [GUARDED_RULE],
-			completeSimple: () => assistantResponse(verdictText("ask_user", "force push rewrites history")),
+			completeSimple: (call) => proposedAction(call).includes("--force")
+				? assistantResponse(verdictText("ask_user", "force push rewrites history"))
+				: assistantResponse(verdictText("approve", "fine")),
 			custom: async (factory, harness) => {
 				const selector = createCustomSelectorHarness(factory, 100);
 				void selector.resultPromise.then(() => {
@@ -1541,6 +1572,10 @@ test("31 · when a codemode script ends, an approval prompt for one of its calls
 			assert.deepEqual(result, { block: true, reason: "Auto Permissions review cancelled" });
 			assert.deepEqual(harness.denied, []);
 			assert.deepEqual(harness.denials(), []);
+
+			assert.equal(await harness.toolCall("git push origin dev", "call-2"), undefined);
+			assert.equal(harness.calls[1].options.sessionId, harness.calls[0].options.sessionId, "the next review extends the lineage");
+			assert.match(harness.calls[1].envelope, /<EVIDENCE mode="delta">/u);
 		},
 	);
 });
