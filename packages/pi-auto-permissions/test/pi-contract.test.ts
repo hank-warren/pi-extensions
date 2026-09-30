@@ -173,132 +173,194 @@ const createCodemodeExtension = (PiCodingAgent as Record<string, unknown>).creat
 	| ((options?: Record<string, unknown>) => (pi: ExtensionAPI) => void)
 	| undefined;
 
+interface CodemodeScenario {
+	scriptEnded: boolean;
+	/** Guardian requests made; the guardian never answers until the scenario is over. */
+	reviews: number;
+	/** The text of the last guardian request. */
+	reviewRequest: string;
+	/** Results of the guarded calls the script fired, in the order they finished. */
+	orphanResults: string[];
+	/** Whether any guarded command ran. */
+	ran: boolean;
+	/** tool_call hooks of the script's calls and turn_end, in the order Pi ran them. */
+	order: string[];
+}
+
+/**
+ * Run one assistant turn whose single tool call is a codemode script, with a
+ * guardian that never answers while the turn runs. `script` receives a marker
+ * path per guarded call; a command that ran creates its marker.
+ */
+async function runCodemodeScenario(options: {
+	guarded: number;
+	script: (markers: string[]) => string;
+	sequential?: boolean;
+}): Promise<CodemodeScenario> {
+	const previousConfig = process.env.PI_AUTO_PERMISSIONS_CONFIG;
+	const dir = mkdtempSync(join(tmpdir(), "pi-ap-contract-"));
+	const cwd = mkdtempSync(join(tmpdir(), "pi-ap-contract-cwd-"));
+	const markers = Array.from({ length: options.guarded }, (_, index) => join(cwd, `orphan-ran-${index}`));
+	const configPath = join(dir, "config.json");
+	writeFileSync(configPath, JSON.stringify({
+		reviewer: { provider: PROVIDER, model: MODEL_ID, timeoutMs: 30_000 },
+		rules: [{ pattern: "^echo contract", level: "guarded", group: "contract", label: "Contract echo" }],
+		usageLog: { enabled: false },
+		denialLog: { enabled: false },
+	}));
+	process.env.PI_AUTO_PERMISSIONS_CONFIG = configPath;
+
+	const core = createFauxCore({ provider: PROVIDER, models: [{ id: MODEL_ID, contextWindow: 200_000, maxTokens: 4096 }] });
+	const result: CodemodeScenario = { scriptEnded: false, reviews: 0, reviewRequest: "", orphanResults: [], ran: false, order: [] };
+	let releaseReviewer: (() => void) | undefined;
+	const reviewerHeld = new Promise<void>((resolve) => {
+		releaseReviewer = resolve;
+	});
+	let agentTurns = 0;
+	const script = options.script(markers);
+	const respond: FauxResponseStep = async (context) => {
+		if (isReviewerRequest(context)) {
+			result.reviews += 1;
+			result.reviewRequest = context.messages
+				.flatMap((message) => (Array.isArray(message.content) ? message.content : []) as Array<{ type: string; text?: string }>)
+				.map((part) => (part.type === "text" ? part.text ?? "" : ""))
+				.join("\n");
+			await reviewerHeld;
+			return fauxAssistantMessage(fauxText(JSON.stringify({ decision: "approve", reason: "contract test" })));
+		}
+		agentTurns += 1;
+		return agentTurns === 1
+			? fauxAssistantMessage(fauxToolCall("codemode", { code: script }, { id: "script-1" }), { stopReason: "toolUse" })
+			: fauxAssistantMessage("done");
+	};
+	core.setResponses(Array.from({ length: options.guarded + 3 }, () => respond));
+
+	const registerFaux = (pi: ExtensionAPI) => {
+		pi.registerProvider(PROVIDER, {
+			api: core.api,
+			baseUrl: "http://127.0.0.1:9",
+			apiKey: "contract-test",
+			streamSimple: core.streamSimple,
+			models: [{
+				id: MODEL_ID,
+				name: "Contract agent",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200_000,
+				maxTokens: 4096,
+			}],
+		});
+	};
+	const recordOrder = (pi: ExtensionAPI) => {
+		pi.on("tool_call", (event) => {
+			if ((event as { parentToolCallId?: string }).parentToolCallId) result.order.push(`tool_call ${event.toolCallId}`);
+		});
+		pi.on("turn_end", () => {
+			result.order.push("turn_end");
+		});
+	};
+	const resourceLoader = new DefaultResourceLoader({
+		cwd,
+		agentDir: getAgentDir(),
+		noExtensions: true,
+		extensionFactories: [registerFaux, createCodemodeExtension!(), recordOrder, autoPermissionsExtension],
+	});
+	await resourceLoader.reload();
+	const { session } = await createAgentSession({
+		cwd,
+		resourceLoader,
+		sessionManager: SessionManager.inMemory(cwd),
+		model: core.getModel(),
+		tools: ["codemode", "bash"],
+	});
+	if (options.sequential) (session as unknown as { agent: { toolExecution: string } }).agent.toolExecution = "sequential";
+	const orphanIds = new Set<string>();
+	session.subscribe((event) => {
+		const parent = (event as { parentToolCallId?: string }).parentToolCallId;
+		if (event.type === "tool_execution_start" && parent === "script-1") {
+			if ((event.args as { command?: string } | undefined)?.command?.startsWith("echo contract")) orphanIds.add(event.toolCallId);
+			return;
+		}
+		if (event.type !== "tool_execution_end") return;
+		if (!parent && event.toolCallId === "script-1") result.scriptEnded = true;
+		if (orphanIds.has(event.toolCallId)) {
+			result.orphanResults.push((event.result?.content ?? [])
+				.map((part: { type: string; text?: string }) => (part.type === "text" ? part.text ?? "" : ""))
+				.join(""));
+		}
+	});
+
+	try {
+		await session.bindExtensions({});
+		await session.prompt("run the contract script");
+		// Left-behind calls finish on their own schedule, after the turn that abandoned them.
+		const deadline = Date.now() + OVERLAP_TIMEOUT_MS;
+		while (result.orphanResults.length < options.guarded && Date.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		}
+		result.ran = markers.some((marker) => existsSync(marker));
+		return result;
+	} finally {
+		releaseReviewer?.();
+		session.dispose();
+		if (previousConfig === undefined) delete process.env.PI_AUTO_PERMISSIONS_CONFIG;
+		else process.env.PI_AUTO_PERMISSIONS_CONFIG = previousConfig;
+		rmSync(dir, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true });
+	}
+}
+
+const guardedEcho = (marker: string) => `tools.bash({ command: ${JSON.stringify(`echo contract > ${marker}`)} });`;
+
 test(
 	"a bash call a codemode script left behind is released when the script ends, and never runs",
 	{ skip: createCodemodeExtension ? false : "this Pi has no codemode" },
 	async () => {
-		const previousConfig = process.env.PI_AUTO_PERMISSIONS_CONFIG;
-		const dir = mkdtempSync(join(tmpdir(), "pi-ap-contract-"));
-		const cwd = mkdtempSync(join(tmpdir(), "pi-ap-contract-cwd-"));
-		const marker = join(cwd, "orphan-ran");
-		const configPath = join(dir, "config.json");
-		writeFileSync(configPath, JSON.stringify({
-			reviewer: { provider: PROVIDER, model: MODEL_ID, timeoutMs: 30_000 },
-			rules: [{ pattern: "^echo contract", level: "guarded", group: "contract", label: "Contract echo" }],
-			usageLog: { enabled: false },
-			denialLog: { enabled: false },
-		}));
-		process.env.PI_AUTO_PERMISSIONS_CONFIG = configPath;
-
-		const core = createFauxCore({ provider: PROVIDER, models: [{ id: MODEL_ID, contextWindow: 200_000, maxTokens: 4096 }] });
-		let scriptEnded = false;
-		// The guardian never answers until the test is over: the orphan can only
-		// finish if the extension lets go of it when its script ends.
-		let releaseReviewer: (() => void) | undefined;
-		const reviewerHeld = new Promise<void>((resolve) => {
-			releaseReviewer = resolve;
-		});
-		let agentTurns = 0;
-		let reviews = 0;
-		let reviewRequest = "";
 		// Fires the guarded call without awaiting it, lets it reach review while an
 		// unguarded call runs, then ends the script. (Ending it at once would let Pi
 		// abort the call before any tool_call hook ran, which proves nothing here.)
-		const script = [
-			`tools.bash({ command: ${JSON.stringify(`echo contract > ${marker}`)} });`,
-			`await tools.bash({ command: "echo unguarded" });`,
-			`throw new Error("bail");`,
-		].join("\n");
-		const respond: FauxResponseStep = async (context) => {
-			if (isReviewerRequest(context)) {
-				reviews += 1;
-				reviewRequest = context.messages
-					.flatMap((message) => (Array.isArray(message.content) ? message.content : []) as Array<{ type: string; text?: string }>)
-					.map((part) => (part.type === "text" ? part.text ?? "" : ""))
-					.join("\n");
-				await reviewerHeld;
-				return fauxAssistantMessage(fauxText(JSON.stringify({ decision: "approve", reason: "contract test" })));
-			}
-			agentTurns += 1;
-			return agentTurns === 1
-				? fauxAssistantMessage(fauxToolCall("codemode", { code: script }, { id: "script-1" }), { stopReason: "toolUse" })
-				: fauxAssistantMessage("done");
-		};
-		core.setResponses([respond, respond, respond, respond]);
-
-		const registerFaux = (pi: ExtensionAPI) => {
-			pi.registerProvider(PROVIDER, {
-				api: core.api,
-				baseUrl: "http://127.0.0.1:9",
-				apiKey: "contract-test",
-				streamSimple: core.streamSimple,
-				models: [{
-					id: MODEL_ID,
-					name: "Contract agent",
-					reasoning: false,
-					input: ["text"],
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-					contextWindow: 200_000,
-					maxTokens: 4096,
-				}],
-			});
-		};
-		const resourceLoader = new DefaultResourceLoader({
-			cwd,
-			agentDir: getAgentDir(),
-			noExtensions: true,
-			extensionFactories: [registerFaux, createCodemodeExtension!(), autoPermissionsExtension],
-		});
-		await resourceLoader.reload();
-		const { session } = await createAgentSession({
-			cwd,
-			resourceLoader,
-			sessionManager: SessionManager.inMemory(cwd),
-			model: core.getModel(),
-			tools: ["codemode", "bash"],
-		});
-		const orphanResults: string[] = [];
-		let orphanId: string | undefined;
-		session.subscribe((event) => {
-			const parent = (event as { parentToolCallId?: string }).parentToolCallId;
-			if (event.type === "tool_execution_start" && parent === "script-1") {
-				if ((event.args as { command?: string } | undefined)?.command?.startsWith("echo contract")) orphanId = event.toolCallId;
-				return;
-			}
-			if (event.type !== "tool_execution_end") return;
-			if (!parent && event.toolCallId === "script-1") scriptEnded = true;
-			if (event.toolCallId === orphanId) {
-				orphanResults.push((event.result?.content ?? [])
-					.map((part: { type: string; text?: string }) => (part.type === "text" ? part.text ?? "" : ""))
-					.join(""));
-			}
+		const run = await runCodemodeScenario({
+			guarded: 1,
+			script: ([marker]) => [guardedEcho(marker), `await tools.bash({ command: "echo unguarded" });`, `throw new Error("bail");`].join("\n"),
 		});
 
-		try {
-			await session.bindExtensions({});
-			await session.prompt("run the contract script");
-			// The orphan finishes on its own schedule, after the turn that abandoned it.
-			const deadline = Date.now() + OVERLAP_TIMEOUT_MS;
-			while (orphanResults.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+		assert.equal(run.scriptEnded, true);
+		assert.equal(run.reviews, 1, "the orphan was under review when its script ended");
+		// The running script is already in the session when its calls are
+		// reviewed, so the guardian sees it and knows which script issued the call.
+		assert.ok(run.reviewRequest.includes("SCRIPT codemode [script-1]:"), "the guardian was shown the running script");
+		assert.ok(run.reviewRequest.includes("tools.bash({ command: "), "with its source");
+		assert.ok(run.reviewRequest.includes('"issuedByScript": "script-1"'), "and the call is linked to it");
+		// Pi reports its own abort for a call whose signal is already aborted,
+		// whatever the hook returned; what matters is that the hook let go.
+		assert.deepEqual(run.orphanResults, ["Operation aborted"], "the orphan finished while its review was still unanswered");
+		assert.equal(run.ran, false, "the abandoned command never ran");
+	},
+);
 
-			assert.equal(scriptEnded, true);
-			assert.equal(reviews, 1, "the orphan was under review when its script ended");
-			// The running script is already in the session when its calls are
-			// reviewed, so the guardian sees it and knows which script issued the call.
-			assert.ok(reviewRequest.includes("SCRIPT codemode [script-1]:"), "the guardian was shown the running script");
-			assert.ok(reviewRequest.includes("tools.bash({ command: "), "with its source");
-			assert.ok(reviewRequest.includes('"issuedByScript": "script-1"'), "and the call is linked to it");
-			// Pi reports its own abort for a call whose signal is already aborted,
-			// whatever the hook returned; what matters is that the hook let go.
-			assert.deepEqual(orphanResults, ["Operation aborted"], "the orphan finished while its review was still unanswered");
-			assert.equal(existsSync(marker), false, "the abandoned command never ran");
-		} finally {
-			releaseReviewer?.();
-			session.dispose();
-			if (previousConfig === undefined) delete process.env.PI_AUTO_PERMISSIONS_CONFIG;
-			else process.env.PI_AUTO_PERMISSIONS_CONFIG = previousConfig;
-			rmSync(dir, { recursive: true, force: true });
-			rmSync(cwd, { recursive: true, force: true });
-		}
+test(
+	"with sequential tool execution, calls a script left behind reach their hook after the turn and are still released",
+	{ skip: createCodemodeExtension ? false : "this Pi has no codemode" },
+	async () => {
+		// Pi queues a script's calls before their hooks when tool execution is
+		// sequential, so once the script times out the queued ones reach the hook
+		// one by one, some after the turn has ended.
+		const guarded = 8;
+		const run = await runCodemodeScenario({
+			guarded,
+			sequential: true,
+			script: (markers) => [`// @options: {"timeout_ms": 400}`, ...markers.map(guardedEcho), `await new Promise(() => {});`].join("\n"),
+		});
+
+		assert.equal(run.scriptEnded, true);
+		const turnEnd = run.order.indexOf("turn_end");
+		assert.ok(
+			turnEnd >= 0 && run.order.slice(turnEnd).some((entry) => entry.startsWith("tool_call ")),
+			`the scenario this pins: a left-behind call reaches its hook after turn_end (${run.order.join(", ")})`,
+		);
+		assert.equal(run.reviews, 1, "only the call under review when the script ended reached the guardian");
+		assert.deepEqual(run.orphanResults, Array.from({ length: guarded }, () => "Operation aborted"));
+		assert.equal(run.ran, false);
 	},
 );
