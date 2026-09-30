@@ -315,8 +315,16 @@ function summarizeToolArguments(name: string, value: unknown): Record<string, un
   return summary;
 }
 
+/**
+ * Tools whose `code` argument is a script that calls other tools. Named rather
+ * than inferred from the argument: a `code` elsewhere can be an OAuth or
+ * verification code, and SCRIPT records bypass the argument allowlist.
+ */
+const SCRIPT_TOOLS = new Set(["codemode"]);
+
 /** The source of a scripting call (codemode's `code` argument), if this call is one. */
-function scriptSource(value: unknown): string | undefined {
+function scriptSource(name: string, value: unknown): string | undefined {
+  if (!SCRIPT_TOOLS.has(toolBaseName(name))) return undefined;
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const code = (value as { code?: unknown }).code;
   return typeof code === "string" && code.trim() ? code : undefined;
@@ -616,7 +624,7 @@ export function collectReviewEvidence(
       // Emitted whether or not the script has finished, under one key, so a
       // running script's record is a prefix of its finished form and the
       // reviewer lineage survives the script completing.
-      const script = scriptSource(block.arguments);
+      const script = scriptSource(block.name, block.arguments);
       if (script !== undefined) {
         records.push({
           key: evidenceKey(entryId, blockIndex, `${block.id}:script`),

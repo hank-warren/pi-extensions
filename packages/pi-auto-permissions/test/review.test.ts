@@ -749,6 +749,25 @@ describe("script evidence", () => {
 		assert.equal(last.text, `SCRIPT codemode [script-1]:\n${script}`);
 	});
 
+	test("only a scripting tool's code is a script: another tool's code argument is not sent", () => {
+		const login = {
+			type: "message",
+			id: "a2",
+			message: { role: "assistant", content: [{ type: "toolCall", id: "login-1", name: "oauth_login", arguments: { code: "4F7K-22QX" } }] },
+		};
+		const records = collectReviewEvidence([user, login], "call-9", [], DEFAULT_EVIDENCE_CAPS);
+		assert.ok(records.every((record) => !record.text.includes("4F7K-22QX")));
+
+		const namespaced = {
+			...assistant,
+			message: { ...assistant.message, content: [{ type: "toolCall", id: "script-2", name: "functions.codemode", arguments: { code: script } }] },
+		};
+		assert.equal(
+			collectReviewEvidence([user, namespaced], "script-2/1", [], DEFAULT_EVIDENCE_CAPS).at(-1)!.text,
+			`SCRIPT functions.codemode [script-2]:\n${script}`,
+		);
+	});
+
 	test("a finished script keeps its SCRIPT record's key and adds what it ran, so the lineage prefix still matches", () => {
 		const running = collectReviewEvidence([user, assistant], "script-1/2", [], DEFAULT_EVIDENCE_CAPS);
 		const done = collectReviewEvidence([user, assistant, finished], undefined, [], DEFAULT_EVIDENCE_CAPS);
