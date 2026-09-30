@@ -201,6 +201,12 @@ export function createGuardianReviewer(
    * longer the committed lineage's session.
    */
   const sessionsInFlight = new Map<string, number>();
+  /**
+   * Settles when the review building a lineage from scratch finishes. Reviews
+   * that find no usable lineage meanwhile wait for it instead of each sending
+   * a cold full-evidence request under a session id of its own.
+   */
+  let lineageBuild: Promise<void> | undefined;
   let reviewerGeneration = 0;
   let reviewerLifecycleController = new AbortController();
   /** Captured once per session; see session-environment.ts for why once. */
@@ -325,24 +331,11 @@ export function createGuardianReviewer(
     ].join("\n\n");
     const systemPrompt = buildReviewerSystemPrompt(policyPrompt, projectInstructions);
     const fingerprint = reviewerFingerprint(mainSessionId, model, config, systemPrompt, reasoning);
+    // Collected before the first await: callers snapshot the same stream right
+    // before calling, and rely on it describing what the guardian judged.
     const evidence = collectEvidence(scope);
     const evidenceKeys = evidence.map((record) => record.key);
     const budget = reviewContextBudget(model.contextWindow);
-    // Concurrent reviews may all build on the same lineage. Only the first to
-    // finish extends it; the others' exchanges are dropped, which loses nothing
-    // because prior reviewer responses are non-authoritative by policy.
-    const observedLineage = reviewerLineage;
-    const attemptGeneration = reviewerGeneration;
-    let base = observedLineage;
-    if (base && (
-      base.fingerprint !== fingerprint
-      || !evidencePrefixMatches(base.evidenceKeys, evidence)
-      || base.lastPromptTokens >= budget
-    )) {
-      // Rebuild fresh; committing replaces the stale lineage, and reviews still
-      // in flight on it finish undisturbed.
-      base = undefined;
-    }
 
     const request = {
       tool: toolName,
@@ -359,19 +352,47 @@ export function createGuardianReviewer(
       timestamp: Date.now(),
     });
 
-    const fullEvidence = () => applyFullRebuildEviction(evidence, FULL_REBUILD_KEEP_TOOL_RECORDS);
+    let rebuildRecords: ReviewEvidenceRecord[] | undefined;
+    const fullEvidence = () => (rebuildRecords ??= applyFullRebuildEviction(evidence, FULL_REBUILD_KEEP_TOOL_RECORDS));
 
-    let userMessage = makeUserMessage(base ? evidence.slice(base.evidenceKeys.length) : fullEvidence(), base ? "delta" : "full");
-    let messages = base ? [...base.messages, userMessage] : [userMessage];
-    let estimate = estimateReviewTokens(systemPrompt, messages);
-    if (base && estimate >= budget) {
-      base = undefined;
-      userMessage = makeUserMessage(fullEvidence(), "full");
-      messages = [userMessage];
-      estimate = estimateReviewTokens(systemPrompt, messages);
-    }
-    if (estimate >= budget) {
-      throw new Error("compact review evidence exceeds the review model's safe context budget");
+    // Concurrent reviews may all build on the same lineage. Only the first to
+    // finish extends it; the others' exchanges are dropped, which loses nothing
+    // because prior reviewer responses are non-authoritative by policy.
+    let observedLineage: ReviewerLineage | undefined;
+    let attemptGeneration: number;
+    let base: ReviewerLineage | undefined;
+    let messages: Message[];
+    let waitedForBuild = false;
+    for (;;) {
+      observedLineage = reviewerLineage;
+      attemptGeneration = reviewerGeneration;
+      base = observedLineage
+        && observedLineage.fingerprint === fingerprint
+        && evidencePrefixMatches(observedLineage.evidenceKeys, evidence)
+        && observedLineage.lastPromptTokens < budget
+        ? observedLineage
+        : undefined;
+      messages = base
+        ? [...base.messages, makeUserMessage(evidence.slice(base.evidenceKeys.length), "delta")]
+        : [makeUserMessage(fullEvidence(), "full")];
+      if (base && estimateReviewTokens(systemPrompt, messages) >= budget) {
+        base = undefined;
+        messages = [makeUserMessage(fullEvidence(), "full")];
+      }
+      if (base) break;
+      if (estimateReviewTokens(systemPrompt, messages) >= budget) {
+        throw new Error("compact review evidence exceeds the review model's safe context budget");
+      }
+      // Another review is already building a lineage from scratch: wait for it
+      // once and extend what it commits, rather than paying for a second cold
+      // full-evidence request. Once only, so a failing reviewer cannot
+      // serialize every pending review behind its timeout.
+      if (!lineageBuild || waitedForBuild) break;
+      waitedForBuild = true;
+      await waitForSignal(lineageBuild, AbortSignal.any([
+        reviewerLifecycleController.signal,
+        ...(signal ? [signal] : []),
+      ]));
     }
 
     const sessionId = base?.sessionId ?? reviewerSessionId(model);
@@ -383,6 +404,21 @@ export function createGuardianReviewer(
       lifecycleSignal,
       ...(signal ? [signal] : []),
     ]);
+
+    // A rebuild (committing replaces the stale lineage, and reviews still in
+    // flight on it finish undisturbed) is what later reviews wait for.
+    let endBuild: (() => void) | undefined;
+    if (!base && !lineageBuild) {
+      let resolveBuild!: () => void;
+      const build = new Promise<void>((resolve) => {
+        resolveBuild = resolve;
+      });
+      lineageBuild = build;
+      endBuild = () => {
+        if (lineageBuild === build) lineageBuild = undefined;
+        resolveBuild();
+      };
+    }
 
     try {
       const auth = await waitForSignal(ctx.modelRegistry.getApiKeyAndHeaders(model), reviewSignal);
@@ -434,6 +470,7 @@ export function createGuardianReviewer(
       throw error;
     } finally {
       releaseSession(sessionId);
+      endBuild?.();
     }
   }
 

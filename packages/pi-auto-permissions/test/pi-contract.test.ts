@@ -11,7 +11,9 @@
  * One faux provider serves both the agent and the guardian. The agent issues
  * two guarded `echo` commands in one message; the first guardian call is held
  * until the second arrives, which can only happen if the second review started
- * while Pi was still inside the first call's handler.
+ * while Pi was still inside the first call's handler. A guarded call in an
+ * earlier turn builds the reviewer lineage first: with none, concurrent
+ * reviews wait for one cold build instead of overlapping.
  */
 
 import assert from "node:assert/strict";
@@ -86,6 +88,11 @@ test("Pi delivers message_end before the tool_call handlers it then runs one at 
 		return approve(context);
 	};
 	core.setResponses([
+		fauxAssistantMessage(fauxToolCall("bash", { command: "echo contract-seed" }, { id: "call-seed" }), { stopReason: "toolUse" }),
+		(context) => {
+			assert.ok(isReviewerRequest(context), "the seed call is reviewed");
+			return fauxAssistantMessage(fauxText(JSON.stringify({ decision: "approve", reason: "seed" })));
+		},
 		fauxAssistantMessage([
 			fauxToolCall("bash", { command: "echo contract-a" }, { id: "call-a" }),
 			fauxToolCall("bash", { command: "echo contract-b" }, { id: "call-b" }),
@@ -143,8 +150,8 @@ test("Pi delivers message_end before the tool_call handlers it then runs one at 
 		assert.deepEqual([...reviewedCommands].sort(), ["a", "b"], "each guarded command was reviewed exactly once");
 		assert.deepEqual(
 			toolResults.map((result) => [result.id, result.isError, result.text.trim()]).sort(),
-			[["call-a", false, "contract-a"], ["call-b", false, "contract-b"]],
-			"both approved commands ran",
+			[["call-a", false, "contract-a"], ["call-b", false, "contract-b"], ["call-seed", false, "contract-seed"]],
+			"every approved command ran",
 		);
 		assert.equal(core.getPendingResponseCount(), 0, "no scripted response was left unused");
 	} finally {

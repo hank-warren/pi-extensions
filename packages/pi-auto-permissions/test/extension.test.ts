@@ -1130,13 +1130,14 @@ test("23 · guarded commands pending together are reviewed at once, and the next
 			rules: [GUARDED_RULE],
 			completeSimple: (_call, index) => {
 				const response = assistantResponse(verdictText("approve", `ok ${index}`));
-				if (index >= 2) return response;
-				if (index === 1) secondReached?.();
+				if (index === 0 || index >= 3) return response;
+				if (index === 2) secondReached?.();
 				return new Promise((resolve) => releases.push(() => resolve(response)));
 			},
 		},
 		async (harness) => {
 			await harness.sessionStart();
+			assert.equal(await harness.toolCall("git push origin seed", "call-0"), undefined);
 
 			const first = harness.toolCall("git push origin main", "call-1");
 			const second = harness.toolCall("git push origin dev", "call-2");
@@ -1147,12 +1148,87 @@ test("23 · guarded commands pending together are reviewed at once, and the next
 			assert.equal(await first, undefined);
 			assert.equal(await second, undefined);
 			assert.equal(await harness.toolCall("git push origin feature", "call-3"), undefined);
-			assert.equal(harness.calls.length, 3);
-			assert.ok(
-				[harness.calls[0].options.sessionId, harness.calls[1].options.sessionId].includes(harness.calls[2].options.sessionId),
-				"exactly one of the concurrent reviews extended the lineage, and the next review built on it",
+			assert.equal(harness.calls.length, 4);
+			const seedSession = harness.calls[0].options.sessionId;
+			for (const call of harness.calls.slice(1)) {
+				assert.equal(call.options.sessionId, seedSession, "every review extends the one lineage");
+				assert.match(call.envelope, /<EVIDENCE mode="delta">/u);
+			}
+			assert.equal(
+				harness.calls[3].request.messages.length,
+				5,
+				"exactly one of the concurrent exchanges was kept, and the next review built on it",
 			);
-			assert.match(harness.calls[2].envelope, /<EVIDENCE mode="delta">/u);
+		},
+	);
+});
+
+test("23b · with no lineage yet, concurrent reviews wait for one cold build and extend it", async () => {
+	let releaseBuild: (() => void) | undefined;
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			completeSimple: (_call, index) => {
+				const response = assistantResponse(verdictText("approve", `ok ${index}`));
+				if (index > 0) return response;
+				return new Promise((resolve) => {
+					releaseBuild = () => resolve(response);
+				});
+			},
+		},
+		async (harness) => {
+			await harness.sessionStart();
+
+			const results = [
+				harness.toolCall("git push origin a", "call-1"),
+				harness.toolCall("git push origin b", "call-2"),
+				harness.toolCall("git push origin c", "call-3"),
+			];
+			await waitFor(() => releaseBuild !== undefined);
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			assert.equal(harness.calls.length, 1, "the others wait for the build instead of starting cold");
+			releaseBuild?.();
+
+			for (const result of await Promise.all(results)) assert.equal(result, undefined);
+			assert.equal(harness.calls.length, 3);
+			assert.match(harness.calls[0].envelope, /<EVIDENCE mode="full">/u);
+			for (const call of harness.calls.slice(1)) {
+				assert.match(call.envelope, /<EVIDENCE mode="delta">/u);
+				assert.equal(call.options.sessionId, harness.calls[0].options.sessionId);
+			}
+		},
+	);
+});
+
+test("23c · when the cold build fails, the reviews waiting on it go ahead instead of queuing behind each other", async () => {
+	let failBuild: (() => void) | undefined;
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			completeSimple: (_call, index) => {
+				if (index > 0) return assistantResponse(verdictText("approve", `ok ${index}`));
+				return new Promise((_resolve, reject) => {
+					failBuild = () => reject(new Error("reviewer unavailable"));
+				});
+			},
+		},
+		async (harness) => {
+			await harness.sessionStart();
+
+			harness.answers.push("Block");
+			const failed = harness.toolCall("git push origin a", "call-1");
+			const waiting = [
+				harness.toolCall("git push origin b", "call-2"),
+				harness.toolCall("git push origin c", "call-3"),
+			];
+			await waitFor(() => failBuild !== undefined);
+			failBuild?.();
+
+			for (const result of await Promise.all(waiting)) assert.equal(result, undefined);
+			assert.deepEqual(await failed, { block: true, reason: "Blocked by user" });
+			assert.equal(harness.calls.length, 3);
+			assert.match(harness.calls[1].envelope, /<EVIDENCE mode="full">/u);
+			assert.match(harness.calls[2].envelope, /<EVIDENCE mode="full">/u);
 		},
 	);
 });
@@ -1298,13 +1374,14 @@ test("26 · later bash calls in one assistant message are reviewed while Pi is s
 			rules: [GUARDED_RULE],
 			completeSimple: (_call, index) => {
 				const response = assistantResponse(verdictText("approve", `ok ${index}`));
-				if (index >= 3) return response;
-				if (index === 2) allReached?.();
+				if (index === 0 || index >= 4) return response;
+				if (index === 3) allReached?.();
 				return threeInFlight.then(() => response);
 			},
 		},
 		async (harness) => {
 			await harness.sessionStart();
+			assert.equal(await harness.toolCall("git push origin seed", "call-0"), undefined);
 
 			await harness.assistantMessage([
 				{ id: "call-1", command: "git push origin a" },
@@ -1318,17 +1395,17 @@ test("26 · later bash calls in one assistant message are reviewed while Pi is s
 				undefined,
 				"the first call's review completes only because its siblings' reviews started alongside it",
 			);
-			assert.equal(harness.calls.length, 3, "the unguarded sibling is not reviewed");
+			assert.equal(harness.calls.length, 4, "the unguarded sibling is not reviewed");
 
 			assert.equal(await harness.toolCall("echo not guarded", "call-2"), undefined);
 			assert.equal(await harness.toolCall("git push origin b", "call-3"), undefined);
-			assert.equal(harness.calls.length, 3, "call-3 took the review started early");
+			assert.equal(harness.calls.length, 4, "call-3 took the review started early");
 
 			// Changed by another handler before it reached this one: reviewed afresh.
 			assert.equal(await harness.toolCall("git push origin c --tags", "call-4"), undefined);
-			assert.equal(harness.calls.length, 4);
-			assert.match(proposedAction(harness.calls[3]), /git push origin c --tags/u);
-			assert.deepEqual(harness.displays.at(-1), { state: "approved", detail: "ok 3" });
+			assert.equal(harness.calls.length, 5);
+			assert.match(proposedAction(harness.calls[4]), /git push origin c --tags/u);
+			assert.deepEqual(harness.displays.at(-1), { state: "approved", detail: "ok 4" });
 		},
 	);
 });
