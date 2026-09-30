@@ -78,6 +78,38 @@ function withLifecycle(signal: AbortSignal | undefined, lifecycle: AbortSignal):
   return signal ? AbortSignal.any([signal, lifecycle]) : lifecycle;
 }
 
+/**
+ * Settle with `promise`, or reject as soon as `signal` aborts. The promise is
+ * left to finish on its own; its outcome is then ignored.
+ */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    promise.catch(() => undefined);
+    return Promise.reject(signal.reason);
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+/** Aborts when the turn ends or, for a codemode call, when its script does. */
+function callSignalOf(scope: ReviewScope): AbortSignal | undefined {
+  const { ctx, callSignal } = scope;
+  if (!callSignal) return ctx.signal;
+  return ctx.signal ? AbortSignal.any([ctx.signal, callSignal]) : callSignal;
+}
+
 /** How one guardian review ended, before its verdict is applied. */
 type ReviewAttempt =
   | { kind: "verdict"; verdict: PermissionVerdict; evidenceKeys: string[] }
@@ -143,6 +175,29 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   // another, so the later bash calls' reviews are started early from here.
   let lastAssistantCalls: AssistantToolCall[] = [];
   const siblingReviews = new Map<string, SiblingReview>();
+  // One controller per tool call (a codemode script) that has made bash calls,
+  // aborted when Pi reports that call finished: its pending calls can no
+  // longer run, so their reviews and prompts are released.
+  const scriptsEnded = new Map<string, AbortController>();
+  // Top-level calls that already finished this turn. A script can end before
+  // Pi runs the tool_call hook of a call it fired without awaiting.
+  const finishedCalls = new Set<string>();
+
+  function scriptEndedSignal(parentToolCallId: string): AbortSignal {
+    if (finishedCalls.has(parentToolCallId)) return AbortSignal.abort();
+    let controller = scriptsEnded.get(parentToolCallId);
+    if (!controller) {
+      controller = new AbortController();
+      scriptsEnded.set(parentToolCallId, controller);
+    }
+    return controller.signal;
+  }
+
+  function endScripts(): void {
+    for (const controller of scriptsEnded.values()) controller.abort();
+    scriptsEnded.clear();
+    finishedCalls.clear();
+  }
   // The session is active exactly while the reviewer lifecycle is unaborted:
   // session_shutdown aborts it, session_start synchronously aborts and replaces
   // it, and nothing else touches it.
@@ -242,7 +297,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
 
   function cancelledAfterAwait(scope: ReviewScope, lifecycleSignal: AbortSignal): BlockResult | undefined {
     if (reviewer.isStale(lifecycleSignal)) return reviewCancelledResult();
-    if (!reviewCancelled(scope.ctx.signal)) return undefined;
+    if (!reviewCancelled(callSignalOf(scope))) return undefined;
     reviewer.discardLineage();
     display.clear(scope);
     return reviewCancelledResult();
@@ -296,7 +351,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     decisionSource: "guardian" | "review_failure",
   ): Promise<BlockResult | undefined> {
     const { ctx, config, gate, command } = scope;
-    const signal = ctx.signal;
+    const signal = callSignalOf(scope);
     const lifecycleStale = () => reviewer.isStale(lifecycleSignal);
     const promptSignal = withLifecycle(signal, lifecycleSignal);
     const cancelled = reviewCancelledResult;
@@ -385,9 +440,10 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
       if (!lifecycleStale() && abandon?.reason !== SUPERSEDED_REVIEW) display.clear(scope);
       return { kind: "cancelled" };
     };
+    const callSignal = callSignalOf(scope);
     const slotSignal = AbortSignal.any([
       lifecycleSignal,
-      ...(ctx.signal ? [ctx.signal] : []),
+      ...(callSignal ? [callSignal] : []),
       ...(abandon ? [abandon] : []),
     ]);
     if (reviewSlots.wouldWait(config.reviewConcurrency)) display.show(scope, "queued");
@@ -398,20 +454,23 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
       return drop();
     }
     try {
-      if (lifecycleStale() || reviewCancelled(ctx.signal) || abandoned()) return drop();
+      if (lifecycleStale() || reviewCancelled(callSignal) || abandoned()) return drop();
       display.show(scope, "waiting");
       // Collected synchronously right before the review collects the same
       // stream, so the keys describe exactly what the guardian judged.
       const keys = evidenceKeys(scope);
       let attempt: ReviewAttempt;
       try {
-        const verdict = await reviewer.review(scope, input);
+        // The reviewer already follows the turn signal; a codemode call whose
+        // script ended is let go at once rather than after the model answers.
+        const review = reviewer.review(scope, input);
+        const verdict = await (scope.callSignal ? untilAborted(review, scope.callSignal) : review);
         if (!lifecycleStale() && reviewCancelled(ctx.signal)) reviewer.discardLineage();
         attempt = { kind: "verdict", verdict, evidenceKeys: keys };
       } catch (error) {
         attempt = { kind: "failed", reason: error instanceof Error ? error.message : String(error), evidenceKeys: keys };
       }
-      if (lifecycleStale() || reviewCancelled(ctx.signal) || abandoned()) return drop();
+      if (lifecycleStale() || reviewCancelled(callSignal) || abandoned()) return drop();
       // An early sibling review now waits for Pi to reach its call.
       if (abandon) display.show(scope, "queued");
       return attempt;
@@ -457,12 +516,12 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     lifecycleSignal: AbortSignal,
     firstAttempt: Promise<ReviewAttempt>,
   ): Promise<BlockResult | undefined> {
-    const { ctx } = scope;
     const lifecycleStale = () => reviewer.isStale(lifecycleSignal);
-    // Same composite the ask path builds, so Esc and a reviewer-lifecycle reset
-    // both release a waiting command instead of stranding it behind a prompt
-    // it is no longer waiting for.
-    const queueSignal = withLifecycle(ctx.signal, lifecycleSignal);
+    const callSignal = callSignalOf(scope);
+    // Same composite the ask path builds, so Esc, a reviewer-lifecycle reset
+    // and the end of a codemode script all release a waiting command instead
+    // of stranding it behind a prompt it is no longer waiting for.
+    const queueSignal = withLifecycle(callSignal, lifecycleSignal);
     let attempt = firstAttempt;
     for (let reviews = 1; ; reviews += 1) {
       const outcome = await attempt;
@@ -476,7 +535,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
         return reviewCancelledResult();
       }
       try {
-        if (lifecycleStale() || reviewCancelled(ctx.signal)) {
+        if (lifecycleStale() || reviewCancelled(callSignal)) {
           if (!lifecycleStale()) display.clear(scope);
           return reviewCancelledResult();
         }
@@ -573,6 +632,17 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   pi.on("turn_end", () => {
     lastAssistantCalls = [];
     abandonSiblingReviews();
+    endScripts();
+  });
+
+  pi.on("tool_execution_end", (event) => {
+    const { toolCallId, parentToolCallId } = event as { toolCallId?: unknown; parentToolCallId?: unknown };
+    if (typeof toolCallId !== "string") return;
+    if (parentToolCallId === undefined) finishedCalls.add(toolCallId);
+    const controller = scriptsEnded.get(toolCallId);
+    if (!controller) return;
+    scriptsEnded.delete(toolCallId);
+    controller.abort();
   });
 
   pi.on("tool_call", async (event, ctx) => {
@@ -600,7 +670,14 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     );
     if (classified.kind === "pass") return;
     const gate = classified.gate;
-    const scope: ReviewScope = { ctx, config, gate, command, target };
+    const scope: ReviewScope = {
+      ctx,
+      config,
+      gate,
+      command,
+      target,
+      ...(parentToolCallId ? { callSignal: scriptEndedSignal(parentToolCallId) } : {}),
+    };
     if (classified.kind === "deny") {
       return settle(scope, {
         verdict: "block",
@@ -618,6 +695,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   pi.on("session_shutdown", async (_event, ctx) => {
     lastAssistantCalls = [];
     abandonSiblingReviews();
+    endScripts();
     reviewer.endSession();
     display.shutdown(ctx);
     setHerdrBlocked(pi, false);
@@ -634,6 +712,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
 
     lastAssistantCalls = [];
     abandonSiblingReviews();
+    endScripts();
     reviewer.startSession(ctx.cwd);
     overrides.restore(ctx.sessionManager.getBranch());
     trustedGroups = ctx.isProjectTrusted() ? loadTrustedGroups(ctx.cwd) : new Set();

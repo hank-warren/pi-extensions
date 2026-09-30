@@ -23,4 +23,10 @@ export interface ReviewScope {
   gate: Gate;
   command: string;
   target: ReviewTarget;
+  /**
+   * Aborts when the call can no longer run for a reason other than the turn:
+   * for a call a codemode script made, when that script ends. Pi hands such a
+   * call an already-aborted signal, so its review and prompt are moot.
+   */
+  callSignal?: AbortSignal;
 }

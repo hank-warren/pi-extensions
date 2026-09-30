@@ -56,7 +56,8 @@ const EXPECTED_SURFACES = {
 	"./packages/pi-auto-permissions/index.ts": {
 		commands: ["auto-permissions"],
 		// message_end/turn_end: early reviews of later bash calls in one message.
-		handlers: ["message_end", "session_shutdown", "session_start", "tool_call", "turn_end"],
+		// tool_execution_end: release a codemode script's pending calls when it ends.
+		handlers: ["message_end", "session_shutdown", "session_start", "tool_call", "tool_execution_end", "turn_end"],
 	},
 	"./packages/pi-plan-mode/index.ts": {
 		tools: ["plan_implemented", "plan_mode_complete", "plan_mode_question"],

@@ -243,6 +243,8 @@ interface Harness {
 	/** Deliver an assistant message to `message_end`, as Pi does before running its tool calls. */
 	assistantMessage(calls: Array<{ id: string; command: string; name?: string }>): Promise<void>;
 	turnEnd(): Promise<void>;
+	/** Report a tool call finished, as Pi does when a codemode script ends. */
+	toolExecutionEnd(toolCallId: string): Promise<void>;
 	settingsCommand(args?: string): Promise<void>;
 	denials(): DenialLine[];
 	overrideEntries(): Array<{ seq: number; overrides: Array<Record<string, unknown>> }>;
@@ -317,6 +319,11 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 		},
 		async turnEnd() {
 			for (const handler of mock.events.get("turn_end") ?? []) await handler({ type: "turn_end" }, harness.ctx);
+		},
+		async toolExecutionEnd(toolCallId: string) {
+			for (const handler of mock.events.get("tool_execution_end") ?? []) {
+				await handler({ type: "tool_execution_end", toolCallId, toolName: "codemode", isError: false }, harness.ctx);
+			}
 		},
 		async settingsCommand(args = "") {
 			const command = mock.commands.get("auto-permissions");
@@ -1315,6 +1322,124 @@ test("29 · an early-reviewed call that arrives no longer guarded runs unreviewe
 			assert.equal(harness.calls.length, 2, "nothing new is reviewed");
 			await waitFor(() => harness.displays.at(-1)?.state === "cleared");
 			assert.deepEqual(harness.displays.at(-1), { state: "cleared", detail: undefined });
+		},
+	);
+});
+
+/**
+ * A codemode script that ends (returns, throws, times out, is aborted) leaves
+ * its unfinished bash calls behind; Pi hands them an already-aborted signal,
+ * so they can never run. Their reviews and prompts must not outlive the script.
+ */
+
+test("30 · when a codemode script ends, its call under review is released at once, and the late verdict is ignored", async () => {
+	let releaseReview: (() => void) | undefined;
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			completeSimple: () => new Promise((resolve) => {
+				releaseReview = () => resolve(assistantResponse(verdictText("approve", "too late")));
+			}),
+		},
+		async (harness) => {
+			await harness.sessionStart();
+
+			const orphan = harness.toolCall("git push origin main", "code-1/1", "code-1");
+			await waitFor(() => releaseReview !== undefined);
+			await harness.toolExecutionEnd("code-1");
+
+			assert.deepEqual(
+				await settledWithin(orphan, 250),
+				{ block: true, reason: "Auto Permissions review cancelled" },
+				"released at once, without waiting for the guardian to answer",
+			);
+			releaseReview?.();
+			assert.deepEqual(harness.denied, [], "an abandoned call is not a denial");
+			assert.deepEqual(harness.displays.at(-1), { state: "cleared", detail: undefined });
+		},
+	);
+});
+
+test("31 · when a codemode script ends, an approval prompt for one of its calls closes by itself", async () => {
+	let promptReleased = false;
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			completeSimple: () => assistantResponse(verdictText("ask_user", "force push rewrites history")),
+			custom: async (factory, harness) => {
+				const selector = createCustomSelectorHarness(factory, 100);
+				void selector.resultPromise.then(() => {
+					promptReleased = true;
+				});
+				await harness.toolExecutionEnd("code-1");
+				await Promise.resolve();
+				return selector.result;
+			},
+		},
+		async (harness) => {
+			await harness.sessionStart();
+
+			const result = await harness.toolCall("git push --force origin main", "code-1/1", "code-1");
+			assert.ok(promptReleased, "the prompt is released instead of waiting for an answer that can change nothing");
+			assert.deepEqual(result, { block: true, reason: "Auto Permissions review cancelled" });
+			assert.deepEqual(harness.denied, []);
+			assert.deepEqual(harness.denials(), []);
+		},
+	);
+});
+
+test("32 · a script's queued calls are dropped unreviewed when it ends, and another script's calls are untouched", async () => {
+	let releaseFirst: (() => void) | undefined;
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			config: { reviewConcurrency: 1 },
+			completeSimple: (_call, index) => {
+				const response = assistantResponse(verdictText("approve", `ok ${index}`));
+				if (index > 0) return response;
+				return new Promise((resolve) => {
+					releaseFirst = () => resolve(response);
+				});
+			},
+		},
+		async (harness) => {
+			await harness.sessionStart();
+
+			const other = harness.toolCall("git push origin other", "code-2/1", "code-2");
+			await waitFor(() => releaseFirst !== undefined);
+			const queued = harness.toolCall("git push origin main", "code-1/1", "code-1");
+			await new Promise((resolve) => setImmediate(resolve));
+
+			await harness.toolExecutionEnd("code-1");
+			assert.deepEqual(
+				await settledWithin(queued, 250),
+				{ block: true, reason: "Auto Permissions review cancelled" },
+				"the ended script's call leaves the slot queue at once",
+			);
+			releaseFirst?.();
+			assert.equal(await other, undefined, "code-2 is still running, so its call is reviewed and applied");
+			assert.equal(harness.calls.length, 1, "the dropped call never reached the guardian");
+		},
+	);
+});
+
+test("33 · a call whose script had already ended by the time its tool_call arrives is never reviewed", async () => {
+	await withExtension(
+		{ rules: [GUARDED_RULE], completeSimple: () => assistantResponse(verdictText("approve", "fine")) },
+		async (harness) => {
+			await harness.sessionStart();
+
+			await harness.toolExecutionEnd("code-1");
+			assert.deepEqual(
+				await harness.toolCall("git push origin main", "code-1/1", "code-1"),
+				{ block: true, reason: "Auto Permissions review cancelled" },
+			);
+			assert.equal(harness.calls.length, 0);
+
+			// The record is per turn: a later turn reusing the id is reviewed normally.
+			await harness.turnEnd();
+			assert.equal(await harness.toolCall("git push origin main", "code-1/2", "code-1"), undefined);
+			assert.equal(harness.calls.length, 1);
 		},
 	);
 });
