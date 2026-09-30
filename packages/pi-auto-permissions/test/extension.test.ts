@@ -245,8 +245,10 @@ interface Harness {
 	/** Deliver an assistant message to `message_end`, as Pi does before running its tool calls. */
 	assistantMessage(calls: Array<{ id: string; command: string; name?: string }>): Promise<void>;
 	turnEnd(): Promise<void>;
+	/** Report a tool call started, as Pi does before its tool_call hook runs. */
+	toolExecutionStart(toolCallId: string, parentToolCallId?: string): Promise<void>;
 	/** Report a tool call finished, as Pi does when a codemode script ends. */
-	toolExecutionEnd(toolCallId: string): Promise<void>;
+	toolExecutionEnd(toolCallId: string, parentToolCallId?: string): Promise<void>;
 	settingsCommand(args?: string): Promise<void>;
 	denials(): DenialLine[];
 	overrideEntries(): Array<{ seq: number; overrides: Array<Record<string, unknown>> }>;
@@ -324,9 +326,20 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 		async turnEnd() {
 			for (const handler of mock.events.get("turn_end") ?? []) await handler({ type: "turn_end" }, harness.ctx);
 		},
-		async toolExecutionEnd(toolCallId: string) {
+		async toolExecutionStart(toolCallId: string, parentToolCallId?: string) {
+			for (const handler of mock.events.get("tool_execution_start") ?? []) {
+				await handler(
+					{ type: "tool_execution_start", toolCallId, toolName: "codemode", args: {}, ...(parentToolCallId ? { parentToolCallId } : {}) },
+					harness.ctx,
+				);
+			}
+		},
+		async toolExecutionEnd(toolCallId: string, parentToolCallId?: string) {
 			for (const handler of mock.events.get("tool_execution_end") ?? []) {
-				await handler({ type: "tool_execution_end", toolCallId, toolName: "codemode", isError: false }, harness.ctx);
+				await handler(
+					{ type: "tool_execution_end", toolCallId, toolName: "codemode", isError: false, ...(parentToolCallId ? { parentToolCallId } : {}) },
+					harness.ctx,
+				);
 			}
 		},
 		async settingsCommand(args = "") {
@@ -1490,7 +1503,7 @@ test("32 · a script's queued calls are dropped unreviewed when it ends, and ano
 	);
 });
 
-test("33 · a call whose script had already ended by the time its tool_call arrives is never reviewed", async () => {
+test("33 · a call whose script had already ended by the time its tool_call arrives is never reviewed, even after the turn", async () => {
 	await withExtension(
 		{ rules: [GUARDED_RULE], completeSimple: () => assistantResponse(verdictText("approve", "fine")) },
 		async (harness) => {
@@ -1503,9 +1516,25 @@ test("33 · a call whose script had already ended by the time its tool_call arri
 			);
 			assert.equal(harness.calls.length, 0);
 
-			// The record is per turn: a later turn reusing the id is reviewed normally.
+			// With sequential tool execution a left-behind call's hook can run after the turn is over.
 			await harness.turnEnd();
-			assert.equal(await harness.toolCall("git push origin main", "code-1/2", "code-1"), undefined);
+			assert.deepEqual(
+				await harness.toolCall("git push origin main", "code-1/2", "code-1"),
+				{ block: true, reason: "Auto Permissions review cancelled" },
+			);
+			assert.equal(harness.calls.length, 0);
+
+			// A later call reusing the id is live again once Pi starts it.
+			await harness.toolExecutionStart("code-1");
+			assert.equal(await harness.toolCall("git push origin main", "code-1/3", "code-1"), undefined);
+			assert.equal(harness.calls.length, 1);
+
+			// A call made several levels down is let go once the call that made it has ended.
+			await harness.toolExecutionEnd("code-1/4", "code-1");
+			assert.deepEqual(
+				await harness.toolCall("git push origin main", "code-1/4/1", "code-1/4"),
+				{ block: true, reason: "Auto Permissions review cancelled" },
+			);
 			assert.equal(harness.calls.length, 1);
 		},
 	);

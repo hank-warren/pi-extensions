@@ -126,6 +126,9 @@ type ReviewAttempt =
  */
 const MAX_REVIEWS_PER_COMMAND = 3;
 
+/** How many finished call ids are remembered for calls a script left behind. */
+const MAX_FINISHED_CALLS = 1024;
+
 /** Abort reason for an early review replaced by a fresh one for the same call. */
 const SUPERSEDED_REVIEW = "auto-permissions: superseded review";
 
@@ -180,9 +183,19 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   // aborted when Pi reports that call finished: its pending calls can no
   // longer run, so their reviews and prompts are released.
   const scriptsEnded = new Map<string, AbortController>();
-  // Top-level calls that already finished this turn. A script can end before
-  // Pi runs the tool_call hook of a call it fired without awaiting.
+  // Calls that already finished, newest last. A script can end before Pi runs
+  // the tool_call hook of a call it fired without awaiting, and with sequential
+  // tool execution that hook can run after the turn is over, so this outlives
+  // the turn. Bounded: only a recently finished call can still have one pending.
   const finishedCalls = new Set<string>();
+
+  function rememberFinished(toolCallId: string): void {
+    finishedCalls.delete(toolCallId);
+    finishedCalls.add(toolCallId);
+    if (finishedCalls.size > MAX_FINISHED_CALLS) {
+      finishedCalls.delete(finishedCalls.values().next().value!);
+    }
+  }
 
   function scriptEndedSignal(parentToolCallId: string): AbortSignal {
     if (finishedCalls.has(parentToolCallId)) return AbortSignal.abort();
@@ -197,7 +210,6 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   function endScripts(): void {
     for (const controller of scriptsEnded.values()) controller.abort();
     scriptsEnded.clear();
-    finishedCalls.clear();
   }
   // The session is active exactly while the reviewer lifecycle is unaborted:
   // session_shutdown aborts it, session_start synchronously aborts and replaces
@@ -642,10 +654,16 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     endScripts();
   });
 
+  pi.on("tool_execution_start", (event) => {
+    const { toolCallId } = event as { toolCallId?: unknown };
+    // A provider may reuse a call id in a later turn; that call is live again.
+    if (typeof toolCallId === "string") finishedCalls.delete(toolCallId);
+  });
+
   pi.on("tool_execution_end", (event) => {
-    const { toolCallId, parentToolCallId } = event as { toolCallId?: unknown; parentToolCallId?: unknown };
+    const { toolCallId } = event as { toolCallId?: unknown };
     if (typeof toolCallId !== "string") return;
-    if (parentToolCallId === undefined) finishedCalls.add(toolCallId);
+    rememberFinished(toolCallId);
     const controller = scriptsEnded.get(toolCallId);
     if (!controller) return;
     scriptsEnded.delete(toolCallId);
@@ -703,10 +721,15 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
 
   registerSettingsCommand(pi, { overrides, reviewer });
 
-  pi.on("session_shutdown", async (_event, ctx) => {
+  function resetCallTracking(): void {
     lastAssistantCalls = [];
     abandonSiblingReviews();
     endScripts();
+    finishedCalls.clear();
+  }
+
+  pi.on("session_shutdown", async (_event, ctx) => {
+    resetCallTracking();
     reviewer.endSession();
     display.shutdown(ctx);
     setHerdrBlocked(pi, false);
@@ -721,9 +744,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     }
     if (config) warnAboutMissingReviewerProvider(ctx, config);
 
-    lastAssistantCalls = [];
-    abandonSiblingReviews();
-    endScripts();
+    resetCallTracking();
     reviewer.startSession(ctx.cwd);
     overrides.restore(ctx.sessionManager.getBranch());
     trustedGroups = ctx.isProjectTrusted() ? loadTrustedGroups(ctx.cwd) : new Set();
