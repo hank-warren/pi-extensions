@@ -1212,6 +1212,69 @@ test("25 · a verdict that waited behind another command's prompt is reviewed ag
 	);
 });
 
+test("25b · a verdict still stale after its reviews is reviewed a last time holding the decision slot, so no prompt is answered meanwhile", async () => {
+	let harnessRef: Harness | undefined;
+	const releaseDev: Array<() => void> = [];
+	const forced: Array<Promise<BlockResult>> = [];
+	let devReviews = 0;
+	let openPrompts = 0;
+	let maxOpenPrompts = 0;
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			completeSimple: (call) => {
+				const action = proposedAction(call);
+				if (action.includes("--force")) return assistantResponse(verdictText("ask_user", "force push rewrites history"));
+				if (!action.includes("origin dev")) return assistantResponse(verdictText("approve", "seed"));
+				devReviews += 1;
+				const n = devReviews;
+				// Each later review of `dev` brings another command whose prompt competes for the slot.
+				if (n === 2) forced.push(harnessRef!.toolCall("git push --force origin two", "call-two"));
+				if (n === 3) forced.push(harnessRef!.toolCall("git push --force origin three", "call-three"));
+				return new Promise((resolve) => releaseDev.push(() => resolve(assistantResponse(verdictText("approve", `dev ok ${n}`)))));
+			},
+			custom: async (factory, harness) => {
+				openPrompts += 1;
+				maxOpenPrompts = Math.max(maxOpenPrompts, openPrompts);
+				const prompt = harness.prompts.length + 1;
+				if (prompt === 1) {
+					// Let dev's first verdict arrive and queue behind this prompt, so the answer makes it stale.
+					await waitFor(() => releaseDev.length === 1);
+					releaseDev[0]();
+					await waitFor(() =>
+						harness.displays.some((display) => display.detail === "waiting 0 · queued 1 · asking 1"));
+				}
+				const result = answerOptionSelector(factory, harness);
+				// Dev's second review ran while this prompt was open, so this answer makes it stale too.
+				if (prompt === 2) releaseDev[1]();
+				openPrompts -= 1;
+				return result;
+			},
+		},
+		async (harness) => {
+			harnessRef = harness;
+			await harness.sessionStart();
+			assert.equal(await harness.toolCall("git push origin seed", "call-seed"), undefined);
+
+			harness.answers.push("Block", "Block", "Block");
+			forced.push(harness.toolCall("git push --force origin one", "call-one"));
+			const dev = harness.toolCall("git push origin dev", "call-dev");
+
+			await waitFor(() => devReviews === 3);
+			assert.equal(devReviews, 3, "dev was reviewed a third time");
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			assert.equal(harness.prompts.length, 2, "no prompt opens while dev's last review holds the decision slot");
+			releaseDev[2]();
+
+			assert.equal(await dev, undefined);
+			for (const result of await Promise.all(forced)) assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+			assert.equal(harness.prompts.length, 3);
+			assert.equal(maxOpenPrompts, 1, "never two approval prompts at once");
+			assert.equal(devReviews, 3, "the last review is applied without a fourth");
+		},
+	);
+});
+
 test("26 · later bash calls in one assistant message are reviewed while Pi is still on the first", async () => {
 	let allReached: (() => void) | undefined;
 	const threeInFlight = new Promise<void>((resolve) => {

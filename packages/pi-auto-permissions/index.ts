@@ -119,9 +119,10 @@ type ReviewAttempt =
 /**
  * A verdict whose evidence changed while it waited (the user answered another
  * command's prompt, a tool result landed) is reviewed again before it is
- * applied. Bounded so evidence that never settles cannot loop forever; the
- * last review is then applied, which is the same staleness window a lone
- * review has always had.
+ * applied. Bounded so evidence that never settles cannot loop forever: the
+ * last review runs holding the decision slot, so no other prompt can be
+ * answered while it runs, which is the staleness window a lone review has
+ * always had.
  */
 const MAX_REVIEWS_PER_COMMAND = 3;
 
@@ -508,7 +509,8 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
    * Wait for a review, then apply it in the decision slot, one command at a
    * time. The slot spans any approval prompt, so a verdict reached while the
    * user was answering another command's prompt is checked against the
-   * evidence that answer added, and reviewed again when it changed.
+   * evidence that answer added, and reviewed again when it changed. The last
+   * review `MAX_REVIEWS_PER_COMMAND` allows runs inside the slot.
    */
   async function decide(
     scope: ReviewScope,
@@ -539,11 +541,16 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
           if (!lifecycleStale()) display.clear(scope);
           return reviewCancelledResult();
         }
-        if (reviews < MAX_REVIEWS_PER_COMMAND && !sameKeys(outcome.evidenceKeys, evidenceKeys(scope))) {
+        if (sameKeys(outcome.evidenceKeys, evidenceKeys(scope))) {
+          return await applyReview(scope, outcome, lifecycleSignal);
+        }
+        if (reviews + 1 < MAX_REVIEWS_PER_COMMAND) {
           attempt = runReview(scope, input, lifecycleSignal);
           continue;
         }
-        return await applyReview(scope, outcome, lifecycleSignal);
+        const last = await runReview(scope, input, lifecycleSignal);
+        if (last.kind === "cancelled") return reviewCancelledResult();
+        return await applyReview(scope, last, lifecycleSignal);
       } finally {
         releaseDecision();
       }
