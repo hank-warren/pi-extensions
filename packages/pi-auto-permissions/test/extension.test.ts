@@ -77,11 +77,13 @@ const CLASSIFIER_CONFIG = {
 	classifier: { provider: CLASSIFIER_MODEL.provider, model: CLASSIFIER_MODEL.id },
 };
 
-function classifierAnswer(probabilities: Record<string, number>) {
-	const choice = Object.entries(probabilities).sort((a, b) => b[1] - a[1])[0][0];
+function classifierAnswer(risky: number, violatesConstraint: number) {
 	return {
 		stopReason: "stop",
-		answers: { verdict: { type: "choice", choice, probabilities, confidence: 0.5 } },
+		answers: {
+			risky: { type: "bool", probability: risky },
+			violates_constraint: { type: "bool", probability: violatesConstraint },
+		},
 		usage: { input: 450, output: 40, cost: { total: 0 } },
 	};
 }
@@ -1783,7 +1785,7 @@ test("classifier · a confident approve on the catch-all runs without the guardi
 		{
 			rules: [GUARDED_RULE],
 			config: CLASSIFIER_CONFIG,
-			classify: () => classifierAnswer({ approve: 0.97, revise: 0.02, deny: 0.01 }),
+			classify: () => classifierAnswer(0.03, 0.01),
 		},
 		async (harness) => {
 			await harness.sessionStart();
@@ -1799,7 +1801,7 @@ test("classifier · a confident approve on the catch-all runs without the guardi
 			assert.equal(harness.classifyCalls[0].state.command, "ls -la");
 			assert.deepEqual(harness.displays.at(-1), {
 				state: "approved",
-				detail: "classifier opencode/jev-1.13-free: approve 0.97",
+				detail: "classifier opencode/jev-1.13-free: clear 0.97 (risky 0.03, constraint 0.01)",
 			});
 			const [record] = harness.classifierLog();
 			assert.equal(record.outcome, "approved");
@@ -1810,29 +1812,30 @@ test("classifier · a confident approve on the catch-all runs without the guardi
 	);
 });
 
-test("classifier · deny, revise and low-confidence approve all go to the guardian", async () => {
-	for (const [probabilities, guardianDecision] of [
-		[{ approve: 0.01, revise: 0.04, deny: 0.95 }, "approve"],
-		[{ approve: 0.1, revise: 0.9, deny: 0 }, "revise"],
-		[{ approve: 0.8, revise: 0.2, deny: 0 }, "approve"],
+test("classifier · risky, contradicting and unsure answers all go to the guardian", async () => {
+	for (const [[risky, violatesConstraint], guardianDecision] of [
+		[[0.95, 0.01], "approve"],
+		[[0.01, 0.9], "revise"],
+		[[0.2, 0.05], "approve"],
 	] as const) {
 		await withExtension(
 			{
 				rules: [GUARDED_RULE],
 				config: CLASSIFIER_CONFIG,
-				classify: () => classifierAnswer(probabilities),
+				classify: () => classifierAnswer(risky, violatesConstraint),
 				completeSimple: () => assistantResponse(verdictText(guardianDecision, "guardian says so")),
 			},
 			async (harness) => {
 				await harness.sessionStart();
 
 				const result = await harness.toolCall("rm -rf build");
-				assert.equal(harness.calls.length, 1, JSON.stringify(probabilities));
+				assert.equal(harness.calls.length, 1, `risky ${risky}, constraint ${violatesConstraint}`);
 				assert.equal(result?.block === true, guardianDecision === "revise", "the guardian's verdict is the one applied");
 				const [record] = harness.classifierLog();
 				assert.equal(record.outcome, "fallback");
 				assert.equal(record.guardian, guardianDecision);
-				assert.deepEqual(record.probabilities, probabilities);
+				assert.equal(record.risky, risky);
+				assert.equal(record.violatesConstraint, violatesConstraint);
 			},
 		);
 	}
@@ -1843,7 +1846,7 @@ test("classifier · named rules and a classifier failure go straight to the guar
 		{
 			rules: [GUARDED_RULE],
 			config: CLASSIFIER_CONFIG,
-			classify: () => classifierAnswer({ approve: 1 }),
+			classify: () => classifierAnswer(0, 0),
 		},
 		async (harness) => {
 			await harness.sessionStart();
@@ -1877,7 +1880,7 @@ test("classifier · shadow mode logs a confident approve but still asks the guar
 		{
 			rules: [GUARDED_RULE],
 			config: { ...CLASSIFIER_CONFIG, classifier: { ...CLASSIFIER_CONFIG.classifier, shadow: true } },
-			classify: () => classifierAnswer({ approve: 0.99, revise: 0.01, deny: 0 }),
+			classify: () => classifierAnswer(0.01, 0),
 			completeSimple: () => assistantResponse(verdictText("ask_user", "needs a human")),
 		},
 		async (harness) => {

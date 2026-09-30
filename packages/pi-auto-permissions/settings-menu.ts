@@ -243,7 +243,7 @@ export function buildSettingItems(
     {
       id: CLASSIFIER_THRESHOLD_ID,
       label: "Classifier threshold",
-      description: "Approve probability at or above which the classifier alone approves a command.",
+      description: "Clear score (confidence the command is neither risky nor against a user instruction) at or above which the classifier alone approves it.",
       currentValue: formatThreshold(thresholdValue(settings)),
       values: thresholdValues(thresholdValue(settings)),
     },

@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import {
-	approveProbability,
 	buildClassifierLogRecord,
 	buildClassifierState,
 	classifierApplies,
 	classifierRuntime,
+	clearProbability,
+	describeClassifierResult,
 	isConfidentApprove,
 	runClassifier,
 	type ClassifierResult,
@@ -27,10 +28,13 @@ function runtime(classify: ClassifierRuntime["classify"]): ClassifierRuntime {
 	};
 }
 
-function answered(probabilities: Record<string, number>, choice = "approve") {
+function answered(risky: number, violatesConstraint: number) {
 	return async () => ({
 		stopReason: "stop",
-		answers: { verdict: { type: "choice", choice, probabilities, confidence: 0.7 } },
+		answers: {
+			risky: { type: "bool", probability: risky },
+			violates_constraint: { type: "bool", probability: violatesConstraint },
+		},
 		usage: { input: 400, output: 40 },
 	});
 }
@@ -108,30 +112,40 @@ describe("buildClassifierState", () => {
 describe("runClassifier", () => {
 	const state = { command: "ls" };
 
-	test("returns the choice answer and its usage", async () => {
-		const result = await runClassifier(runtime(answered({ approve: 0.95, revise: 0.05, deny: 0 })), MODEL, state, new AbortController().signal);
+	test("returns both answers and the usage", async () => {
+		const result = await runClassifier(runtime(answered(0.02, 0.05)), MODEL, state, new AbortController().signal);
 		assert.equal(result.kind, "answered");
-		assert.equal(approveProbability(result), 0.95);
+		assert.equal(result.kind === "answered" && result.risky, 0.02);
+		assert.equal(result.kind === "answered" && result.violatesConstraint, 0.05);
+		assert.equal(clearProbability(result), 0.95, "the weaker of the two noes");
 		assert.deepEqual(result.kind === "answered" && result.usage, { input: 400, output: 40 });
 	});
 
-	test("sends the three-way verdict question", async () => {
+	test("asks two independent bool questions, each framing the command as one step", async () => {
 		let seen: unknown;
 		await runClassifier(runtime(async (_model, context) => {
 			seen = context;
-			return answered({ approve: 1 })();
+			return answered(0, 0)();
 		}), MODEL, state, new AbortController().signal);
-		const questions = (seen as { questions: Record<string, { type: string; criteria: Record<string, string> }> }).questions;
-		assert.equal(questions.verdict.type, "choice");
-		assert.deepEqual(Object.keys(questions.verdict.criteria), ["approve", "revise", "deny"]);
+		const questions = (seen as { questions: Record<string, { type: string; instructions: string; criteria: Record<string, string> }> }).questions;
+		assert.deepEqual(Object.keys(questions), ["risky", "violates_constraint"]);
+		for (const question of Object.values(questions)) {
+			assert.equal(question.type, "bool");
+			assert.deepEqual(Object.keys(question.criteria), ["true", "false"]);
+			assert.match(question.instructions, /one step of a larger task/u);
+		}
 		assert.deepEqual((seen as { state: unknown }).state, state);
 	});
 
 	test("turns every failure into an error result instead of throwing", async () => {
 		const cases: Array<[string, ClassifierRuntime["classify"]]> = [
 			["provider error", async () => ({ stopReason: "error", errorMessage: "rate limited" })],
-			["no answer", async () => ({ stopReason: "stop", answers: {} })],
-			["wrong answer type", async () => ({ stopReason: "stop", answers: { verdict: { type: "bool" } } })],
+			["no answers", async () => ({ stopReason: "stop", answers: {} })],
+			["one answer missing", async () => ({ stopReason: "stop", answers: { risky: { type: "bool", probability: 0 } } })],
+			["wrong answer type", async () => ({
+				stopReason: "stop",
+				answers: { risky: { type: "choice" }, violates_constraint: { type: "bool", probability: 0 } },
+			})],
 			["throws", async () => {
 				throw new Error("offline");
 			}],
@@ -155,18 +169,23 @@ describe("runClassifier", () => {
 });
 
 describe("isConfidentApprove", () => {
-	const result = (probabilities: Record<string, number>): ClassifierResult => ({
+	const result = (risky: number, violatesConstraint: number): ClassifierResult => ({
 		kind: "answered",
-		choice: "approve",
-		probabilities,
+		risky,
+		violatesConstraint,
 		latencyMs: 1,
 	});
 
-	test("compares the approve probability, not the chosen label", () => {
-		assert.equal(isConfidentApprove(result({ approve: 0.9, deny: 0.1 }), 0.9), true);
-		assert.equal(isConfidentApprove(result({ approve: 0.89, deny: 0.11 }), 0.9), false);
-		assert.equal(isConfidentApprove(result({ deny: 1 }), 0.5), false, "a missing approve label counts as 0");
+	test("needs a confident no to both questions", () => {
+		assert.equal(isConfidentApprove(result(0.1, 0), 0.9), true);
+		assert.equal(isConfidentApprove(result(0.11, 0), 0.9), false, "risky");
+		assert.equal(isConfidentApprove(result(0, 0.2), 0.9), false, "contradicts the user");
 		assert.equal(isConfidentApprove({ kind: "error", error: "x", latencyMs: 1 }, 0.5), false);
+	});
+
+	test("describes the result for the widget", () => {
+		assert.equal(describeClassifierResult(result(0.02, 0.01)), "clear 0.98 (risky 0.02, constraint 0.01)");
+		assert.equal(describeClassifierResult({ kind: "error", error: "offline", latencyMs: 1 }), "error: offline");
 	});
 });
 
@@ -177,14 +196,15 @@ describe("buildClassifierLogRecord", () => {
 			cwd: "/repo",
 			command: "git status",
 			classifier: CLASSIFIER,
-			result: { kind: "answered", choice: "deny", probabilities: { deny: 0.8, approve: 0.2 }, confidence: 0.6, latencyMs: 420 },
+			result: { kind: "answered", risky: 0.8, violatesConstraint: 0.1, latencyMs: 420 },
 			outcome: "fallback",
 			guardian: "approve",
 		});
 		assert.equal(record.model, "opencode/jev-1.13-free");
 		assert.equal(record.threshold, 0.9);
-		assert.equal(record.choice, "deny");
-		assert.deepEqual(record.probabilities, { deny: 0.8, approve: 0.2 });
+		assert.equal(record.risky, 0.8);
+		assert.equal(record.violatesConstraint, 0.1);
+		assert.ok(Math.abs(record.clear! - 0.2) < 1e-9);
 		assert.equal(record.guardian, "approve");
 		assert.equal(record.latencyMs, 420);
 		assert.equal(record.error, undefined);
@@ -201,6 +221,6 @@ describe("buildClassifierLogRecord", () => {
 		});
 		assert.equal(record.error, "offline");
 		assert.equal(record.shadow, true);
-		assert.equal(record.probabilities, undefined);
+		assert.equal(record.clear, undefined);
 	});
 });

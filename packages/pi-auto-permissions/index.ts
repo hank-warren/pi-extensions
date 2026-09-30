@@ -21,12 +21,11 @@ import type { Gate } from "./gates.js";
 import { classifyCommand } from "./classify.js";
 import {
   appendClassifierRecord,
-  approveProbability,
   buildClassifierLogRecord,
   buildClassifierState,
   classifierApplies,
   classifierRuntime,
-  formatProbability,
+  describeClassifierResult,
   isConfidentApprove,
   runClassifier,
   type ClassifierResult,
@@ -561,7 +560,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
       recordClassifier(scope, result, "approved");
       return {
         decision: "approve",
-        reason: `classifier ${key}: approve ${formatProbability(approveProbability(result)!)}`,
+        reason: `classifier ${key}: ${describeClassifierResult(result)}`,
       };
     }
     display.show(scope, "waiting");
