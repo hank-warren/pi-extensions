@@ -11,8 +11,9 @@ const assistant = (text: string) => ({
 	message: { role: "assistant", content: [{ type: "text", text }] },
 });
 
-function setup(options: { name?: string; reply?: string | (() => Promise<unknown>); branch?: unknown[]; mode?: string } = {}) {
+function setup(options: { name?: string; reply?: string | (() => Promise<unknown>); branch?: unknown[]; mode?: string; thinkingLevel?: string; reasoningModel?: boolean } = {}) {
 	const mock = createMockPi();
+	if (options.thinkingLevel) mock.rawPi.setThinkingLevel(options.thinkingLevel);
 	let name = options.name;
 	const names: string[] = [];
 	Object.assign(mock.rawPi, {
@@ -27,7 +28,7 @@ function setup(options: { name?: string; reply?: string | (() => Promise<unknown
 	const branch = options.branch ?? [user("fix the statusline cache bug"), assistant("Fixed it.")];
 	const { ctx, notifications, statuses } = createMockContext({
 		mode: options.mode ?? "tui",
-		model: MODEL,
+		model: { ...MODEL, reasoning: options.reasoningModel ?? false },
 		cwd: "/home/hank/repos/pi-extensions",
 		sessionManager: { getBranch: () => branch },
 		completeSimple: async (_model: unknown, context: unknown, requestOptions: unknown) => {
@@ -53,16 +54,29 @@ test("names an unnamed session once, after the first settled turn", async () => 
 	assert.equal(s.calls.length, 1);
 });
 
-test("the title request is standalone: no session id, no cache retention, no thinking", async () => {
+test("the title request is standalone: no session id, no cache retention", async () => {
 	const s = setup();
 	await s.fire("agent_settled");
 	const { context, options } = s.calls[0];
 	assert.equal(options.sessionId, undefined);
-	assert.equal(options.reasoning, undefined);
 	assert.equal(options.cacheRetention, "none");
 	assert.equal(context.messages.length, 1);
 	assert.match(context.messages[0].content, /First request: fix the statusline cache bug/);
 	assert.match(context.messages[0].content, /Project directory: pi-extensions/);
+});
+
+test("uses the session's thinking level, and none when it is off or unsupported", async () => {
+	const thinking = setup({ thinkingLevel: "high", reasoningModel: true });
+	await thinking.fire("agent_settled");
+	assert.equal(thinking.calls[0].options.reasoning, "high");
+
+	const off = setup({ thinkingLevel: "off", reasoningModel: true });
+	await off.fire("agent_settled");
+	assert.equal(off.calls[0].options.reasoning, undefined);
+
+	const plain = setup({ thinkingLevel: "high" });
+	await plain.fire("agent_settled");
+	assert.equal(plain.calls[0].options.reasoning, undefined);
 });
 
 test("never replaces an existing name automatically", async () => {

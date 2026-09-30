@@ -77,19 +77,20 @@ export function sanitizeTitle(raw: string): string | undefined {
 	return title || undefined;
 }
 
-async function generateTitle(ctx: ExtensionContext, signal: AbortSignal): Promise<string> {
+async function generateTitle(ctx: ExtensionContext, thinkingLevel: ReturnType<ExtensionAPI["getThinkingLevel"]>, signal: AbortSignal): Promise<string> {
 	const model = ctx.model;
 	if (!model) throw new Error("no model selected");
 	const digest = buildDigest(ctx.sessionManager.getBranch(), ctx.cwd);
 	if (!digest) throw new Error("nothing to name yet");
 	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
 	if (!auth.ok) throw new Error(auth.error);
-	// No `reasoning` turns thinking off (or to the model's minimum); no session
-	// id and no cache retention keep this request clear of the session's cache.
+	// Same thinking level as the session. No session id and no cache retention
+	// keep this request clear of the session's cache.
+	const reasoning = model.reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {};
 	const response = await resolveGuardianCompleteSimple(ctx.modelRegistry, "pi-auto-name")(
 		model,
 		{ systemPrompt: SYSTEM_PROMPT, messages: [{ role: "user", content: digest, timestamp: Date.now() }] },
-		{ apiKey: auth.apiKey, headers: auth.headers, env: auth.env, signal, transport: "sse", cacheRetention: "none" },
+		{ apiKey: auth.apiKey, headers: auth.headers, env: auth.env, signal, transport: "sse", cacheRetention: "none", ...reasoning },
 	);
 	if (response.stopReason === "error") throw new Error(response.errorMessage ?? "model request failed");
 	const title = sanitizeTitle(textOf(response.content));
@@ -114,7 +115,7 @@ export default function autoName(pi: ExtensionAPI): void {
 		const timer = setTimeout(() => own.abort(), TIMEOUT_MS);
 		timer.unref?.();
 		try {
-			const title = await generateTitle(ctx, own.signal);
+			const title = await generateTitle(ctx, pi.getThinkingLevel(), own.signal);
 			if (own.signal.aborted || (onlyIfUnnamed && pi.getSessionName())) return undefined;
 			pi.setSessionName(title);
 			return title;
