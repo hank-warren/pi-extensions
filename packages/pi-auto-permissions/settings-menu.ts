@@ -18,12 +18,16 @@ import {
   truncateToWidth,
 } from "@earendil-works/pi-tui";
 import {
+  DEFAULT_CLASSIFIER_APPROVE_THRESHOLD,
+  DEFAULT_CLASSIFIER_TIMEOUT_MS,
   DEFAULT_REVIEWER_REASONING_EFFORT,
   DEFAULT_REVIEWER_TIMEOUT_MS,
   MAX_REVIEW_CONCURRENCY,
   MAX_REVIEWER_TIMEOUT_MS,
   MIN_REVIEWER_TIMEOUT_MS,
   REASONING_EFFORTS,
+  MIN_CLASSIFIER_APPROVE_THRESHOLD,
+  type ClassifierConfig,
   type ReasoningEffort,
   type ReviewerConfig,
   type SystemPromptSource,
@@ -34,6 +38,9 @@ const REVIEWER_MODEL_ID = "reviewerModel";
 const THINKING_LEVEL_ID = "reasoningEffort";
 const TIMEOUT_ID = "timeoutMs";
 const REVIEW_CONCURRENCY_ID = "reviewConcurrency";
+const CLASSIFIER_MODEL_ID = "classifierModel";
+const CLASSIFIER_THRESHOLD_ID = "classifierThreshold";
+const CLASSIFIER_MODE_ID = "classifierMode";
 const SYSTEM_PROMPT_ID = "systemPrompt";
 export const RECENT_DENIALS_ID = "recentDenials";
 
@@ -44,11 +51,18 @@ const TOGGLE_VALUES = [ON, OFF];
 const UNSET_MODEL = "(unset)";
 const UNAVAILABLE_SUFFIX = "(configured, unavailable)";
 const NO_REVIEWER_MESSAGE = "Select a reviewer model first";
+const NO_CLASSIFIER_MESSAGE = "Select a classifier model first";
+/** The classifier picker's first row, and the model row's value while none is set. */
+export const CLASSIFIER_OFF = "off";
+const CLASSIFIER_UNSUPPORTED = "(requires pi 0.99)";
+export const CLASSIFIER_LIVE = "live";
+export const CLASSIFIER_SHADOW = "shadow";
 
 /** The slice of the config the menu edits, plus the read-only prompt source. */
 export interface ReviewerSettings {
   enabled: boolean;
   reviewer?: ReviewerConfig;
+  classifier?: ClassifierConfig;
   reviewConcurrency: number;
   systemPromptSource: SystemPromptSource;
 }
@@ -61,6 +75,26 @@ const CONCURRENCY_PRESETS = [1, 2, 4, 8, 16];
  */
 export function concurrencyValues(current: number): string[] {
   return [...new Set([...CONCURRENCY_PRESETS, current])].sort((a, b) => a - b).map(String);
+}
+
+const THRESHOLD_PRESETS = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 0.99];
+
+export function formatThreshold(value: number): string {
+  return value.toFixed(2);
+}
+
+function thresholdValue(settings: ReviewerSettings): number {
+  return settings.classifier?.approveThreshold ?? DEFAULT_CLASSIFIER_APPROVE_THRESHOLD;
+}
+
+/** The approve-threshold cycle; like the concurrency row, a hand-written value stays in it. */
+export function thresholdValues(current: number): string[] {
+  return [...new Set([...THRESHOLD_PRESETS, current])].sort((a, b) => a - b).map(formatThreshold);
+}
+
+function classifierValue(settings: ReviewerSettings, supported: boolean): string {
+  if (settings.classifier) return modelKey({ provider: settings.classifier.provider, id: settings.classifier.model });
+  return supported ? CLASSIFIER_OFF : CLASSIFIER_UNSUPPORTED;
 }
 
 /** The subset of a pi model the menu needs; keeps tests free of pi-ai types. */
@@ -150,6 +184,8 @@ export function parseTimeoutInput(input: string): TimeoutParse {
 
 export interface SettingSubmenus {
   reviewerModel?: SettingItem["submenu"];
+  /** Absent on a Pi without classifier models; the row then says so. */
+  classifierModel?: SettingItem["submenu"];
   timeout?: SettingItem["submenu"];
   recentDenials?: SettingItem["submenu"];
 }
@@ -196,6 +232,27 @@ export function buildSettingItems(
       description: "How many guardian reviews may run at once. 1 reviews one command at a time, none ahead of its turn.",
       currentValue: String(settings.reviewConcurrency),
       values: concurrencyValues(settings.reviewConcurrency),
+    },
+    {
+      id: CLASSIFIER_MODEL_ID,
+      label: "Classifier",
+      description: "Classifier model that pre-screens the reviewAllShell catch-all. A confident approve skips the guardian; anything else goes to it.",
+      currentValue: classifierValue(settings, submenus.classifierModel !== undefined),
+      ...(submenus.classifierModel ? { submenu: submenus.classifierModel } : {}),
+    },
+    {
+      id: CLASSIFIER_THRESHOLD_ID,
+      label: "Classifier threshold",
+      description: "Clear score (confidence the command is neither risky nor against a user instruction) at or above which the classifier alone approves it.",
+      currentValue: formatThreshold(thresholdValue(settings)),
+      values: thresholdValues(thresholdValue(settings)),
+    },
+    {
+      id: CLASSIFIER_MODE_ID,
+      label: "Classifier mode",
+      description: "live acts on confident approvals; shadow only logs them to classifier.jsonl and always asks the guardian.",
+      currentValue: settings.classifier?.shadow ? CLASSIFIER_SHADOW : CLASSIFIER_LIVE,
+      values: [CLASSIFIER_LIVE, CLASSIFIER_SHADOW],
     },
     {
       id: SYSTEM_PROMPT_ID,
@@ -270,9 +327,54 @@ export function applySettingChange(
     return { kind: "settings", settings: { ...settings, reviewConcurrency } };
   }
 
+  if (id === CLASSIFIER_THRESHOLD_ID) {
+    const approveThreshold = Number(value);
+    if (!Number.isFinite(approveThreshold) || approveThreshold < MIN_CLASSIFIER_APPROVE_THRESHOLD || approveThreshold > 1) {
+      return { kind: "error", message: `Classifier threshold must be between ${MIN_CLASSIFIER_APPROVE_THRESHOLD} and 1` };
+    }
+    if (!settings.classifier) return { kind: "error", message: NO_CLASSIFIER_MESSAGE };
+    if (settings.classifier.approveThreshold === approveThreshold) return { kind: "ignored" };
+    return { kind: "settings", settings: { ...settings, classifier: { ...settings.classifier, approveThreshold } } };
+  }
+
+  if (id === CLASSIFIER_MODE_ID) {
+    if (value !== CLASSIFIER_LIVE && value !== CLASSIFIER_SHADOW) {
+      return { kind: "error", message: `Unknown classifier mode: ${value}` };
+    }
+    if (!settings.classifier) return { kind: "error", message: NO_CLASSIFIER_MESSAGE };
+    const shadow = value === CLASSIFIER_SHADOW;
+    if (settings.classifier.shadow === shadow) return { kind: "ignored" };
+    return { kind: "settings", settings: { ...settings, classifier: { ...settings.classifier, shadow } } };
+  }
+
   // The model and timeout submenus commit their own edit and hand back display
   // text, so there is nothing left to map here.
   return { kind: "ignored" };
+}
+
+/** Adopt a picked classifier, or turn it off; tuning carries over from the previous one. */
+export function applyClassifierSelection(settings: ReviewerSettings, value: string): SettingChange {
+  if (value === CLASSIFIER_OFF) {
+    return settings.classifier ? { kind: "settings", settings: { ...settings, classifier: undefined } } : { kind: "ignored" };
+  }
+  const parsed = parseModelKey(value);
+  if (!parsed) return { kind: "error", message: `Unknown classifier model: ${value}` };
+  if (settings.classifier?.provider === parsed.provider && settings.classifier.model === parsed.model) {
+    return { kind: "ignored" };
+  }
+  return {
+    kind: "settings",
+    settings: {
+      ...settings,
+      classifier: {
+        provider: parsed.provider,
+        model: parsed.model,
+        approveThreshold: settings.classifier?.approveThreshold ?? DEFAULT_CLASSIFIER_APPROVE_THRESHOLD,
+        timeoutMs: settings.classifier?.timeoutMs ?? DEFAULT_CLASSIFIER_TIMEOUT_MS,
+        shadow: settings.classifier?.shadow ?? false,
+      },
+    },
+  };
 }
 
 /** Adopt a picked model, creating the reviewer block when there was none. */
@@ -318,16 +420,26 @@ function modelItem(model: MenuModel, unavailable = false): SelectItem {
 
 /**
  * Available models, provider then id, with a configured-but-unavailable
- * reviewer pinned first so opening the menu can never silently drop it.
+ * model pinned first so opening the menu can never silently drop it.
  */
-export function buildModelItems(available: readonly MenuModel[], settings: ReviewerSettings): SelectItem[] {
+export function buildModelItems(
+  available: readonly MenuModel[],
+  configured: { provider: string; model: string } | undefined,
+): SelectItem[] {
   const sorted = [...available].sort((a, b) => a.provider.localeCompare(b.provider) || a.id.localeCompare(b.id));
   const items = sorted.map((model) => modelItem(model));
-  const reviewer = settings.reviewer;
-  if (reviewer && !sorted.some((model) => model.provider === reviewer.provider && model.id === reviewer.model)) {
-    items.unshift(modelItem({ provider: reviewer.provider, id: reviewer.model }, true));
+  if (configured && !sorted.some((model) => model.provider === configured.provider && model.id === configured.model)) {
+    items.unshift(modelItem({ provider: configured.provider, id: configured.model }, true));
   }
   return items;
+}
+
+/** The classifier picker: an Off row, then the signed-in classifier models. */
+export function buildClassifierItems(available: readonly MenuModel[], settings: ReviewerSettings): SelectItem[] {
+  return [
+    { value: CLASSIFIER_OFF, label: CLASSIFIER_OFF, description: "Every catch-all command goes straight to the guardian." },
+    ...buildModelItems(available, settings.classifier),
+  ];
 }
 
 /**
@@ -349,6 +461,8 @@ export interface SubmenuHost {
   /** Commit an edit: validates, persists, and repaints. */
   commit(change: SettingChange): void;
   availableModels(): MenuModel[];
+  /** Signed-in classifier models, fetched before the menu opened. */
+  availableClassifiers?(): MenuModel[];
   requestRender(): void;
   settingsTheme: SettingsListTheme;
   selectTheme: SelectListTheme;
@@ -393,7 +507,14 @@ export class PromptComponent implements Component {
 
 const LIST_KEYS = ["tui.select.up", "tui.select.down", "tui.select.confirm", "tui.select.cancel"] as const;
 
-/** Searchable reviewer-model picker. */
+interface ModelPicker {
+  title: string;
+  items: SelectItem[];
+  current: string;
+  select(settings: ReviewerSettings, value: string): SettingChange;
+}
+
+/** Searchable model picker, for the reviewer or the classifier. */
 class ModelSubmenu implements Component {
   private readonly items: SelectItem[];
   private list: SelectList;
@@ -402,11 +523,11 @@ class ModelSubmenu implements Component {
 
   constructor(
     private readonly host: SubmenuHost,
+    private readonly picker: ModelPicker,
     private readonly done: (value?: string) => void,
   ) {
-    const settings = host.getSettings();
-    this.items = buildModelItems(host.availableModels(), settings);
-    this.list = this.buildList(this.items, this.items.findIndex((item) => item.value === reviewerValue(settings)));
+    this.items = picker.items;
+    this.list = this.buildList(this.items, this.items.findIndex((item) => item.value === picker.current));
     this.search.focused = true;
   }
 
@@ -415,7 +536,7 @@ class ModelSubmenu implements Component {
     if (selectedIndex > 0) list.setSelectedIndex(selectedIndex);
     list.onCancel = () => this.done(undefined);
     list.onSelect = (item) => {
-      const change = applyModelSelection(this.host.getSettings(), item.value);
+      const change = this.picker.select(this.host.getSettings(), item.value);
       this.host.commit(change);
       this.done(change.kind === "error" ? undefined : item.value);
     };
@@ -429,7 +550,7 @@ class ModelSubmenu implements Component {
 
   render(width: number): string[] {
     return [
-      truncateToWidth(this.host.settingsTheme.hint("  Reviewer model"), width),
+      truncateToWidth(this.host.settingsTheme.hint(`  ${this.picker.title}`), width),
       "",
       ...this.search.render(width),
       "",
@@ -456,7 +577,27 @@ class ModelSubmenu implements Component {
 }
 
 export function createModelSubmenu(host: SubmenuHost): NonNullable<SettingItem["submenu"]> {
-  return (_currentValue, done) => new ModelSubmenu(host, done);
+  return (_currentValue, done) => {
+    const settings = host.getSettings();
+    return new ModelSubmenu(host, {
+      title: "Reviewer model",
+      items: buildModelItems(host.availableModels(), settings.reviewer),
+      current: reviewerValue(settings),
+      select: applyModelSelection,
+    }, done);
+  };
+}
+
+export function createClassifierSubmenu(host: SubmenuHost): NonNullable<SettingItem["submenu"]> {
+  return (_currentValue, done) => {
+    const settings = host.getSettings();
+    return new ModelSubmenu(host, {
+      title: "Classifier model",
+      items: buildClassifierItems(host.availableClassifiers?.() ?? [], settings),
+      current: classifierValue(settings, true),
+      select: applyClassifierSelection,
+    }, done);
+  };
 }
 
 /** A denial the menu can display and allow on retry; index maps log records here. */

@@ -19,6 +19,20 @@ import {
 } from "./evaluation-log.js";
 import type { Gate } from "./gates.js";
 import { classifyCommand } from "./classify.js";
+import {
+  appendClassifierRecord,
+  buildClassifierLogRecord,
+  buildClassifierState,
+  classifierApplies,
+  classifierRuntime,
+  describeClassifierResult,
+  isConfidentApprove,
+  runClassifier,
+  type ClassifierResult,
+  type GuardianFollowUp,
+} from "./classifier.js";
+import { detectSubagentContext } from "./subagent-context.js";
+import { appendUsageRecord, buildUsageLogRecord } from "./usage-log.js";
 import type { PermissionVerdict, ReviewEvidenceRecord } from "./review.js";
 import { promptSelect, setHerdrBlocked } from "./prompt-select.js";
 import { createReviewDisplay } from "./review-display.js";
@@ -171,6 +185,8 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   let trustedGroups = new Set<string>();
   let lastConfigError: string | undefined;
   let lastEvaluationLogError: string | undefined;
+  /** The classifier-unavailable warning already shown this session. */
+  let classifierWarning: string | undefined;
   // Guardian calls run in parallel up to config.reviewConcurrency; applying
   // verdicts and prompting the user stay one command at a time.
   const reviewSlots = createReviewLimiter();
@@ -452,6 +468,112 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     }
   }
 
+  function warnClassifierUnavailable(ctx: ExtensionContext, message: string): void {
+    if (classifierWarning === message) return;
+    classifierWarning = message;
+    console.warn(`[pi-auto-permissions] ${message}`);
+    ctx.ui.notify(`Auto Permissions: ${message}`, "warning");
+  }
+
+  function recordClassifier(
+    scope: ReviewScope,
+    result: ClassifierResult,
+    outcome: "approved" | "fallback",
+    guardian?: GuardianFollowUp,
+  ): void {
+    const { ctx, config, command } = scope;
+    if (!config.classifier) return;
+    if (config.usageLog.enabled && result.kind === "answered" && result.usage !== undefined) {
+      try {
+        appendUsageRecord(config.usageLog.path, buildUsageLogRecord(
+          config.classifier.provider,
+          config.classifier.model,
+          result.usage,
+          "classifier",
+          detectSubagentContext(ctx.cwd) !== undefined,
+        ));
+      } catch {
+        // Usage accounting is optional and must never block a permission decision.
+      }
+    }
+    if (!config.classifierLog.enabled) return;
+    try {
+      appendClassifierRecord(config.classifierLog.path, buildClassifierLogRecord({
+        sessionId: ctx.sessionManager.getSessionId(),
+        cwd: ctx.cwd,
+        command,
+        classifier: config.classifier,
+        result,
+        outcome,
+        ...(guardian ? { guardian } : {}),
+      }));
+    } catch {
+      // The classifier log is best-effort observability.
+    }
+  }
+
+  /**
+   * The guardian review, pre-screened by the classifier on the catch-all gate
+   * when one is configured. Only a confident approve skips the guardian;
+   * revise, deny, low confidence and every failure fall through to it.
+   */
+  async function screenedReview(
+    scope: ReviewScope,
+    input: Record<string, unknown>,
+    stop?: AbortSignal,
+  ): Promise<PermissionVerdict> {
+    const { ctx, config } = scope;
+    if (!classifierApplies(config, scope.gate)) return reviewer.review(scope, input, stop);
+    const { classifier } = config;
+    const key = `${classifier.provider}/${classifier.model}`;
+    const runtime = classifierRuntime(ctx.modelRegistry);
+    if (!runtime) {
+      warnClassifierUnavailable(ctx, `the classifier needs pi 0.99 or newer; reviewing with the guardian only.`);
+      return reviewer.review(scope, input, stop);
+    }
+    const model = runtime.findOfType("classifier", classifier.provider, classifier.model);
+    if (!model) {
+      warnClassifierUnavailable(ctx, `classifier model ${key} not found; reviewing with the guardian only.`);
+      return reviewer.review(scope, input, stop);
+    }
+
+    const cancelled = AbortSignal.any([
+      reviewer.lifecycleSignal,
+      ...(ctx.signal ? [ctx.signal] : []),
+      ...(stop ? [stop] : []),
+    ]);
+    display.show(scope, "waiting", undefined, false, key);
+    const state = buildClassifierState(
+      reviewer.collectEvidence(scope),
+      { command: scope.command, cwd: ctx.cwd, guardianPolicy: config.guardianPolicy },
+      model.contextWindow,
+    );
+    const result = await runClassifier(
+      runtime,
+      model,
+      state,
+      AbortSignal.any([cancelled, AbortSignal.timeout(classifier.timeoutMs)]),
+    );
+    if (cancelled.aborted) throw new Error("review timed out or was cancelled");
+
+    if (!classifier.shadow && isConfidentApprove(result, classifier.approveThreshold)) {
+      recordClassifier(scope, result, "approved");
+      return {
+        decision: "approve",
+        reason: `classifier ${key}: ${describeClassifierResult(result)}`,
+      };
+    }
+    display.show(scope, "waiting");
+    try {
+      const verdict = await reviewer.review(scope, input, stop);
+      recordClassifier(scope, result, "fallback", verdict.decision);
+      return verdict;
+    } catch (error) {
+      recordClassifier(scope, result, "fallback", cancelled.aborted ? "cancelled" : "failed");
+      throw error;
+    }
+  }
+
   function evidenceKeys(scope: ReviewScope): string[] {
     return reviewer.collectEvidence(scope).map((record) => record.key);
   }
@@ -504,7 +626,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
         const stop = scope.callSignal && abandon
           ? AbortSignal.any([scope.callSignal, abandon])
           : scope.callSignal ?? abandon;
-        const review = reviewer.review(scope, input, stop);
+        const review = screenedReview(scope, input, stop);
         const verdict = await (stop ? untilAborted(review, stop) : review);
         if (!lifecycleStale() && reviewCancelled(ctx.signal)) reviewer.discardLineage();
         attempt = { kind: "verdict", verdict, evidenceKeys: keys };
@@ -780,6 +902,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
       // Reported by currentConfig; the first bash call fails closed.
     }
     if (config) warnAboutMissingReviewerProvider(ctx, config);
+    classifierWarning = undefined;
 
     resetCallTracking();
     reviewer.startSession(ctx.cwd);

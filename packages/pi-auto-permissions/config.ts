@@ -19,6 +19,13 @@ export const MAX_REVIEWER_TIMEOUT_MS = 300_000;
 export const DEFAULT_REVIEW_CONCURRENCY = 4;
 export const MAX_REVIEW_CONCURRENCY = 16;
 
+/** Loader defaults for the optional `classifier` block, shared with the settings UI. */
+export const DEFAULT_CLASSIFIER_APPROVE_THRESHOLD = 0.9;
+export const MIN_CLASSIFIER_APPROVE_THRESHOLD = 0.5;
+export const DEFAULT_CLASSIFIER_TIMEOUT_MS = 5_000;
+export const MIN_CLASSIFIER_TIMEOUT_MS = 500;
+export const MAX_CLASSIFIER_TIMEOUT_MS = 60_000;
+
 /**
  * Where the active reviewer system prompt came from. The settings UI shows this
  * (read-only) so the resolved `systemPromptFile` path is visible without having
@@ -36,6 +43,21 @@ export interface AutoPermissionsConfig {
     model: string;
     reasoningEffort: ReasoningEffort;
     timeoutMs: number;
+  };
+  /**
+   * Optional classifier pre-screen for the `reviewAllShell` catch-all gate
+   * (pi 0.99+ classifier models, e.g. `opencode/jev-1.13-free`). A confident
+   * approve runs the command without a guardian call; every other answer —
+   * revise, deny, low confidence, an error — falls through to the guardian.
+   * `shadow` classifies and logs but always asks the guardian, for tuning
+   * `approveThreshold` without acting on it.
+   */
+  classifier?: {
+    provider: string;
+    model: string;
+    approveThreshold: number;
+    timeoutMs: number;
+    shadow: boolean;
   };
   systemPrompt: string;
   systemPromptSource: SystemPromptSource;
@@ -69,6 +91,11 @@ export interface AutoPermissionsConfig {
   };
   /** Every non-approved outcome, for the Recent denials view. Default on. */
   denialLog: {
+    enabled: boolean;
+    path: string;
+  };
+  /** One record per classifier pre-screen with its probabilities and the guardian's verdict. Default on. */
+  classifierLog: {
     enabled: boolean;
     path: string;
   };
@@ -112,6 +139,7 @@ export interface AutoPermissionsConfig {
 }
 
 export type ReviewerConfig = NonNullable<AutoPermissionsConfig["reviewer"]>;
+export type ClassifierConfig = NonNullable<AutoPermissionsConfig["classifier"]>;
 
 interface RuleInput {
   pattern?: unknown;
@@ -269,7 +297,7 @@ function resolveReviewEvidence(raw: Record<string, unknown>): AutoPermissionsCon
   };
 }
 
-type SidecarKey = "evaluationLog" | "usageLog" | "denialLog";
+type SidecarKey = "evaluationLog" | "usageLog" | "denialLog" | "classifierLog";
 
 function resolveSidecar(
   raw: Record<string, unknown>,
@@ -335,6 +363,32 @@ function resolveReviewer(raw: Record<string, unknown>): AutoPermissionsConfig["r
   return { provider, model, reasoningEffort, timeoutMs };
 }
 
+function resolveClassifier(raw: Record<string, unknown>): AutoPermissionsConfig["classifier"] {
+  const classifier = objectBlock(raw.classifier, "classifier");
+  if (!classifier) return undefined;
+  const provider = optionalString(classifier.provider, "classifier.provider");
+  const model = optionalString(classifier.model, "classifier.model");
+  if (!provider || !model) throw new Error("classifier requires both provider and model");
+  const threshold = classifier.approveThreshold ?? DEFAULT_CLASSIFIER_APPROVE_THRESHOLD;
+  if (
+    typeof threshold !== "number"
+    || !Number.isFinite(threshold)
+    || threshold < MIN_CLASSIFIER_APPROVE_THRESHOLD
+    || threshold > 1
+  ) {
+    throw new Error(`classifier.approveThreshold must be a number between ${MIN_CLASSIFIER_APPROVE_THRESHOLD} and 1`);
+  }
+  const timeoutMs = boundedInteger(
+    classifier.timeoutMs,
+    DEFAULT_CLASSIFIER_TIMEOUT_MS,
+    MIN_CLASSIFIER_TIMEOUT_MS,
+    MAX_CLASSIFIER_TIMEOUT_MS,
+    "classifier.timeoutMs",
+  );
+  const shadow = optionalBoolean(classifier.shadow, "classifier.shadow") === true;
+  return { provider, model, approveThreshold: threshold, timeoutMs, shadow };
+}
+
 export function loadAutoPermissionsConfig(path = autoPermissionsConfigPath()): AutoPermissionsConfig {
   const raw = readObject(path);
   optionalBoolean(raw.enabled, "enabled");
@@ -349,12 +403,14 @@ export function loadAutoPermissionsConfig(path = autoPermissionsConfigPath()): A
   return {
     enabled: raw.enabled !== false,
     reviewer: resolveReviewer(raw),
+    classifier: resolveClassifier(raw),
     systemPrompt: prompt.prompt,
     systemPromptSource: prompt.source,
     reviewEvidence: resolveReviewEvidence(raw),
     evaluationLog: resolveSidecar(raw, "evaluationLog", "review-evals.jsonl", false, path),
     usageLog: resolveSidecar(raw, "usageLog", "usage.jsonl", true, path),
     denialLog: resolveSidecar(raw, "denialLog", "denials.jsonl", true, path),
+    classifierLog: resolveSidecar(raw, "classifierLog", "classifier.jsonl", true, path),
     rules,
     reviewAllShell: raw.reviewAllShell === true,
     reviewConcurrency: boundedInteger(

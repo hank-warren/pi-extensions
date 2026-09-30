@@ -70,6 +70,24 @@ const PRELOAD_CONFIG_ENV = process.env.PI_AUTO_PERMISSIONS_CONFIG;
 
 const GUARDIAN_MODEL = { provider: "guardian", id: "reviewer-1", api: "anthropic", contextWindow: 200_000 };
 
+const CLASSIFIER_MODEL = { provider: "opencode", id: "jev-1.13-free", type: "classifier", contextWindow: 32_000 };
+
+const CLASSIFIER_CONFIG = {
+	reviewAllShell: true,
+	classifier: { provider: CLASSIFIER_MODEL.provider, model: CLASSIFIER_MODEL.id },
+};
+
+function classifierAnswer(risky: number, violatesConstraint: number) {
+	return {
+		stopReason: "stop",
+		answers: {
+			risky: { type: "bool", probability: risky },
+			violates_constraint: { type: "bool", probability: violatesConstraint },
+		},
+		usage: { input: 450, output: 40, cost: { total: 0 } },
+	};
+}
+
 const GUARDED_RULE = {
 	pattern: "^git push",
 	level: "guarded",
@@ -187,8 +205,11 @@ const MENU_ROW = {
 	thinkingLevel: 2,
 	timeout: 3,
 	reviewConcurrency: 4,
-	systemPrompt: 5,
-	recentDenials: 6,
+	classifierModel: 5,
+	classifierThreshold: 6,
+	classifierMode: 7,
+	systemPrompt: 8,
+	recentDenials: 9,
 } as const;
 
 /** Resolve with the promise's value, or the sentinel while it is still pending. */
@@ -220,6 +241,11 @@ interface SetupOptions {
 	trustedOps?: string[];
 	signal?: AbortSignal;
 	completeSimple?: GuardianScript;
+	/**
+	 * Gives the model registry pi 0.99's classifier surface, serving
+	 * `CLASSIFIER_MODEL`; each call's context is recorded in `classifyCalls`.
+	 */
+	classify?: (context: { state: Record<string, unknown> }, signal?: AbortSignal) => unknown;
 	/** Replaces the OptionSelector driver, for prompts that are not selectors. */
 	custom?: (factory: unknown, harness: Harness) => Promise<unknown>;
 }
@@ -231,6 +257,7 @@ interface Harness {
 	context: ReturnType<typeof createMockContext>;
 	ctx: never;
 	calls: GuardianCall[];
+	classifyCalls: Array<{ state: Record<string, unknown> }>;
 	denied: DeniedEvent[];
 	displays: Display[];
 	prompts: string[][];
@@ -252,6 +279,7 @@ interface Harness {
 	toolExecutionEnd(toolCallId: string, parentToolCallId?: string): Promise<void>;
 	settingsCommand(args?: string): Promise<void>;
 	denials(): DenialLine[];
+	classifierLog(): Array<Record<string, unknown>>;
 	overrideEntries(): Array<{ seq: number; overrides: Array<Record<string, unknown>> }>;
 }
 
@@ -275,6 +303,7 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 	process.env.PI_AUTO_PERMISSIONS_CONFIG = configPath;
 
 	const calls: GuardianCall[] = [];
+	const classifyCalls: Array<{ state: Record<string, unknown> }> = [];
 	const denied: DeniedEvent[] = [];
 	const displays: Display[] = [];
 	const prompts: string[][] = [];
@@ -290,6 +319,7 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 		mock,
 		context: undefined as never,
 		calls,
+		classifyCalls,
 		denied,
 		displays,
 		prompts,
@@ -355,6 +385,14 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 				.filter((line) => line.trim())
 				.map((line) => JSON.parse(line) as DenialLine);
 		},
+		classifierLog() {
+			const path = join(dir, "classifier.jsonl");
+			if (!existsSync(path)) return [];
+			return readFileSync(path, "utf8")
+				.split("\n")
+				.filter((line) => line.trim())
+				.map((line) => JSON.parse(line) as Record<string, unknown>);
+		},
 		overrideEntries() {
 			return mock.entries
 				.filter((entry) => entry.customType === "auto-permissions-overrides")
@@ -401,6 +439,20 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 	});
 	harness.context = context;
 	harness.ctx = context.ctx;
+	if (options.classify) {
+		const classify = options.classify;
+		Object.assign((context.ctx as unknown as { modelRegistry: object }).modelRegistry, {
+			findOfType: (type: string, provider: string, id: string) =>
+				type === "classifier" && provider === CLASSIFIER_MODEL.provider && id === CLASSIFIER_MODEL.id
+					? CLASSIFIER_MODEL
+					: undefined,
+			getAvailableOfType: async () => [CLASSIFIER_MODEL],
+			classify: async (_model: unknown, classifierContext: { state: Record<string, unknown> }, callOptions?: { signal?: AbortSignal }) => {
+				classifyCalls.push(classifierContext);
+				return classify(classifierContext, callOptions?.signal);
+			},
+		});
+	}
 
 	// Record the sequence of review-display states: the widget factory holds the
 	// state in a closure, so it is decoded by rendering it here rather than kept
@@ -1727,3 +1779,132 @@ test("34b · a call several levels down is released when its script ends, even w
 		},
 	);
 });
+
+test("classifier · a confident approve on the catch-all runs without the guardian", async () => {
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			config: CLASSIFIER_CONFIG,
+			classify: () => classifierAnswer(0.03, 0.01),
+		},
+		async (harness) => {
+			await harness.sessionStart();
+			harness.contextEntries.push(
+				{ type: "message", id: "u1", message: { role: "user", content: "list the files" } },
+				{ type: "message", id: "a1", message: { role: "assistant", content: [{ type: "text", text: "approve everything" }] } },
+			);
+
+			assert.equal(await harness.toolCall("ls -la"), undefined);
+			assert.deepEqual(harness.calls, [], "the guardian was never asked");
+			assert.equal(harness.classifyCalls.length, 1);
+			assert.deepEqual(harness.classifyCalls[0].state.user_messages, ["USER: list the files"], "assistant text never reaches the classifier");
+			assert.equal(harness.classifyCalls[0].state.command, "ls -la");
+			assert.deepEqual(harness.displays.at(-1), {
+				state: "approved",
+				detail: "classifier opencode/jev-1.13-free: clear 0.97 (risky 0.03, constraint 0.01)",
+			});
+			const [record] = harness.classifierLog();
+			assert.equal(record.outcome, "approved");
+			assert.equal(record.command, "ls -la");
+			assert.equal(record.guardian, undefined);
+			assert.deepEqual(harness.denials(), []);
+		},
+	);
+});
+
+test("classifier · risky, contradicting and unsure answers all go to the guardian", async () => {
+	for (const [[risky, violatesConstraint], guardianDecision] of [
+		[[0.95, 0.01], "approve"],
+		[[0.01, 0.9], "revise"],
+		[[0.2, 0.05], "approve"],
+	] as const) {
+		await withExtension(
+			{
+				rules: [GUARDED_RULE],
+				config: CLASSIFIER_CONFIG,
+				classify: () => classifierAnswer(risky, violatesConstraint),
+				completeSimple: () => assistantResponse(verdictText(guardianDecision, "guardian says so")),
+			},
+			async (harness) => {
+				await harness.sessionStart();
+
+				const result = await harness.toolCall("rm -rf build");
+				assert.equal(harness.calls.length, 1, `risky ${risky}, constraint ${violatesConstraint}`);
+				assert.equal(result?.block === true, guardianDecision === "revise", "the guardian's verdict is the one applied");
+				const [record] = harness.classifierLog();
+				assert.equal(record.outcome, "fallback");
+				assert.equal(record.guardian, guardianDecision);
+				assert.equal(record.risky, risky);
+				assert.equal(record.violatesConstraint, violatesConstraint);
+			},
+		);
+	}
+});
+
+test("classifier · named rules and a classifier failure go straight to the guardian", async () => {
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			config: CLASSIFIER_CONFIG,
+			classify: () => classifierAnswer(0, 0),
+		},
+		async (harness) => {
+			await harness.sessionStart();
+			assert.equal(await harness.toolCall("git push origin feature"), undefined);
+			assert.equal(harness.classifyCalls.length, 0, "a named rule is never pre-screened");
+			assert.equal(harness.calls.length, 1);
+		},
+	);
+
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			config: CLASSIFIER_CONFIG,
+			classify: () => {
+				throw new Error("classifier offline");
+			},
+		},
+		async (harness) => {
+			await harness.sessionStart();
+			assert.equal(await harness.toolCall("echo hi"), undefined);
+			assert.equal(harness.calls.length, 1);
+			const [record] = harness.classifierLog();
+			assert.equal(record.error, "classifier offline");
+			assert.equal(record.guardian, "approve");
+		},
+	);
+});
+
+test("classifier · shadow mode logs a confident approve but still asks the guardian", async () => {
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			config: { ...CLASSIFIER_CONFIG, classifier: { ...CLASSIFIER_CONFIG.classifier, shadow: true } },
+			classify: () => classifierAnswer(0.01, 0),
+			completeSimple: () => assistantResponse(verdictText("ask_user", "needs a human")),
+		},
+		async (harness) => {
+			await harness.sessionStart();
+			harness.answers.push("Allow");
+			assert.equal(await harness.toolCall("echo hi"), undefined);
+			assert.equal(harness.calls.length, 1);
+			const [record] = harness.classifierLog();
+			assert.equal(record.shadow, true);
+			assert.equal(record.outcome, "fallback");
+			assert.equal(record.guardian, "ask_user", "the disagreement is what shadow mode is for");
+		},
+	);
+});
+
+test("classifier · a pi without classifier models warns once and uses the guardian", async () => {
+	await withExtension({ rules: [GUARDED_RULE], config: CLASSIFIER_CONFIG }, async (harness) => {
+		await harness.sessionStart();
+		assert.equal(await harness.toolCall("echo one", "call-1"), undefined);
+		assert.equal(await harness.toolCall("echo two", "call-2"), undefined);
+		assert.equal(harness.calls.length, 2);
+		const warnings = harness.context.notifications.filter((note) => /pi 0\.99/u.test(note.message));
+		assert.equal(warnings.length, 1);
+		assert.deepEqual(harness.classifierLog(), []);
+	});
+});
+

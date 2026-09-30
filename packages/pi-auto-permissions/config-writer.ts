@@ -11,12 +11,19 @@
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { pid } from "node:process";
-import { DEFAULT_REVIEW_CONCURRENCY, type ReviewerConfig } from "./config.js";
+import {
+  DEFAULT_CLASSIFIER_APPROVE_THRESHOLD,
+  DEFAULT_REVIEW_CONCURRENCY,
+  type ClassifierConfig,
+  type ReviewerConfig,
+} from "./config.js";
 
 interface ConfigPatch {
   enabled?: boolean;
   reviewer?: ReviewerConfig;
   reviewConcurrency?: number;
+  /** `null` removes the block: the classifier is off. */
+  classifier?: ClassifierConfig | null;
 }
 
 const DEFAULT_INDENT = "  ";
@@ -86,6 +93,22 @@ export function patchAutoPermissionsConfig(path: string, patch: ConfigPatch): vo
       reasoningEffort: patch.reviewer.reasoningEffort,
       timeoutMs: patch.reviewer.timeoutMs,
     };
+  }
+
+  if (patch.classifier === null) {
+    delete merged.classifier;
+  } else if (patch.classifier !== undefined) {
+    // timeoutMs stays file-only; shadow and the threshold are sparse like reviewConcurrency.
+    const existingClassifier = merged.classifier && typeof merged.classifier === "object" && !Array.isArray(merged.classifier)
+      ? { ...merged.classifier as Record<string, unknown> }
+      : {};
+    existingClassifier.provider = patch.classifier.provider;
+    existingClassifier.model = patch.classifier.model;
+    if (patch.classifier.approveThreshold === DEFAULT_CLASSIFIER_APPROVE_THRESHOLD) delete existingClassifier.approveThreshold;
+    else existingClassifier.approveThreshold = patch.classifier.approveThreshold;
+    if (patch.classifier.shadow) existingClassifier.shadow = true;
+    else delete existingClassifier.shadow;
+    merged.classifier = existingClassifier;
   }
 
   const payload = `${JSON.stringify(merged, null, detectIndent(existing))}\n`;
