@@ -1,5 +1,11 @@
 # @hank-warren/pi-cliproxyapi-provider
 
+## 0.2.1
+
+### Patch Changes
+
+- Typecheck against pi 0.99, whose `ProviderModelConfig` is a chat | image | classifier union: `compat` and `api` are now taken from the chat member. Types only; runtime behavior is unchanged, and pi 0.84-0.87 still typecheck.
+
 ## 0.2.0
 
 ### Minor Changes
