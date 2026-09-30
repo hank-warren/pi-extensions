@@ -120,6 +120,10 @@ const EXPECTED_SURFACES = {
 	"./packages/pi-thinking-step/index.ts": {
 		shortcuts: ["alt+=", "alt+-"],
 	},
+	"./packages/pi-auto-name/index.ts": {
+		commands: ["rename"],
+		handlers: ["agent_settled", "session_shutdown", "session_start"],
+	},
 };
 
 const CATEGORIES = ["tools", "commands", "handlers", "flags", "shortcuts"];
