@@ -1,12 +1,18 @@
 import type { RefreshModelsContext } from "@earendil-works/pi-ai";
-import type { ProviderConfig, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import type { ProviderConfig } from "@earendil-works/pi-coding-agent";
 import { isClaudeModel } from "./model-api.ts";
 import type { CpaProviderConfig } from "./types.ts";
 import type { ProviderModelConfigLike } from "./types.ts";
 
+// Narrowed to the chat-model shape this package builds; still assignable to ProviderConfig.
+export type CpaProviderConfigInput = Omit<ProviderConfig, "models" | "refreshModels"> & {
+  models: ProviderModelConfigLike[];
+  refreshModels?: (context: RefreshModelsContext) => Promise<ProviderModelConfigLike[]>;
+};
+
 export interface ProviderRegistration {
   providerName: string;
-  config: ProviderConfig;
+  config: CpaProviderConfigInput;
 }
 
 /**
@@ -25,7 +31,7 @@ export function anthropicBaseUrl(providerBaseUrl: string): string {
 export function normalizeProviderModels(
   models: ProviderModelConfigLike[],
   providerBaseUrl?: string,
-): ProviderModelConfig[] {
+): ProviderModelConfigLike[] {
   return models.map((model) => ({
     ...model,
     // CLIProxyAPI accepts OpenAI-compatible function tools for both Chat
@@ -47,13 +53,13 @@ export function normalizeProviderModels(
     ...(providerBaseUrl && isClaudeModel({ availableModelId: model.id })
       ? { baseUrl: anthropicBaseUrl(providerBaseUrl) }
       : {}),
-  })) as ProviderModelConfig[];
+  })) as ProviderModelConfigLike[];
 }
 
 export function buildProviderRegistration(
   config: CpaProviderConfig,
   models: ProviderModelConfigLike[],
-  refreshModels?: (context: RefreshModelsContext) => Promise<ProviderModelConfig[]>,
+  refreshModels?: (context: RefreshModelsContext) => Promise<ProviderModelConfigLike[]>,
 ): ProviderRegistration {
   return {
     providerName: config.providerName,

@@ -1,10 +1,10 @@
 import type { RefreshModelsContext } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getDiscoveryApiKey } from "./auth.ts";
 import { ProviderCatalog, type CatalogRefreshResult, type CatalogSnapshot, type RefreshTarget } from "./catalog.ts";
 import { buildUnavailableProviderModels } from "./provider.ts";
 import { buildProviderRegistration, normalizeProviderModels } from "./registration.ts";
-import type { CpaProviderConfig } from "./types.ts";
+import type { CpaProviderConfig, ProviderModelConfigLike } from "./types.ts";
 
 export interface ProviderRuntimeOptions {
   pi: ExtensionAPI;
@@ -36,7 +36,7 @@ export class ProviderRuntime {
     return result;
   }
 
-  async refreshModels(context: RefreshModelsContext): Promise<ProviderModelConfig[]> {
+  async refreshModels(context: RefreshModelsContext): Promise<ProviderModelConfigLike[]> {
     if (!context.allowNetwork) {
       // Pi issues several offline refreshes during startup (one per provider
       // registration, one after services are created). The snapshot built at
