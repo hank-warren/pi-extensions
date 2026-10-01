@@ -1,5 +1,11 @@
 # @hank-warren/pi-cliproxyapi-provider
 
+## 0.2.2
+
+### Patch Changes
+
+- Typecheck against pi 0.99 and 1.0: the model list is kept as the package's own chat-model type throughout and widens to pi's chat | image | classifier union only at `registerProvider`, so `model-ui.ts` compiles again. Types only; runtime behavior is unchanged, and pi 0.84 still typechecks.
+
 ## 0.2.1
 
 ### Patch Changes
