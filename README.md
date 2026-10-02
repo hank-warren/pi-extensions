@@ -24,6 +24,7 @@ Each package under [`packages/`](packages/) is a self-contained Pi package publi
 | [`@hank-warren/pi-codex-compaction`](packages/pi-codex-compaction) | Native encrypted Codex compaction through direct Codex or CLIProxyAPI, integrated with Pi's compaction lifecycle; forked from [`@ogulcancelik/pi-codex-compaction`](https://github.com/ogulcancelik/pi-extensions/tree/main/packages/pi-codex-compaction) |
 | [`@hank-warren/pi-thinking-step`](packages/pi-thinking-step) | Step the thinking level up or down one notch with `Alt+=` / `Alt+-`, skipping levels the model does not support and stopping at its limits instead of wrapping |
 | [`@hank-warren/pi-auto-name`](packages/pi-auto-name) | Names each session after its work (3-5 words) once the first turn settles, using the session's own model; `/rename` regenerates it. Nothing enters the session's context |
+| [`@hank-warren/pi-agents`](packages/pi-agents) | Claude Code-style subagents: each agent is its own `pi --mode rpc` process with your extensions and AGENTS.md, configured by `agents/*.md` files. Live panel below the editor (↓ to manage), steering, context and turn budgets, git worktrees, and structured results for codemode fan-out |
 
 ## Install
 
