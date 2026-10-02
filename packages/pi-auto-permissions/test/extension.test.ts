@@ -215,6 +215,10 @@ interface SetupOptions {
 	/** Merged over the base config object before it is written. */
 	config?: Record<string, unknown>;
 	hasUI?: boolean;
+	/** Defaults to "tui". */
+	mode?: "tui" | "rpc";
+	/** `ctx.ui.select`, used for prompts in RPC mode. */
+	select?: (title: string, options: string[]) => Promise<string | undefined>;
 	projectTrusted?: boolean;
 	/** Lines written to `<cwd>/.pi/trusted-ops`. */
 	trustedOps?: string[];
@@ -364,8 +368,9 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 
 	const context = createMockContext({
 		cwd,
-		mode: "tui",
+		mode: options.mode ?? "tui",
 		hasUI: options.hasUI ?? true,
+		...(options.select ? { select: options.select } : {}),
 		models: [GUARDIAN_MODEL],
 		providers: { [GUARDIAN_MODEL.provider]: { id: GUARDIAN_MODEL.provider } },
 		isProjectTrusted: () => options.projectTrusted === true,
@@ -1726,4 +1731,183 @@ test("34b · a call several levels down is released when its script ends, even w
 			assert.deepEqual(await settledWithin(deep, 250), { block: true, reason: "Auto Permissions review cancelled" });
 		},
 	);
+});
+
+async function asSubagentChild(run: () => Promise<void>): Promise<void> {
+	process.env.PI_SUBAGENT_CHILD = "1";
+	try {
+		await run();
+	} finally {
+		delete process.env.PI_SUBAGENT_CHILD;
+	}
+}
+
+test("35 · a subagent with a UI is told to revise first; the same command again goes to the human", async () => {
+	await asSubagentChild(() =>
+		withExtension(
+			{
+				rules: [GUARDED_RULE],
+				completeSimple: () => assistantResponse(verdictText("ask_user", "force push rewrites history")),
+			},
+			async (harness) => {
+				await harness.sessionStart();
+
+				const first = await harness.toolCall("git push --force origin main", "call-1");
+				assert.ok(first?.block);
+				assert.match(first.reason, /^Git push needs human approval: force push rewrites history/u);
+				assert.match(first.reason, /You are a subagent/u);
+				assert.match(first.reason, /run it again unchanged and the request goes to the human/u);
+				assert.equal(harness.customCalls, 0, "the first ask does not interrupt the human");
+				assert.equal(harness.denied[0].verdict, "revise");
+				assert.equal(harness.denied[0].decisionSource, "guardian");
+
+				const different = await harness.toolCall("git push --force origin release", "call-2");
+				assert.ok(different?.block);
+				assert.match(different.reason, /You are a subagent/u);
+				assert.equal(harness.customCalls, 0, "a different command gets its own revise-first turn");
+
+				await harness.turnEnd();
+				harness.answers.push("Allow");
+				assert.equal(await harness.toolCall("git push --force origin main", "call-3"), undefined);
+				assert.equal(harness.customCalls, 1, "repeating the command unchanged in a later turn escalates to the human");
+			},
+		));
+});
+
+test("36 · revise-first applies only to subagent sessions with a UI", async () => {
+	await asSubagentChild(() =>
+		withExtension(
+			{
+				rules: [GUARDED_RULE],
+				hasUI: false,
+				completeSimple: () => assistantResponse(verdictText("ask_user", "force push rewrites history")),
+			},
+			async (harness) => {
+				await harness.sessionStart();
+				const result = await harness.toolCall("git push --force origin main");
+				assert.ok(result?.block);
+				assert.match(result.reason, /This session has no interactive user to ask\./u);
+			},
+		));
+
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			completeSimple: () => assistantResponse(verdictText("ask_user", "force push rewrites history")),
+		},
+		async (harness) => {
+			await harness.sessionStart();
+			harness.answers.push("Block");
+			await harness.toolCall("git push --force origin main");
+			assert.equal(harness.customCalls, 1, "an ordinary session still asks at once");
+		},
+	);
+});
+
+test("37 · a subagent session gets the permission guidance in its system prompt; an ordinary session does not", async () => {
+	const promptFor = async (harness: Harness) => {
+		const handler = harness.mock.events.get("before_agent_start")?.[0] as EventHandler | undefined;
+		assert.ok(handler, "the extension registers before_agent_start");
+		return (await handler({ type: "before_agent_start", prompt: "task", systemPrompt: "BASE" }, harness.ctx)) as
+			| { systemPrompt?: string }
+			| undefined;
+	};
+	await asSubagentChild(() =>
+		withExtension({ rules: [GUARDED_RULE] }, async (harness) => {
+			await harness.sessionStart();
+			const result = await promptFor(harness);
+			assert.ok(result?.systemPrompt?.startsWith("BASE\n\n## Auto Permissions (subagent)"));
+		}));
+	await withExtension({ rules: [GUARDED_RULE] }, async (harness) => {
+		await harness.sessionStart();
+		assert.equal(await promptFor(harness), undefined);
+	});
+});
+
+test("38 · in RPC mode the approval prompt goes through ui.select, so a subagent's parent can render it", async () => {
+	const titles: string[] = [];
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			mode: "rpc",
+			select: async (title, options) => {
+				titles.push(title);
+				return options.find((option) => option.startsWith("Allow"));
+			},
+			completeSimple: () => assistantResponse(verdictText("ask_user", "force push rewrites history")),
+		},
+		async (harness) => {
+			await harness.sessionStart();
+			assert.equal(await harness.toolCall("git push --force origin main"), undefined);
+			assert.equal(harness.customCalls, 0, "custom() renders nothing over RPC");
+			assert.equal(titles.length, 1);
+			assert.match(titles[0]!, /Git push — Auto Permissions needs approval/u);
+		},
+	);
+});
+
+test("39 · same-turn duplicates of a refused command stay refused; only a later turn reaches the human", async () => {
+	await asSubagentChild(() =>
+		withExtension(
+			{
+				rules: [GUARDED_RULE],
+				completeSimple: () => assistantResponse(verdictText("ask_user", "force push rewrites history")),
+			},
+			async (harness) => {
+				await harness.sessionStart();
+
+				// Two identical sibling calls in one assistant message.
+				await harness.assistantMessage([
+					{ id: "call-1", command: "git push --force origin main" },
+					{ id: "call-2", command: "git push --force origin main" },
+				]);
+				for (const id of ["call-1", "call-2"]) {
+					const result = await harness.toolCall("git push --force origin main", id);
+					assert.match(result?.reason ?? "", /You are a subagent/u, `${id} is refused, not escalated`);
+				}
+
+				// Identical calls from one codemode script, issued together.
+				await harness.toolExecutionStart("script-1");
+				const fromScript = await Promise.all([
+					harness.toolCall("git push --force origin main", "script-1/1", "script-1"),
+					harness.toolCall("git push --force origin main", "script-1/2", "script-1"),
+				]);
+				for (const result of fromScript) assert.match(result?.reason ?? "", /You are a subagent/u);
+				assert.equal(harness.customCalls, 0, "nothing reached the human within the turn");
+				await harness.toolExecutionEnd("script-1");
+
+				await harness.turnEnd();
+				harness.answers.push("Block");
+				await harness.toolCall("git push --force origin main", "call-3");
+				assert.equal(harness.customCalls, 1, "the next turn's unchanged retry asks the human");
+			},
+		));
+});
+
+test("40 · in a subagent, a failed review is revise-first too, with review_failure attribution", async () => {
+	await asSubagentChild(() =>
+		withExtension(
+			{
+				rules: [GUARDED_RULE],
+				completeSimple: () => {
+					throw new Error("reviewer offline");
+				},
+			},
+			async (harness) => {
+				await harness.sessionStart();
+
+				const first = await harness.toolCall("git push origin main", "call-1");
+				assert.match(first?.reason ?? "", /^Git push needs human approval: Automatic review failed: reviewer offline/u);
+				assert.match(first?.reason ?? "", /You are a subagent/u);
+				assert.equal(harness.customCalls, 0, "a reviewer outage does not interrupt the human on the first try");
+				assert.equal(harness.denied[0]?.decisionSource, "review_failure");
+				assert.equal(harness.denied[0]?.verdict, "revise");
+
+				await harness.turnEnd();
+				harness.answers.push("Block");
+				assert.deepEqual(await harness.toolCall("git push origin main", "call-2"), { block: true, reason: "Blocked by user" });
+				assert.equal(harness.customCalls, 1, "the unchanged retry in a later turn asks the human");
+				assert.match(harness.prompts[0]!.join("\n"), /Automatic review failed: reviewer offline/u);
+			},
+		));
 });

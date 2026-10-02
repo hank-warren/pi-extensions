@@ -26,6 +26,7 @@ import { createSessionOverrides } from "./session-overrides.js";
 import { createGuardianReviewer } from "./guardian-reviewer.js";
 import { registerSettingsCommand } from "./settings-command.js";
 import type { BlockResult, ReviewScope, ReviewTarget } from "./review-scope.js";
+import { detectSubagentContext } from "./subagent-context.js";
 import type { ReviewDisplayState } from "./widget-status.js";
 
 /**
@@ -68,6 +69,19 @@ function loadTrustedGroups(cwd: string): Set<string> {
 
 function denyReason(gate: Gate): string {
   return `Blocked by policy: ${gate.label}\n\n${gate.message ?? "This operation is denied by rule."}\n\nThis is a deny rule: it cannot be overridden by trusted groups or user approval. Choose a different approach.`;
+}
+
+/**
+ * Appended to a subagent child's system prompt. A child that does have a UI
+ * (an RPC child whose prompts surface in the parent) still costs the human an
+ * interruption per prompt, so it is told to revise before it escalates.
+ */
+export const SUBAGENT_PERMISSIONS_PROMPT = `## Auto Permissions (subagent)
+You are running as a subagent. Bash commands that Auto Permissions cannot approve on its own need a human, and asking one pauses the supervising session until they answer. Prefer commands that stay inside your task and working directory, and read-only alternatives where they answer the question. When Auto Permissions asks you to revise a command, change the approach instead of retrying it; re-run a command unchanged only when it is genuinely required and a human should decide.`;
+
+/** What a subagent is told the first time a command would need human approval. */
+export function subagentReviseFirstReason(gateLabel: string, reason: string): string {
+  return `${gateLabel} needs human approval: ${reason}\nYou are a subagent: asking the human pauses the supervising session until they answer. Revise first: get the same result with a command that stays inside your task and working directory (read-only, a narrower target, local instead of remote). If this exact command is genuinely required, run it again unchanged and the request goes to the human.`;
 }
 
 function reviewCancelledResult(): BlockResult {
@@ -169,6 +183,14 @@ function assistantToolCalls(message: unknown): AssistantToolCall[] {
 export default function autoPermissionsExtension(pi: ExtensionAPI) {
   const overrides = createSessionOverrides(pi);
   let trustedGroups = new Set<string>();
+  // Set per session: a subagent child (PI_SUBAGENT_CHILD=1) revises before it
+  // asks. `reviseFirst` maps each command it was told to revise to the turn
+  // it was told in; issuing it again unchanged in a *later* turn escalates it
+  // to the human. Same-turn duplicates (sibling calls, codemode Promise.all)
+  // are refused too, since the model has not yet seen the first refusal.
+  let subagentSession = false;
+  let turnGeneration = 0;
+  const reviseFirst = new Map<string, number>();
   let lastConfigError: string | undefined;
   let lastEvaluationLogError: string | undefined;
   // Guardian calls run in parallel up to config.reviewConcurrency; applying
@@ -520,6 +542,27 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     }
   }
 
+  /**
+   * In a subagent with a UI, the first time a command would go to the human it
+   * is refused with a revise-first reason instead. Same-turn duplicates are
+   * refused too; an unchanged retry in a later turn returns undefined, and the
+   * caller asks the human.
+   */
+  function reviseFirstBlock(scope: ReviewScope, reason: string, source: "guardian" | "review_failure"): BlockResult | undefined {
+    if (!subagentSession || !scope.ctx.hasUI) return undefined;
+    const key = `${scope.gate.label}\0${scope.command}`;
+    const refusedIn = reviseFirst.get(key);
+    if (refusedIn !== undefined && refusedIn !== turnGeneration) return undefined;
+    if (refusedIn === undefined) reviseFirst.set(key, turnGeneration);
+    return settle(scope, {
+      display: "revise",
+      verdict: "revise",
+      source,
+      reason,
+      block: subagentReviseFirstReason(scope.gate.label, reason),
+    });
+  }
+
   /** Apply one settled review. Runs holding the decision slot. */
   function applyReview(
     scope: ReviewScope,
@@ -527,7 +570,8 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     lifecycleSignal: AbortSignal,
   ): Promise<BlockResult | undefined> | BlockResult | undefined {
     if (outcome.kind === "failed") {
-      return askUser(scope, `Automatic review failed: ${outcome.reason}`, lifecycleSignal, "review_failure");
+      const reason = `Automatic review failed: ${outcome.reason}`;
+      return reviseFirstBlock(scope, reason, "review_failure") ?? askUser(scope, reason, lifecycleSignal, "review_failure");
     }
     const { verdict } = outcome;
     if (verdict.decision === "approve") {
@@ -542,7 +586,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
         block: `Auto Permissions requested revision: ${verdict.reason}\nRevise the command and try again.`,
       });
     }
-    return askUser(scope, verdict.reason, lifecycleSignal, "guardian");
+    return reviseFirstBlock(scope, verdict.reason, "guardian") ?? askUser(scope, verdict.reason, lifecycleSignal, "guardian");
   }
 
   /**
@@ -677,6 +721,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   });
 
   pi.on("turn_end", () => {
+    turnGeneration += 1;
     lastAssistantCalls = [];
     abandonSiblingReviews();
     endScripts();
@@ -755,6 +800,16 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     return decide(scope, input, lifecycleSignal, early ?? runReview(scope, input, lifecycleSignal));
   });
 
+  pi.on("before_agent_start", (event) => {
+    if (!subagentSession) return;
+    try {
+      if (!loadAutoPermissionsConfig().enabled) return;
+    } catch {
+      // An invalid config fails closed on the first bash call; the guidance still applies.
+    }
+    return { systemPrompt: `${event.systemPrompt}\n\n${SUBAGENT_PERMISSIONS_PROMPT}` };
+  });
+
   registerSettingsCommand(pi, { overrides, reviewer });
 
   function resetCallTracking(): void {
@@ -782,6 +837,8 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     if (config) warnAboutMissingReviewerProvider(ctx, config);
 
     resetCallTracking();
+    subagentSession = detectSubagentContext(ctx.cwd) !== undefined;
+    reviseFirst.clear();
     reviewer.startSession(ctx.cwd);
     overrides.restore(ctx.sessionManager.getBranch());
     trustedGroups = ctx.isProjectTrusted() ? loadTrustedGroups(ctx.cwd) : new Set();
