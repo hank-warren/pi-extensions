@@ -53,6 +53,8 @@ export class AgentViewer implements Component, Focusable {
 		private readonly run: AgentRun,
 		private readonly manager: AgentManager,
 		private readonly done: () => void,
+		/** Steer or follow up; the host decides whether the result is reported to the parent. */
+		private readonly send: (text: string) => Promise<"steered" | "queued" | "started">,
 	) {
 		this.unsubscribe = manager.subscribe(() => {
 			this.cache = undefined;
@@ -75,7 +77,7 @@ export class AgentViewer implements Component, Focusable {
 		if (!text) return;
 		this.input.setValue("");
 		this.scroll = 0;
-		this.manager.message(this.run, text).then(
+		this.send(text).then(
 			(outcome) => {
 				this.status = outcome === "steered" ? "steered" : outcome === "queued" ? "added to queued task" : "resumed";
 				this.tui.requestRender();

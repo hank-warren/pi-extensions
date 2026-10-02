@@ -52,6 +52,12 @@ export class RpcProcess {
 	private nextId = 0;
 	private stderrTail = "";
 	exited = false;
+	/** Set as soon as stop() begins: stdin is closed, so the process can take no more prompts. */
+	stopping = false;
+	private resolveExited: () => void = () => {};
+	private readonly exitedPromise = new Promise<void>((resolve) => {
+		this.resolveExited = resolve;
+	});
 	onEvent: (event: Record<string, unknown>) => void = () => {};
 	onUiRequest: (request: UiRequest) => void = () => {};
 	onExit: (code: number | null, signal: NodeJS.Signals | null) => void = () => {};
@@ -90,6 +96,7 @@ export class RpcProcess {
 	private finish(code: number | null, signal: NodeJS.Signals | null): void {
 		if (this.exited) return;
 		this.exited = true;
+		this.resolveExited();
 		const reason = new Error(`agent process exited (${signal ?? code})${this.stderrTail ? `: ${this.stderrTail.trim().split("\n").slice(-3).join(" | ")}` : ""}`);
 		for (const pending of this.pending.values()) pending.reject(reason);
 		this.pending.clear();
@@ -137,9 +144,15 @@ export class RpcProcess {
 	}
 
 	/** Abort any run, close stdin for an orderly exit, then escalate to signals. */
+	/** Resolves once the process has exited (immediately if it never started or already exited). */
+	whenExited(): Promise<void> {
+		return this.child && !this.exited ? this.exitedPromise : Promise.resolve();
+	}
+
 	async stop(graceMs = 2000): Promise<void> {
 		if (this.exited || !this.child) return;
-		const exited = new Promise<void>((resolve) => this.child!.once("exit", () => resolve()));
+		this.stopping = true;
+		const exited = this.exitedPromise;
 		this.send({ type: "abort" });
 		this.child.stdin?.end();
 		const timer = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms).unref());

@@ -8,7 +8,7 @@ import { type AgentsConfig, DEFAULT_CONFIG, loadConfig } from "./config.js";
 import { AgentManager, type AgentRun, type RunSnapshot } from "./manager.js";
 import { AgentPanel } from "./panel.js";
 import { type AgentDetails, detailsOf, statsLine, statusIcon, statusWord } from "./render.js";
-import { registerTools, resultText, type ToolHost } from "./tools.js";
+import { registerTools, resultText, sendToAgent, type ToolHost } from "./tools.js";
 import { loadTranscript } from "./transcript.js";
 import { AgentViewer, VIEWER_HEIGHT_PCT } from "./viewer.js";
 
@@ -89,7 +89,8 @@ export default function piAgents(pi: ExtensionAPI): void {
 		if (!ui || ctx?.mode !== "tui") return;
 		if (!run.items.length && run.sessionFile) run.items = loadTranscript(run.sessionFile);
 		await ui.custom<void>(
-			(tui, theme, _keybindings, done) => new AgentViewer(tui, theme, run, manager, () => done()),
+			(tui, theme, _keybindings, done) =>
+				new AgentViewer(tui, theme, run, manager, () => done(), (text) => sendToAgent({ manager, notify }, run, text)),
 			{ overlay: true, overlayOptions: { anchor: "center", width: "92%", maxHeight: `${VIEWER_HEIGHT_PCT}%` } },
 		);
 	};

@@ -92,6 +92,24 @@ export function resultText(run: AgentRun): string {
 	return `${body.text}\n\n[${notes.join("\n ")}]`;
 }
 
+/**
+ * Message an agent the way SendMessage does. A finished agent resumed this way
+ * reports back to the parent when it finishes, unless the caller is waiting
+ * for the result itself. Used by SendMessage and the transcript viewer.
+ */
+export function sendToAgent(
+	host: Pick<ToolHost, "manager" | "notify">,
+	run: AgentRun,
+	text: string,
+	wait = false,
+): Promise<"steered" | "queued" | "started"> {
+	if (run.status !== "running") {
+		if (wait) host.notify.delete(run.id);
+		else host.notify.add(run.id);
+	}
+	return host.manager.message(run, text);
+}
+
 export function resolveModel(ctx: Pick<ExtensionContext, "model" | "modelRegistry">, requested: string | undefined): string {
 	if (!requested) {
 		if (!ctx.model) throw new Error("No model selected in this session; pass model as provider/id");
@@ -278,11 +296,7 @@ export function registerTools(pi: ExtensionAPI, host: ToolHost): void {
 				const known = host.manager.list().map((item) => `${item.name} (${item.id})`).join(", ");
 				throw new Error(`No agent "${params.to}".${known ? ` Agents: ${known}` : ""}`);
 			}
-			if (run.status !== "running") {
-				if (params.wait) host.notify.delete(run.id);
-				else host.notify.add(run.id);
-			}
-			const outcome = await host.manager.message(run, params.message);
+			const outcome = await sendToAgent(host, run, params.message, params.wait);
 			if (params.wait) {
 				await waitStoppingOnAbort(host.manager, run, signal);
 				if (run.status === "failed") throw new Error(resultText(run));

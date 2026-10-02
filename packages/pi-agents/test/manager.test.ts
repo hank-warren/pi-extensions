@@ -14,9 +14,13 @@ import { ensureWorktree } from "../src/worktree.js";
 const FAKE_PI = join(import.meta.dirname, "support", "fake-pi.mjs");
 const general = BUILTIN_AGENTS.find((agent) => agent.name === "general-purpose")!;
 
-function managerWith(options: { maxConcurrent?: number; select?: (title: string, options: string[]) => Promise<string | undefined> } = {}) {
+function managerWith(options: {
+	maxConcurrent?: number;
+	select?: (title: string, options: string[]) => Promise<string | undefined>;
+	editor?: () => Promise<string | undefined>;
+} = {}) {
 	const finished: AgentRun[] = [];
-	const context = createMockContext({ mode: "tui", hasUI: true, select: options.select });
+	const context = createMockContext({ mode: "tui", hasUI: true, select: options.select, editor: options.editor });
 	const manager = new AgentManager({
 		config: () => ({ ...DEFAULT_CONFIG, maxConcurrent: options.maxConcurrent ?? 4, idleTtlSeconds: 60 }),
 		ctx: () => context.ctx,
@@ -97,6 +101,60 @@ test("a child's dialog surfaces in the parent labeled with the agent, and the an
 		assert.deepEqual(titles, ["[pusher] Allow git push?"]);
 		assert.equal(run.result, "dialog: Block");
 		assert.equal(run.approval, undefined);
+	} finally {
+		await manager.dispose();
+	}
+});
+
+test("an editor dialog from a child is declined without opening an uncancellable editor in the parent", async () => {
+	let opened = 0;
+	const { manager, create } = managerWith({
+		editor: async () => {
+			opened += 1;
+			return "edited";
+		},
+	});
+	try {
+		const run = create("editor");
+		manager.start(run, "EDIT");
+		await manager.waitFor(run);
+		assert.equal(opened, 0);
+		assert.equal(run.result, "dialog: cancelled");
+		assert.ok(run.items.some((item) => item.kind === "notice" && /declined an editor dialog \(Edit plan\)/.test(item.text)));
+	} finally {
+		await manager.dispose();
+	}
+});
+
+test("a follow-up sent while the old process is still shutting down starts a fresh one", async () => {
+	const { manager, create } = managerWith();
+	try {
+		// Stopped mid-run, then resumed before the stop finished.
+		const stopped = create("stopped");
+		manager.start(stopped, "SLOW");
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		const firstPid = stopped.proc!.pid;
+		const stopping = manager.stop(stopped);
+		assert.equal(stopped.status, "stopped");
+		assert.equal(stopped.alive, false, "a stopping process takes no prompts");
+		assert.equal(await manager.message(stopped, "resume"), "started");
+		await stopping;
+		await manager.waitFor(stopped);
+		assert.equal(stopped.status, "done", "the old process's exit does not fail the new run");
+		assert.equal(stopped.result, "echo: resume");
+		assert.notEqual(stopped.proc!.pid, firstPid);
+
+		// Idle TTL firing just before a follow-up.
+		const idle = create("idle");
+		manager.start(idle, "hello");
+		await manager.waitFor(idle);
+		const idlePid = idle.proc!.pid;
+		void idle.proc!.stop();
+		assert.equal(await manager.message(idle, "again"), "started");
+		await manager.waitFor(idle);
+		assert.equal(idle.status, "done");
+		assert.equal(idle.result, "echo: again");
+		assert.notEqual(idle.proc!.pid, idlePid);
 	} finally {
 		await manager.dispose();
 	}
@@ -199,6 +257,16 @@ test("the Agent tool rejects unknown types and models, and announces a backgroun
 		assert.deepEqual(sent.options, { triggerTurn: true, deliverAs: "followUp" });
 		const runs = mock.entries.filter((entry) => entry.customType === "pi-agents-run");
 		assert.equal(runs.length, 2, "both runs are persisted for resume");
+
+		// A follow-up to the finished agent reports back again (the viewer uses the same path).
+		const send = mock.tools.filter((tool) => tool.name === "SendMessage").at(-1) as unknown as {
+			execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }> }>;
+		};
+		const resumed = await send.execute("call-2", { to: "bg", message: "more" }, undefined, undefined, context.ctx);
+		assert.match(resumed.content[0]!.text, /bg resumed in the background/);
+		for (let i = 0; i < 100 && mock.sentMessages.length < 2; i++) await new Promise((resolve) => setTimeout(resolve, 20));
+		const second = mock.sentMessages[1] as { message: { content: string } } | undefined;
+		assert.match(second?.message.content ?? "", /echo: more/);
 	} finally {
 		await mock.events.get("session_shutdown")![0]!({}, context.ctx);
 		delete process.env.PI_AGENTS_CONFIG;
@@ -235,4 +303,12 @@ test("a worktree is created from origin's default branch beside the repo, then r
 	assert.equal(custom.path, join(root, "elsewhere", "fix-y"));
 	await assert.rejects(ensureWorktree(exec, { repo: "plain", branch: "a" }, { cwd: root }), /not a git repository/);
 	await assert.rejects(ensureWorktree(exec, { repo: "repo", branch: "bad..name" }, { cwd: root }), /invalid branch name/);
+	await assert.rejects(ensureWorktree(exec, { repo: "repo", branch: "-x" }, { cwd: root }), /invalid branch name/);
+	const marker = join(root, "pwned");
+	await assert.rejects(
+		ensureWorktree(exec, { repo: "repo", branch: "feat/z", base: `--upload-pack=touch ${marker}` }, { cwd: root }),
+		/invalid base branch/,
+	);
+	await assert.rejects(ensureWorktree(exec, { repo: "repo", branch: "feat/z", base: "main:refs/heads/main" }, { cwd: root }), /invalid base branch/);
+	assert.equal(existsSync(marker), false, "an option-shaped base never reaches git fetch");
 });

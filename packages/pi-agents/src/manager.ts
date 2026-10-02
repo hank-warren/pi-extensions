@@ -95,7 +95,8 @@ export class AgentRun {
 	get type(): string { return this.spec.definition.name; }
 	get description(): string { return this.spec.description; }
 	get busy(): boolean { return this.status === "queued" || this.status === "running"; }
-	get alive(): boolean { return Boolean(this.proc && !this.proc.exited); }
+	/** A process that can take a prompt: started, not exited, and not being shut down. */
+	get alive(): boolean { return Boolean(this.proc && !this.proc.exited && !this.proc.stopping); }
 
 	push(item: TranscriptItem): void {
 		this.items.push(item);
@@ -325,6 +326,14 @@ export class AgentManager {
 		run.lastErrorMessage = undefined;
 		this.changed();
 		try {
+			const previous = run.proc;
+			if (previous && !run.alive) {
+				// A process still shutting down (stopped, or idle TTL) has closed
+				// stdin: detach it so its exit no longer belongs to this run, and let
+				// it finish writing the session file before a new one resumes it.
+				run.proc = undefined;
+				await previous.whenExited();
+			}
 			const proc = run.alive ? run.proc! : this.spawn(run);
 			if (!run.sessionFile) {
 				proc.request<{ sessionFile?: string }>({ type: "get_state" })
@@ -533,8 +542,14 @@ export class AgentManager {
 			case "select":
 			case "confirm":
 			case "input":
-			case "editor":
 				this.forwardDialog(run, proc, request);
+				return;
+			case "editor":
+				// ctx.ui.editor() cannot be cancelled, so a forwarded one would outlive
+				// a stopped child and block every other agent's dialogs. Decline it.
+				proc.respondUi(request.id, { cancelled: true });
+				run.push({ kind: "notice", text: `declined an editor dialog (${request.title ?? "untitled"}): subagents cannot open editors in the parent` });
+				this.changed();
 				return;
 			case "setStatus":
 				if (request.statusKey === BUDGET_STATUS_KEY) {
@@ -573,11 +588,8 @@ export class AgentManager {
 					proc.respondUi(request.id, value === undefined ? { cancelled: true } : { value });
 				} else if (request.method === "confirm") {
 					proc.respondUi(request.id, { confirmed: await ctx.ui.confirm(title, request.message ?? "", options) });
-				} else if (request.method === "input") {
-					const value = await ctx.ui.input(title, request.placeholder, options);
-					proc.respondUi(request.id, value === undefined ? { cancelled: true } : { value });
 				} else {
-					const value = await ctx.ui.editor(title, request.prefill);
+					const value = await ctx.ui.input(title, request.placeholder, options);
 					proc.respondUi(request.id, value === undefined ? { cancelled: true } : { value });
 				}
 			} catch {

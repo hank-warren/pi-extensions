@@ -1,6 +1,7 @@
 // A stand-in for `pi --mode rpc`: speaks just enough of the protocol for the
 // manager tests. Prompt text drives behavior:
 //   "ASK ..."  - forwards a select dialog and answers with the choice
+//   "EDIT ..." - forwards an editor dialog and answers with the result
 //   "SLOW ..." - keeps running until a steer arrives, then answers with it
 //   "FAIL ..." - ends with a provider error
 //   "EXIT ..." - exits mid-run
@@ -26,6 +27,11 @@ function run(message) {
 	if (message.startsWith("ASK")) {
 		pendingDialog = "d1";
 		out({ type: "extension_ui_request", id: "d1", method: "select", title: "Allow git push?", options: ["Allow", "Block"] });
+		return;
+	}
+	if (message.startsWith("EDIT")) {
+		pendingDialog = "d2";
+		out({ type: "extension_ui_request", id: "d2", method: "editor", title: "Edit plan", prefill: "x" });
 		return;
 	}
 	if (message.startsWith("SLOW")) {

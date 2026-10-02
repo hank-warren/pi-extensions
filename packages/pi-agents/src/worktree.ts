@@ -60,9 +60,13 @@ export async function ensureWorktree(
 	if (top.code !== 0 || !top.stdout) throw new Error(`worktree.repo is not a git repository: ${repoPath}`);
 	const repoRoot = top.stdout;
 
+	// Both names reach git argv: a leading "-" would be read as an option
+	// (`--upload-pack=<cmd>` runs a command), and check-ref-format rejects
+	// refspec syntax such as ":".
+	const validBranch = async (name: string) =>
+		Boolean(name) && !name.startsWith("-") && (await git(["check-ref-format", "--branch", name], repoRoot)).code === 0;
 	const branch = request.branch.trim();
-	const checked = await git(["check-ref-format", "--branch", branch], repoRoot);
-	if (!branch || checked.code !== 0) throw new Error(`invalid branch name: "${request.branch}"`);
+	if (!(await validBranch(branch))) throw new Error(`invalid branch name: "${request.branch}"`);
 
 	let base = request.base?.trim().replace(/^origin\//, "");
 	if (!base) {
@@ -72,6 +76,7 @@ export async function ensureWorktree(
 		}
 		base = head.stdout.slice("origin/".length);
 	}
+	if (!(await validBranch(base))) throw new Error(`invalid base branch: "${request.base ?? base}"`);
 
 	const root = options.worktreeDir ? resolve(expandHome(options.worktreeDir)) : join(dirname(repoRoot), "worktrees");
 	const name = worktreeDirName(branch);
@@ -88,7 +93,7 @@ export async function ensureWorktree(
 		throw new Error(`${path} already exists and is not a worktree of ${repoRoot} on ${branch}`);
 	}
 
-	const fetched = await git(["fetch", "--quiet", "origin", base], repoRoot, 120_000);
+	const fetched = await git(["fetch", "--quiet", "--", "origin", base], repoRoot, 120_000);
 	if (fetched.code !== 0) throw new Error(`git fetch origin ${base} failed: ${fetched.stderr || fetched.stdout}`);
 
 	const exists = await git(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], repoRoot);
