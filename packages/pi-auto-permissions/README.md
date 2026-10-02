@@ -443,9 +443,16 @@ Group names come from your configured rules. A trusted group bypasses guarded re
 
 ## Subagent sessions
 
-When a session is a [pi-subagents](https://github.com/nicobailon/pi-subagents) child (`PI_SUBAGENT_CHILD=1`), the guardian receives additional execution facts with each review — run id, nesting depth, whether the cwd is a linked git worktree, and the checked-out branch — plus a prompt section telling it to judge risk by effect scope and reversibility relative to the subagent's own workspace instead of by command name. Mutations confined to the subagent's isolated worktree, its own feature branch, or resources it created are approvable when they serve the delegated task; `ask_user` is reserved for effects that escape that scope (shared or default branches, host-level configuration, production systems, credentials, data leaving the machine).
+When a session is a subagent child (`PI_SUBAGENT_CHILD=1`, set by `@hank-warren/pi-agents` and [pi-subagents](https://github.com/nicobailon/pi-subagents)), the guardian receives additional execution facts with each review — run id, nesting depth, whether the cwd is a linked git worktree, and the checked-out branch — plus a prompt section telling it to judge risk by effect scope and reversibility relative to the subagent's own workspace instead of by command name. Mutations confined to the subagent's isolated worktree, its own feature branch, or resources it created are approvable when they serve the delegated task; `ask_user` is reserved for effects that escape that scope (shared or default branches, host-level configuration, production systems, credentials, data leaving the machine).
 
-Subagent sessions have no interactive user, so an `ask_user` verdict blocks the command immediately with a reason instructing the child to route around the gated operation or report the blocker. Reviewer usage records from subagent sessions carry `"subagent": true` in the usage sidecar.
+The child itself is told it is a subagent: a short section appended to its system prompt says that commands needing approval pause the supervising session, so it should prefer in-scope and read-only commands and revise when asked to.
+
+An `ask_user` verdict in a subagent never interrupts the human on the first try:
+
+- **Child with a UI** (an RPC child whose prompts surface in the parent, as with pi-agents): the command is blocked with a revise-first reason. Issuing the *same* command again unchanged escalates it to the human as an ordinary approval prompt; any other command gets its own revise-first turn.
+- **Child without a UI**: the command is blocked with a reason instructing the child to route around the gated operation or report the blocker.
+
+Reviewer usage records from subagent sessions carry `"subagent": true` in the usage sidecar.
 
 ## Guardian dispatch
 
