@@ -1766,9 +1766,10 @@ test("35 · a subagent with a UI is told to revise first; the same command again
 				assert.match(different.reason, /You are a subagent/u);
 				assert.equal(harness.customCalls, 0, "a different command gets its own revise-first turn");
 
+				await harness.turnEnd();
 				harness.answers.push("Allow");
 				assert.equal(await harness.toolCall("git push --force origin main", "call-3"), undefined);
-				assert.equal(harness.customCalls, 1, "repeating the command unchanged escalates to the human");
+				assert.equal(harness.customCalls, 1, "repeating the command unchanged in a later turn escalates to the human");
 			},
 		));
 });
@@ -1843,4 +1844,42 @@ test("38 · in RPC mode the approval prompt goes through ui.select, so a subagen
 			assert.match(titles[0]!, /Git push — Auto Permissions needs approval/u);
 		},
 	);
+});
+
+test("39 · same-turn duplicates of a refused command stay refused; only a later turn reaches the human", async () => {
+	await asSubagentChild(() =>
+		withExtension(
+			{
+				rules: [GUARDED_RULE],
+				completeSimple: () => assistantResponse(verdictText("ask_user", "force push rewrites history")),
+			},
+			async (harness) => {
+				await harness.sessionStart();
+
+				// Two identical sibling calls in one assistant message.
+				await harness.assistantMessage([
+					{ id: "call-1", command: "git push --force origin main" },
+					{ id: "call-2", command: "git push --force origin main" },
+				]);
+				for (const id of ["call-1", "call-2"]) {
+					const result = await harness.toolCall("git push --force origin main", id);
+					assert.match(result?.reason ?? "", /You are a subagent/u, `${id} is refused, not escalated`);
+				}
+
+				// Identical calls from one codemode script, issued together.
+				await harness.toolExecutionStart("script-1");
+				const fromScript = await Promise.all([
+					harness.toolCall("git push --force origin main", "script-1/1", "script-1"),
+					harness.toolCall("git push --force origin main", "script-1/2", "script-1"),
+				]);
+				for (const result of fromScript) assert.match(result?.reason ?? "", /You are a subagent/u);
+				assert.equal(harness.customCalls, 0, "nothing reached the human within the turn");
+				await harness.toolExecutionEnd("script-1");
+
+				await harness.turnEnd();
+				harness.answers.push("Block");
+				await harness.toolCall("git push --force origin main", "call-3");
+				assert.equal(harness.customCalls, 1, "the next turn's unchanged retry asks the human");
+			},
+		));
 });

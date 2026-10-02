@@ -184,10 +184,13 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   const overrides = createSessionOverrides(pi);
   let trustedGroups = new Set<string>();
   // Set per session: a subagent child (PI_SUBAGENT_CHILD=1) revises before it
-  // asks. `reviseFirst` holds the commands it was already told to revise;
-  // issuing one again unchanged escalates it to the human.
+  // asks. `reviseFirst` maps each command it was told to revise to the turn
+  // it was told in; issuing it again unchanged in a *later* turn escalates it
+  // to the human. Same-turn duplicates (sibling calls, codemode Promise.all)
+  // are refused too, since the model has not yet seen the first refusal.
   let subagentSession = false;
-  const reviseFirst = new Set<string>();
+  let turnGeneration = 0;
+  const reviseFirst = new Map<string, number>();
   let lastConfigError: string | undefined;
   let lastEvaluationLogError: string | undefined;
   // Guardian calls run in parallel up to config.reviewConcurrency; applying
@@ -563,8 +566,9 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     }
     if (subagentSession && scope.ctx.hasUI) {
       const key = `${scope.gate.label}\0${scope.command}`;
-      if (!reviseFirst.has(key)) {
-        reviseFirst.add(key);
+      const refusedIn = reviseFirst.get(key);
+      if (refusedIn === undefined || refusedIn === turnGeneration) {
+        if (refusedIn === undefined) reviseFirst.set(key, turnGeneration);
         return settle(scope, {
           display: "revise",
           verdict: "revise",
@@ -709,6 +713,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   });
 
   pi.on("turn_end", () => {
+    turnGeneration += 1;
     lastAssistantCalls = [];
     abandonSiblingReviews();
     endScripts();
