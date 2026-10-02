@@ -51,6 +51,11 @@ const CLEARED_ENV = [
 	"PI_STASH_CONFIG",
 	"HERDR_ENV",
 	"PI_SUBAGENT_CHILD",
+	// pi-agents: child mode and its budget, and the config override.
+	"PI_AGENTS_CHILD",
+	"PI_AGENTS_CONFIG",
+	"PI_AGENTS_CONTEXT_BUDGET",
+	"PI_AGENTS_MAX_TURNS",
 	// pi-cliproxyapi-provider's connection, credential and metadata settings.
 	// A host pointed at a live CLIProxyAPI would otherwise steer the provider's
 	// config tests and let its discovery tests reach a real proxy.

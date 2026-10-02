@@ -37,7 +37,8 @@
       "./packages/pi-cliproxyapi-provider/index.ts",
       "./packages/pi-codex-compaction/index.ts",
       "./packages/pi-thinking-step/index.ts",
-      "./packages/pi-auto-name/index.ts"
+      "./packages/pi-auto-name/index.ts",
+      "./packages/pi-agents/index.ts"
     ],
     "skills": [
       "./packages/pi-auto-permissions/auto-permissions-setup",
