@@ -89,7 +89,12 @@ export class AgentRun {
 	lastStopReason: string | undefined;
 	lastErrorMessage: string | undefined;
 	waiters: Array<() => void> = [];
-	dialogAborts = new Set<AbortController>();
+	/** Open or queued forwarded dialogs, each with the tool calls that were running when it was asked. */
+	dialogs = new Map<AbortController, Set<string>>();
+	/** Tool calls the child is executing right now. */
+	runningTools = new Set<string>();
+	/** Bumped by every launch, stop and dispose; a launch that sees a newer value gives up. */
+	launchSeq = 0;
 
 	constructor(readonly spec: RunSpec, id?: string) {
 		this.id = id ?? randomBytes(4).toString("hex");
@@ -326,8 +331,11 @@ export class AgentManager {
 	}
 
 	private async launch(run: AgentRun, prompt: string): Promise<void> {
+		const seq = ++run.launchSeq;
+		const current = () => seq === run.launchSeq && run.status === "running";
 		run.status = "running";
 		run.runStartedAt = Date.now();
+		run.result = undefined;
 		run.lastAssistant = "";
 		run.lastStopReason = undefined;
 		run.lastErrorMessage = undefined;
@@ -340,6 +348,8 @@ export class AgentManager {
 				// it finish writing the session file before a new one resumes it.
 				run.proc = undefined;
 				await previous.whenExited();
+				// Stopped or disposed while waiting: do not resurrect it.
+				if (!current() || this.disposed) return;
 			}
 			const proc = run.alive ? run.proc! : this.spawn(run);
 			if (!run.sessionFile) {
@@ -350,9 +360,9 @@ export class AgentManager {
 					.catch(() => {});
 			}
 			const accepted = await proc.request<{ disposition?: string }>({ type: "prompt", message: prompt });
-			if (accepted?.disposition === "handled") this.finish(run, "done");
+			if (accepted?.disposition === "handled" && current()) this.finish(run, "done");
 		} catch (error) {
-			if (run.status === "running") {
+			if (current()) {
 				run.error = error instanceof Error ? error.message : String(error);
 				this.finish(run, run.stopRequested ? "stopped" : "failed");
 			}
@@ -388,7 +398,7 @@ export class AgentManager {
 			return;
 		}
 		run.stopRequested = true;
-		for (const controller of run.dialogAborts) controller.abort();
+		run.launchSeq += 1;
 		this.finish(run, "stopped");
 		await run.proc?.stop();
 	}
@@ -403,7 +413,8 @@ export class AgentManager {
 		this.queue = [];
 		await Promise.all([...this.runs.values()].map(async (run) => {
 			if (run.idleTimer) clearTimeout(run.idleTimer);
-			for (const controller of run.dialogAborts) controller.abort();
+			run.launchSeq += 1;
+			this.abortDialogs(run);
 			if (run.busy) {
 				run.stopRequested = true;
 				run.status = "stopped";
@@ -421,7 +432,9 @@ export class AgentManager {
 		run.endedAt = Date.now();
 		run.streaming = "";
 		run.approval = undefined;
-		run.result = run.lastAssistant || run.result;
+		run.runningTools.clear();
+		this.abortDialogs(run);
+		run.result = run.lastAssistant || undefined;
 		for (const waiter of run.waiters.splice(0)) waiter();
 		if (run.alive && !this.disposed) {
 			const ttl = this.deps.config().idleTtlSeconds * 1000;
@@ -450,7 +463,7 @@ export class AgentManager {
 		if (run.proc !== proc) return;
 		if (run.idleTimer) clearTimeout(run.idleTimer);
 		run.idleTimer = undefined;
-		for (const controller of run.dialogAborts) controller.abort();
+		this.abortDialogs(run);
 		if (run.status === "running") {
 			run.error = run.stopRequested ? undefined : `agent process exited unexpectedly${proc.stderr() ? `: ${proc.stderr().trim().split("\n").slice(-3).join(" | ")}` : ""}`;
 			this.finish(run, run.stopRequested ? "stopped" : "failed");
@@ -503,12 +516,15 @@ export class AgentManager {
 				const summary = summarizeToolCall(name, event.args);
 				run.toolUses += 1;
 				run.recentTools = [...run.recentTools, summary].slice(-RECENT_TOOLS);
+				run.runningTools.add(String(event.toolCallId ?? ""));
 				run.push({ kind: "tool", text: summary, toolCallId: String(event.toolCallId ?? ""), status: "running", nested: Boolean(event.parentToolCallId) });
 				this.changed();
 				return;
 			}
 			case "tool_execution_end": {
 				const id = String(event.toolCallId ?? "");
+				run.runningTools.delete(id);
+				this.releaseDialogs(run, id);
 				const item = [...run.items].reverse().find((entry) => entry.kind === "tool" && entry.toolCallId === id);
 				if (item) {
 					item.status = event.isError ? "error" : "done";
@@ -520,6 +536,9 @@ export class AgentManager {
 			}
 			case "turn_end":
 				run.turns += 1;
+				// Every tool call of the turn is done, so no dialog asked during it is still awaited.
+				run.runningTools.clear();
+				this.abortDialogs(run);
 				return;
 			case "compaction_start":
 				run.push({ kind: "notice", text: "compacting context…" });
@@ -574,6 +593,25 @@ export class AgentManager {
 		}
 	}
 
+	private abortDialogs(run: AgentRun): void {
+		for (const controller of run.dialogs.keys()) controller.abort();
+		run.dialogs.clear();
+	}
+
+	/**
+	 * RPC has no message for "the child stopped waiting" (a codemode script
+	 * ended, a review went stale): the child just drops the request. Close a
+	 * dialog once every tool call that was running when it was asked has
+	 * finished, since the one waiting on it must be among them.
+	 */
+	private releaseDialogs(run: AgentRun, toolCallId: string): void {
+		for (const [controller, owners] of run.dialogs) {
+			if (!owners.delete(toolCallId) || owners.size > 0) continue;
+			controller.abort();
+			run.dialogs.delete(controller);
+		}
+	}
+
 	/** Child dialogs (permission prompts, mostly) surface in the parent, one at a time, labeled with the agent. */
 	private forwardDialog(run: AgentRun, proc: RpcProcess, request: UiRequest): void {
 		const ctx = this.deps.ctx();
@@ -582,7 +620,9 @@ export class AgentManager {
 			return;
 		}
 		const controller = new AbortController();
-		run.dialogAborts.add(controller);
+		// Pi's tool_execution_start precedes the tool_call hook, so the call
+		// waiting on this dialog is among these.
+		run.dialogs.set(controller, new Set(run.runningTools));
 		this.uiChain = this.uiChain.then(async () => {
 			if (proc.exited || controller.signal.aborted) return;
 			run.approval = request.title ?? request.method;
@@ -602,7 +642,7 @@ export class AgentManager {
 			} catch {
 				proc.respondUi(request.id, { cancelled: true });
 			} finally {
-				run.dialogAborts.delete(controller);
+				run.dialogs.delete(controller);
 				run.approval = undefined;
 				this.changed();
 			}

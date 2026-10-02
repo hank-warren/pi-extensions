@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { BUILTIN_AGENTS, discoverAgents, parseAgentFile, projectAgentDirs } from "../src/agents.js";
-import { budgetAfterTurn, type BudgetState } from "../src/child.js";
+import { budgetAfterTurn, budgetAtPromptStart, type BudgetState } from "../src/child.js";
 import { DEFAULT_EXCLUDED_TOOLS, loadConfig } from "../src/config.js";
 import { formatDuration, formatTokens, summarizeToolCall } from "../src/format.js";
 import { contextLabel } from "../src/render.js";
@@ -126,6 +126,22 @@ test("the budget warns once near the limit and cuts tools at it, steering only c
 	const turns: BudgetState = { turns: 0, warned: false, exhausted: false, blockedCalls: 0 };
 	const kinds = Array.from({ length: 10 }, () => budgetAfterTurn(turns, { tokens: 1, continuing: true, maxTurns: 10 }).kind);
 	assert.deepEqual(kinds.slice(6), ["none", "warn", "none", "exhaust"]);
+});
+
+test("a new prompt resets turns but starts exhausted when context is already over budget", () => {
+	const state: BudgetState = { turns: 9, warned: true, exhausted: true, blockedCalls: 4 };
+	assert.equal(budgetAtPromptStart(state, { tokens: 50_000, contextBudget: 100_000 }).kind, "none");
+	assert.deepEqual(state, { turns: 0, warned: false, exhausted: false, blockedCalls: 0 });
+
+	const over = budgetAtPromptStart(state, { tokens: 120_000, contextBudget: 100_000 });
+	assert.equal(over.kind, "exhaust");
+	assert.match((over as { message: string }).message, /120k\/100k tokens\). Tools are disabled/);
+	assert.equal(state.exhausted, true, "tools are refused from the first call");
+
+	assert.equal(budgetAtPromptStart(state, { tokens: 900_000 }).kind, "none", "no context budget, never exhausted by context");
+	assert.equal(state.exhausted, false);
+	budgetAtPromptStart(state, { tokens: 80_000, contextBudget: 100_000 });
+	assert.equal(state.warned, true, "a prompt starting past 75% is not warned twice");
 });
 
 test("child args and env carry the agent's model, prompt, tools and the subagent contract", () => {

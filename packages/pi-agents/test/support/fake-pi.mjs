@@ -1,6 +1,7 @@
 // A stand-in for `pi --mode rpc`: speaks just enough of the protocol for the
 // manager tests. Prompt text drives behavior:
-//   "ASK ..."  - forwards a select dialog and answers with the choice
+//   "ASK ..."  - forwards a select dialog from a running tool call and answers with the choice
+//   "ORPHAN"   - forwards a dialog, then ends its tool call without waiting (a script that ended)
 //   "EDIT ..." - forwards an editor dialog and answers with the result
 //   "SLOW ..." - keeps running until a steer arrives, then answers with it
 //   "FAIL ..." - ends with a provider error
@@ -26,7 +27,17 @@ function run(message) {
 	out({ type: "tool_execution_end", toolCallId: "t1", toolName: "bash", result: { content: [{ type: "text", text: "file-a\nfile-b" }] }, isError: false });
 	if (message.startsWith("ASK")) {
 		pendingDialog = "d1";
+		out({ type: "tool_execution_start", toolCallId: "t2", toolName: "bash", args: { command: "git push" } });
 		out({ type: "extension_ui_request", id: "d1", method: "select", title: "Allow git push?", options: ["Allow", "Block"] });
+		return;
+	}
+	if (message.startsWith("ORPHAN")) {
+		out({ type: "tool_execution_start", toolCallId: "t9", toolName: "bash", args: { command: "git push" } });
+		out({ type: "extension_ui_request", id: "d3", method: "select", title: "Allow git push?", options: ["Allow", "Block"] });
+		setTimeout(() => {
+			out({ type: "tool_execution_end", toolCallId: "t9", toolName: "bash", result: { content: [{ type: "text", text: "cancelled" }] }, isError: true });
+			setTimeout(() => finish("orphaned"), 50);
+		}, 50);
 		return;
 	}
 	if (message.startsWith("EDIT")) {
@@ -65,6 +76,7 @@ function handle(record) {
 		case "extension_ui_response":
 			if (record.id === pendingDialog) {
 				pendingDialog = undefined;
+				if (record.id === "d1") out({ type: "tool_execution_end", toolCallId: "t2", toolName: "bash", result: { content: [] }, isError: false });
 				finish(`dialog: ${record.cancelled ? "cancelled" : record.value}`);
 			}
 			return;

@@ -51,6 +51,31 @@ export function budgetAfterTurn(
 	return { kind: "none" };
 }
 
+/**
+ * Budget state for a new prompt. Turns start over; the context budget does
+ * not: a prompt that starts at or over it starts exhausted, with tools
+ * refused from the first call. Pure, for tests.
+ */
+export function budgetAtPromptStart(
+	state: BudgetState,
+	input: { tokens: number; contextBudget?: number },
+): { kind: "none" } | { kind: "exhaust"; message: string } {
+	const { tokens, contextBudget } = input;
+	state.turns = 0;
+	state.blockedCalls = 0;
+	if (contextBudget && tokens >= contextBudget) {
+		state.exhausted = true;
+		state.warned = true;
+		return {
+			kind: "exhaust",
+			message: `[pi-agents] Context budget already used (${formatTokens(tokens)}/${formatTokens(contextBudget)} tokens). Tools are disabled. Answer from what you already know, and say what would need a fresh agent.`,
+		};
+	}
+	state.exhausted = false;
+	state.warned = contextBudget ? tokens >= contextBudget * 0.75 : false;
+	return { kind: "none" };
+}
+
 function envInt(name: string): number | undefined {
 	const value = Number(process.env[name]);
 	return Number.isInteger(value) && value > 0 ? value : undefined;
@@ -65,17 +90,14 @@ export function registerChild(pi: ExtensionAPI): void {
 	const maxTurns = envInt("PI_AGENTS_MAX_TURNS") ?? 80;
 	const state: BudgetState = { turns: 0, warned: false, exhausted: false, blockedCalls: 0 };
 
-	pi.on("agent_start", (_event, ctx) => {
-		state.turns = 0;
-		state.blockedCalls = 0;
-		const tokens = ctx.getContextUsage()?.tokens ?? 0;
-		// A follow-up prompt gets a fresh turn budget; the context budget only
-		// resets if the context itself is back under it (e.g. after compaction).
-		if (!contextBudget || tokens < contextBudget) {
-			if (state.exhausted) ctx.ui.setStatus(BUDGET_STATUS_KEY, undefined);
-			state.exhausted = false;
-			state.warned = contextBudget ? tokens >= contextBudget * 0.75 : false;
-		}
+	// before_agent_start fires once per prompt (a new task or follow-up), never
+	// for Pi's own continuations such as automatic retries, so a retry cannot
+	// hand out a fresh budget.
+	pi.on("before_agent_start", (_event, ctx) => {
+		const start = budgetAtPromptStart(state, { tokens: ctx.getContextUsage()?.tokens ?? 0, contextBudget });
+		ctx.ui.setStatus(BUDGET_STATUS_KEY, state.exhausted ? "exhausted" : undefined);
+		if (start.kind !== "exhaust") return;
+		return { message: { customType: "pi-agents-budget", content: start.message, display: true } };
 	});
 
 	pi.on("turn_end", (event, ctx) => {

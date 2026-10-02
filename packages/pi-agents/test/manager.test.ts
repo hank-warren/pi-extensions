@@ -16,7 +16,7 @@ const general = BUILTIN_AGENTS.find((agent) => agent.name === "general-purpose")
 
 function managerWith(options: {
 	maxConcurrent?: number;
-	select?: (title: string, options: string[]) => Promise<string | undefined>;
+	select?: (title: string, options: string[], opts?: { signal?: AbortSignal }) => Promise<string | undefined>;
 	editor?: () => Promise<string | undefined>;
 } = {}) {
 	const finished: AgentRun[] = [];
@@ -65,6 +65,11 @@ test("a run streams tool use and usage, finishes with its last answer, and resum
 		assert.equal(run.result, "echo: again");
 		assert.equal(run.proc!.pid, pid, "a follow-up reuses the idle process");
 		assert.equal(run.toolUses, 2);
+
+		await manager.message(run, "FAIL");
+		await manager.waitFor(run);
+		assert.equal(run.status, "failed");
+		assert.equal(run.result, undefined, "a follow-up without an answer does not report the previous one");
 	} finally {
 		await manager.dispose();
 	}
@@ -101,6 +106,29 @@ test("a child's dialog surfaces in the parent labeled with the agent, and the an
 		assert.deepEqual(titles, ["[pusher] Allow git push?"]);
 		assert.equal(run.result, "dialog: Block");
 		assert.equal(run.approval, undefined);
+	} finally {
+		await manager.dispose();
+	}
+});
+
+test("a forwarded dialog closes once the tool call waiting on it is gone", async () => {
+	let aborted = false;
+	const { manager, create } = managerWith({
+		select: (_title, _options, opts) =>
+			new Promise((resolve) => {
+				opts?.signal?.addEventListener("abort", () => {
+					aborted = true;
+					resolve(undefined);
+				});
+			}),
+	});
+	try {
+		const run = create("orphan");
+		manager.start(run, "ORPHAN");
+		await manager.waitFor(run);
+		assert.equal(aborted, true, "the parent's prompt does not outlive the child's interest in it");
+		assert.equal(run.result, "orphaned");
+		assert.equal(run.dialogs.size, 0);
 	} finally {
 		await manager.dispose();
 	}
@@ -143,6 +171,17 @@ test("a follow-up sent while the old process is still shutting down starts a fre
 		assert.equal(stopped.status, "done", "the old process's exit does not fail the new run");
 		assert.equal(stopped.result, "echo: resume");
 		assert.notEqual(stopped.proc!.pid, firstPid);
+
+		// Stopped again while the follow-up waits for the old process: nothing is resurrected.
+		const raced = create("raced");
+		manager.start(raced, "hello");
+		await manager.waitFor(raced);
+		void raced.proc!.stop();
+		assert.equal(await manager.message(raced, "again"), "started");
+		await manager.stop(raced);
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		assert.equal(raced.status, "stopped");
+		assert.equal(raced.proc, undefined, "no new child was spawned after the stop");
 
 		// Idle TTL firing just before a follow-up.
 		const idle = create("idle");
@@ -210,7 +249,7 @@ test("in a child process the extension only enforces the budget and registers no
 		const mock = createMockPi();
 		piAgents(mock.pi);
 		assert.deepEqual(mock.tools, []);
-		assert.deepEqual([...mock.events.keys()].sort(), ["agent_start", "tool_call", "turn_end"]);
+		assert.deepEqual([...mock.events.keys()].sort(), ["before_agent_start", "tool_call", "turn_end"], "no agent_start hook: Pi's retries must not reset the budget");
 	} finally {
 		delete process.env.PI_AGENTS_CHILD;
 	}
