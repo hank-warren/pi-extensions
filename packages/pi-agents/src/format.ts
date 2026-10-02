@@ -33,32 +33,47 @@ function firstCodeLine(code: string): string {
 	return "";
 }
 
-/** One-line, Claude Code-style label for a tool call: `Read src/a.ts`, `Bash rg -n foo`. */
-export function summarizeToolCall(name: string, args: unknown): string {
+/** A tool call in Pi's own notation, split so a renderer can style the head like Pi does. */
+export interface ToolCallSummary {
+	/** `$`, `read`, `grep`… — Pi renders this part in the tool-title style. */
+	head: string;
+	rest: string;
+}
+
+/** One-line summary of a tool call, written the way Pi's built-in renderers write it: `$ rg -n foo`, `read src/a.ts:10-40`. */
+export function summarizeToolCall(name: string, args: unknown): ToolCallSummary {
 	const record = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
 	const str = (key: string): string | undefined => (typeof record[key] === "string" ? (record[key] as string) : undefined);
+	const num = (key: string): number | undefined => (typeof record[key] === "number" ? (record[key] as number) : undefined);
+	const path = str("path") ?? str("file_path") ?? "";
 	switch (name) {
 		case "bash":
-			return `Bash ${oneLine(str("command") ?? "", 100)}`;
-		case "read":
-			return `Read ${str("path") ?? str("file_path") ?? ""}`;
+			return { head: "$", rest: oneLine(str("command") ?? "", 100) };
+		case "read": {
+			const offset = num("offset");
+			const limit = num("limit");
+			const range = offset !== undefined ? `:${offset}${limit !== undefined ? `-${offset + limit - 1}` : ""}` : "";
+			return { head: "read", rest: `${path}${range}` };
+		}
 		case "edit":
-			return `Edit ${str("path") ?? str("file_path") ?? ""}`;
 		case "write":
-			return `Write ${str("path") ?? str("file_path") ?? ""}`;
-		case "grep":
-			return `Grep ${oneLine(str("pattern") ?? "", 60)}${str("path") ? ` in ${str("path")}` : ""}`;
-		case "find":
-			return `Find ${oneLine(str("pattern") ?? "", 60)}`;
 		case "ls":
-			return `Ls ${str("path") ?? "."}`;
+			return { head: name, rest: path || (name === "ls" ? "." : "") };
+		case "grep":
+			return { head: "grep", rest: `/${oneLine(str("pattern") ?? "", 60)}/${path ? ` in ${path}` : ""}` };
+		case "find":
+			return { head: "find", rest: `${oneLine(str("pattern") ?? "", 60)}${path ? ` in ${path}` : ""}` };
 		case "codemode":
-			return `Codemode ${oneLine(firstCodeLine(str("code") ?? ""), 90)}`;
+			return { head: "codemode", rest: oneLine(firstCodeLine(str("code") ?? ""), 90) };
 		default: {
 			const first = Object.values(record).find((value): value is string => typeof value === "string");
-			return first ? `${name} ${oneLine(first, 90)}` : name;
+			return { head: name, rest: first ? oneLine(first, 90) : "" };
 		}
 	}
+}
+
+export function summaryText(summary: ToolCallSummary): string {
+	return summary.rest ? `${summary.head} ${summary.rest}` : summary.head;
 }
 
 /** Text of a message `content` value (string or content blocks), text blocks only. */

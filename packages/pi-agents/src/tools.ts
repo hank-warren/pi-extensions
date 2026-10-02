@@ -5,10 +5,10 @@ import { Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import { type AgentDefinition, THINKING_LEVELS, type ThinkingLevel } from "./agents.js";
 import { type AgentsConfig, expandHome } from "./config.js";
-import { capText, contentText, formatDuration } from "./format.js";
+import { capText, contentText, formatDuration, oneLine } from "./format.js";
 import type { AgentManager, AgentRun } from "./manager.js";
 import { AGENT_GUIDELINES, agentToolDescription, buildChildPrompt } from "./prompts.js";
-import { type AgentDetails, detailsOf, statsLine, statusWord } from "./render.js";
+import { type AgentDetails, detailsOf, renderAgentCall, renderAgentResult, statsLine } from "./render.js";
 import { ensureWorktree, type Exec } from "./worktree.js";
 
 /** Longest result handed to the parent model; the rest stays in the child's session file. */
@@ -84,7 +84,7 @@ export function resultText(run: AgentRun): string {
 	const details = detailsOf(run);
 	const body = run.result ? capText(run.result, RESULT_MAX_CHARS) : { text: "(no output)", dropped: 0 };
 	const notes = [
-		`${run.name} (${run.type}, id ${run.id}) · ${statusWord(run.status).toLowerCase()} · ${statsLine(details)}`,
+		`${run.name} (${run.type}, id ${run.id}) · ${run.status} · ${statsLine(details)}${run.budgetExhausted ? " · budget exhausted" : ""}`,
 		...(run.error ? [`error: ${run.error}`] : []),
 		...(run.spec.worktree ? [`worktree: ${run.spec.worktree.path} (branch ${run.spec.worktree.branch})`] : []),
 		...(body.dropped ? [`result truncated by ${body.dropped} characters; full transcript: ${run.sessionFile ?? "unavailable"}`] : []),
@@ -157,34 +157,6 @@ async function waitStoppingOnAbort(manager: AgentManager, run: AgentRun, signal:
 	}
 }
 
-export function renderAgentResult(details: AgentDetails | undefined, fallback: string, expanded: boolean, theme: Theme): Text {
-	if (!details) return new Text(fallback, 0, 0);
-	const branch = theme.fg("dim", "  ⎿  ");
-	const pad = "     ";
-	const lines: string[] = [];
-	if (details.status === "running" || details.status === "queued") {
-		if (details.background) {
-			lines.push(`${branch}${theme.fg("muted", `Running in background as ${details.name} · ↓ to view`)}`);
-		} else {
-			const recent = details.recentTools;
-			if (details.status === "queued") lines.push(`${branch}${theme.fg("dim", "Queued…")}`);
-			else if (!recent.length) lines.push(`${branch}${theme.fg("dim", "Starting…")}`);
-			recent.forEach((tool, index) => lines.push(`${index === 0 && details.status === "running" ? branch : pad}${theme.fg("muted", tool)}`));
-			const more = details.toolUses - recent.length;
-			const tail = statsLine(details).split(" · ").slice(1).join(" · ");
-			lines.push(theme.fg("dim", `${pad}${more > 0 ? `+${more} more tool use${more === 1 ? "" : "s"} · ` : ""}${tail}`));
-		}
-	} else {
-		const color = details.status === "done" ? "muted" : details.status === "failed" ? "error" : "warning";
-		lines.push(`${branch}${theme.fg(color, `${statusWord(details.status)} (${statsLine(details)})`)}`);
-		if (details.error) lines.push(`${pad}${theme.fg("error", details.error)}`);
-		if (details.worktree) lines.push(`${pad}${theme.fg("dim", `worktree ${details.worktree.path}`)}`);
-		if (expanded && details.result) lines.push("", details.result);
-		else if (details.result) lines.push(theme.fg("dim", `${pad}(ctrl+o to expand)`));
-	}
-	return new Text(lines.join("\n"), 0, 0);
-}
-
 function noticeIn(run: AgentRun, ctxCwd: string): string {
 	const worktree = run.spec.worktree;
 	if (worktree) return ` in worktree ${worktree.path} (branch ${worktree.branch}${worktree.created ? ", new" : ", reused"})`;
@@ -202,7 +174,6 @@ export function registerTools(pi: ExtensionAPI, host: ToolHost): void {
 		promptGuidelines: AGENT_GUIDELINES,
 		parameters: agentParams,
 		outputSchema: resultSchema,
-		renderShell: "self",
 		async execute(
 			_toolCallId: string,
 			params: AgentParams,
@@ -264,9 +235,7 @@ export function registerTools(pi: ExtensionAPI, host: ToolHost): void {
 			return { content: [{ type: "text", text: resultText(run) }], details: detailsOf(run), structuredContent: structured(run) };
 		},
 		renderCall(args: Partial<AgentParams>, theme: Theme) {
-			const type = args.subagent_type ?? "Agent";
-			const description = args.description ? theme.fg("muted", `(${args.description})`) : "";
-			return new Text(`${theme.fg("accent", "●")} ${theme.bold(type)}${description}`, 0, 0);
+			return renderAgentCall(args, theme);
 		},
 		renderResult(result: { content: unknown; details?: unknown }, options: { expanded: boolean }, theme: Theme) {
 			return renderAgentResult(result.details as AgentDetails | undefined, contentText(result.content), options.expanded, theme);
@@ -313,7 +282,14 @@ export function registerTools(pi: ExtensionAPI, host: ToolHost): void {
 			return { content: [{ type: "text", text }], details: detailsOf(run, true), structuredContent: structured(run) };
 		},
 		renderCall(args: Partial<MessageParams>, theme: Theme) {
-			return new Text(`${theme.fg("accent", "●")} ${theme.bold("SendMessage")} ${theme.fg("muted", `→ ${args.to ?? ""}`)}`, 0, 0);
+			let text = `${theme.fg("toolTitle", theme.bold("message"))} ${theme.fg("accent", args.to ?? "")}`;
+			if (args.message) text += ` ${theme.fg("toolOutput", oneLine(args.message, 80))}`;
+			return new Text(text, 0, 0);
+		},
+		renderResult(result: { content: unknown; details?: unknown }, options: { expanded: boolean }, theme: Theme) {
+			const details = result.details as AgentDetails | undefined;
+			if (details && details.status !== "running" && details.status !== "queued") return renderAgentResult(details, contentText(result.content), options.expanded, theme);
+			return new Text(theme.fg("muted", contentText(result.content)), 0, 0);
 		},
 	};
 
@@ -321,6 +297,12 @@ export function registerTools(pi: ExtensionAPI, host: ToolHost): void {
 	const taskStopTool = {
 		name: "TaskStop",
 		label: "Stop agent",
+		renderCall(args: { id?: string }, theme: Theme) {
+			return new Text(`${theme.fg("toolTitle", theme.bold("stop"))} ${theme.fg("accent", args.id ?? "")}`, 0, 0);
+		},
+		renderResult(result: { content: unknown }, _options: unknown, theme: Theme) {
+			return new Text(theme.fg("muted", contentText(result.content)), 0, 0);
+		},
 		description: "Stop a running subagent. Its partial output is kept and SendMessage can resume it later.",
 		promptSnippet: "Stop a running subagent",
 		parameters: stopParams,

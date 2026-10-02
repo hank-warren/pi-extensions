@@ -3,19 +3,29 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentDefinition } from "./agents.js";
 import { BUDGET_STATUS_KEY } from "./child.js";
 import type { AgentsConfig } from "./config.js";
-import { contentText, summarizeToolCall } from "./format.js";
+import { contentText, summarizeToolCall, type ToolCallSummary } from "./format.js";
 import { RpcProcess, type UiRequest } from "./rpc.js";
+import { loadLog } from "./transcript.js";
 import type { WorktreeInfo } from "./worktree.js";
 
 export type RunStatus = "queued" | "running" | "done" | "failed" | "stopped";
 
-export interface TranscriptItem {
-	kind: "user" | "assistant" | "tool" | "notice";
-	text: string;
-	toolCallId?: string;
-	status?: "running" | "done" | "error";
-	output?: string;
-	nested?: boolean;
+/**
+ * One entry of a child's transcript: a message exactly as the child's session
+ * holds it (user, assistant, toolResult, custom), or a notice from pi-agents.
+ * The viewer renders messages with Pi's own components.
+ */
+export type LogEntry =
+	| { kind: "message"; message: ChildMessage }
+	| { kind: "notice"; text: string };
+
+/** A child message as it arrives over RPC; typed loosely because it is foreign data. */
+export type ChildMessage = Record<string, unknown> & { role?: string };
+
+/** Latest partial output of a running tool call, as Pi's tool renderers take it. */
+export interface ToolPartial {
+	content: Array<{ type: string; text?: string }>;
+	details?: unknown;
 }
 
 /** What survives a parent restart: enough to list the agent and resume it from its session file. */
@@ -58,8 +68,9 @@ export interface RunSpec {
 	worktree?: WorktreeInfo;
 }
 
-const MAX_ITEMS = 600;
-const RECENT_TOOLS = 3;
+const MAX_LOG = 600;
+/** Tool-call summaries kept for the inline row; the full calls are in the log. */
+const TOOL_LOG = 30;
 
 export class AgentRun {
 	readonly id: string;
@@ -69,7 +80,8 @@ export class AgentRun {
 	runStartedAt = Date.now();
 	endedAt: number | undefined;
 	toolUses = 0;
-	recentTools: string[] = [];
+	/** Pi-style summaries of the latest tool calls, oldest first. */
+	toolLog: ToolCallSummary[] = [];
 	contextTokens = 0;
 	outputTokens = 0;
 	cost = 0;
@@ -78,7 +90,10 @@ export class AgentRun {
 	error: string | undefined;
 	budgetExhausted = false;
 	sessionFile: string | undefined;
-	items: TranscriptItem[] = [];
+	log: LogEntry[] = [];
+	/** Partial output of tool calls still running, by call id. */
+	partials = new Map<string, ToolPartial>();
+	/** Assistant text streaming right now, before its message ends. */
 	streaming = "";
 	/** Title of a permission/dialog request waiting on the user, if any. */
 	approval: string | undefined;
@@ -107,9 +122,13 @@ export class AgentRun {
 	/** A process that can take a prompt: started, not exited, and not being shut down. */
 	get alive(): boolean { return Boolean(this.proc && !this.proc.exited && !this.proc.stopping); }
 
-	push(item: TranscriptItem): void {
-		this.items.push(item);
-		if (this.items.length > MAX_ITEMS) this.items.splice(0, this.items.length - MAX_ITEMS);
+	push(entry: LogEntry): void {
+		this.log.push(entry);
+		if (this.log.length > MAX_LOG) this.log.splice(0, this.log.length - MAX_LOG);
+	}
+
+	notice(text: string): void {
+		this.push({ kind: "notice", text });
 	}
 
 	snapshot(): RunSnapshot {
@@ -294,6 +313,7 @@ export class AgentManager {
 		const [command, ...prefix] = this.deps.spawnCommand();
 		const definition = run.spec.definition;
 		const resume = Boolean(run.sessionFile);
+		if (resume && !run.log.length) run.log = loadLog(run.sessionFile!);
 		const args = buildChildArgs({
 			model: run.spec.model,
 			thinking: run.spec.thinking,
@@ -372,8 +392,6 @@ export class AgentManager {
 	/** Steer a running agent (delivered after its current tool calls), or follow up on a finished one. */
 	async message(run: AgentRun, text: string): Promise<"steered" | "queued" | "started"> {
 		if (run.status === "running" && run.alive) {
-			run.push({ kind: "user", text });
-			this.changed();
 			await run.proc!.request({ type: "steer", message: text });
 			return "steered";
 		}
@@ -433,6 +451,7 @@ export class AgentManager {
 		run.streaming = "";
 		run.approval = undefined;
 		run.runningTools.clear();
+		run.partials.clear();
 		this.abortDialogs(run);
 		run.result = run.lastAssistant || undefined;
 		for (const waiter of run.waiters.splice(0)) waiter();
@@ -483,7 +502,7 @@ export class AgentManager {
 				return;
 			}
 			case "message_end": {
-				const message = event.message as Record<string, unknown> | undefined;
+				const message = event.message as ChildMessage | undefined;
 				if (!message) return;
 				if (message.role === "assistant") {
 					const usage = message.usage as Record<string, number> | undefined;
@@ -497,40 +516,34 @@ export class AgentManager {
 					const text = contentText(message.content).trim();
 					run.lastStopReason = typeof message.stopReason === "string" ? message.stopReason : undefined;
 					run.lastErrorMessage = typeof message.errorMessage === "string" ? message.errorMessage : undefined;
-					if (text) {
-						run.lastAssistant = text;
-						run.push({ kind: "assistant", text });
-					}
+					if (text) run.lastAssistant = text;
 					run.streaming = "";
-				} else if (message.role === "user") {
-					const text = contentText(message.content).trim();
-					const last = run.items[run.items.length - 1];
-					// Steers are echoed when sent; skip the duplicate.
-					if (text && !(last?.kind === "user" && last.text === text)) run.push({ kind: "user", text });
 				}
+				if (message.role === "toolResult") run.partials.delete(String(message.toolCallId ?? ""));
+				run.push({ kind: "message", message });
 				this.changed();
 				return;
 			}
 			case "tool_execution_start": {
-				const name = String(event.toolName ?? "tool");
-				const summary = summarizeToolCall(name, event.args);
+				const id = String(event.toolCallId ?? "");
 				run.toolUses += 1;
-				run.recentTools = [...run.recentTools, summary].slice(-RECENT_TOOLS);
-				run.runningTools.add(String(event.toolCallId ?? ""));
-				run.push({ kind: "tool", text: summary, toolCallId: String(event.toolCallId ?? ""), status: "running", nested: Boolean(event.parentToolCallId) });
+				run.toolLog = [...run.toolLog, summarizeToolCall(String(event.toolName ?? "tool"), event.args)].slice(-TOOL_LOG);
+				run.runningTools.add(id);
 				this.changed();
+				return;
+			}
+			case "tool_execution_update": {
+				const partial = event.partialResult as ToolPartial | undefined;
+				if (partial && Array.isArray(partial.content)) {
+					run.partials.set(String(event.toolCallId ?? ""), partial);
+					this.changed();
+				}
 				return;
 			}
 			case "tool_execution_end": {
 				const id = String(event.toolCallId ?? "");
 				run.runningTools.delete(id);
 				this.releaseDialogs(run, id);
-				const item = [...run.items].reverse().find((entry) => entry.kind === "tool" && entry.toolCallId === id);
-				if (item) {
-					item.status = event.isError ? "error" : "done";
-					const result = event.result as { content?: unknown } | undefined;
-					item.output = contentText(result?.content).slice(0, 800);
-				}
 				this.changed();
 				return;
 			}
@@ -541,11 +554,11 @@ export class AgentManager {
 				this.abortDialogs(run);
 				return;
 			case "compaction_start":
-				run.push({ kind: "notice", text: "compacting context…" });
+				run.notice("compacting context");
 				this.changed();
 				return;
 			case "auto_retry_start":
-				run.push({ kind: "notice", text: `retrying: ${String(event.errorMessage ?? "provider error")}` });
+				run.notice(`retrying after ${String(event.errorMessage ?? "a provider error")}`);
 				this.changed();
 				return;
 			case "agent_settled": {
@@ -574,19 +587,19 @@ export class AgentManager {
 				// ctx.ui.editor() cannot be cancelled, so a forwarded one would outlive
 				// a stopped child and block every other agent's dialogs. Decline it.
 				proc.respondUi(request.id, { cancelled: true });
-				run.push({ kind: "notice", text: `declined an editor dialog (${request.title ?? "untitled"}): subagents cannot open editors in the parent` });
+				run.notice(`declined an editor dialog (${request.title ?? "untitled"}): subagents cannot open editors in the parent`);
 				this.changed();
 				return;
 			case "setStatus":
 				if (request.statusKey === BUDGET_STATUS_KEY) {
 					run.budgetExhausted = request.statusText === "exhausted";
-					if (run.budgetExhausted) run.push({ kind: "notice", text: "budget exhausted: tools disabled, final report requested" });
+					if (run.budgetExhausted) run.notice("budget exhausted: tools disabled, final report requested");
 					this.changed();
 				}
 				return;
 			case "notify":
 				if (request.notifyType === "error" || request.notifyType === "warning") {
-					run.push({ kind: "notice", text: String(request.message ?? "") });
+					run.notice(String(request.message ?? ""));
 					this.changed();
 				}
 				return;

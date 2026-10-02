@@ -9,13 +9,13 @@ export interface PanelSource {
 	list(): AgentRun[];
 	stop(run: AgentRun): Promise<void>;
 }
-import { contextLabel, contextShare, shortModel, statusIcon } from "./render.js";
+import { contextLabel, contextShare, shortModel, statusGlyph } from "./render.js";
 
 const WIDGET_KEY = "pi-agents";
 const MAX_ROWS = 6;
 /** Finished rows stay this long so the result can still be opened from the list. */
 const LINGER_MS = 60_000;
-const TICK_MS = 120;
+const TICK_MS = 80;
 
 function rightAlign(left: string, right: string, width: number): string {
 	const rightWidth = visibleWidth(right);
@@ -75,7 +75,7 @@ export class AgentPanel {
 			!this.dismissed.has(run.id) && (
 				run.busy
 				|| run.id === this.viewing
-				|| (run.endedAt !== undefined && now - run.endedAt < LINGER_MS && run.items.length > 0)
+				|| (run.endedAt !== undefined && now - run.endedAt < LINGER_MS && run.log.length > 0)
 			));
 	}
 
@@ -197,41 +197,53 @@ export class AgentPanel {
 		});
 	}
 
+	/**
+	 * Pi's widget idiom: an `agents` header in the same shape as the other
+	 * status lines (`auto permissions · …`, `◆ plan · …`), then one row per
+	 * agent with a selector-style `→` cursor while the list has focus.
+	 */
 	private render(width: number, theme: Theme): string[] {
 		const now = Date.now();
 		const rows = this.rows(now);
 		if (!rows.length) return [];
-		const lines: string[] = [];
-		const running = rows.filter((run) => run.busy).length;
-		const hint = this.active
-			? "↑↓ select · enter open · x stop/dismiss · esc back"
-			: `${running ? `${running} agent${running === 1 ? "" : "s"} running · ` : ""}↓ to manage`;
-		lines.push(truncateToWidth(`  ${theme.fg("dim", hint)}`, width));
+		const running = rows.filter((run) => run.status === "running").length;
+		const waiting = rows.filter((run) => run.approval).length;
+		const counts = [
+			running ? `${running} running` : "",
+			waiting ? theme.fg("accent", `${waiting} waiting for you`) : "",
+		].filter(Boolean);
+		const key = (k: string, text: string) => `${theme.fg("dim", k)} ${theme.fg("muted", text)}`;
+		const hints = this.active
+			? [key("↑↓", "select"), key("enter", "open"), key("x", "stop"), key("esc", "back")].join(theme.fg("dim", " · "))
+			: key("↓", "to manage");
+		const header = `${theme.fg("accent", theme.bold("agents"))}${counts.length ? theme.fg("muted", ` · ${counts.join(theme.fg("muted", " · "))}`) : ""}`;
+		const lines = [rightAlign(` ${header}`, `${hints} `, width)];
 		const visible = Math.min(MAX_ROWS, rows.length);
 		const start = Math.min(Math.max(0, this.selected - visible + 1), rows.length - visible);
-		if (start > 0) lines.push(rightAlign("", theme.fg("dim", `↑ ${start} more`), width));
+		if (start > 0) lines.push(theme.fg("dim", `   ↑ ${start} more`));
 		for (let index = start; index < start + visible; index++) {
 			lines.push(this.renderRow(rows[index]!, index === this.selected && this.active, width, theme, now));
 		}
 		const below = rows.length - start - visible;
-		if (below > 0) lines.push(rightAlign("", theme.fg("dim", `↓ ${below} more`), width));
+		if (below > 0) lines.push(theme.fg("dim", `   ↓ ${below} more`));
 		return lines;
 	}
 
 	private renderRow(run: AgentRun, selected: boolean, width: number, theme: Theme, now: number): string {
-		const marker = selected ? theme.fg("accent", "›") : " ";
-		const name = selected ? theme.bold(run.name) : theme.fg("text", run.name);
-		const description = theme.fg(selected ? "text" : "muted", run.description);
-		const left = `  ${marker} ${statusIcon(run.status, theme, now)} ${name}  ${description}`;
-		const parts: string[] = [];
-		if (run.approval) parts.push(theme.fg("warning", "needs approval"));
-		else if (run.status === "queued") parts.push("queued");
-		parts.push(shortModel(run.spec.model));
-		const context = `ctx ${contextLabel(run.contextTokens, run.spec.contextBudget, run.spec.contextWindow)}`;
-		parts.push((contextShare(run.contextTokens, run.spec.contextBudget, run.spec.contextWindow) ?? 0) >= 0.75 ? theme.fg("warning", context) : context);
-		parts.push(`${run.toolUses} tools`);
-		parts.push(formatDuration((run.endedAt ?? now) - run.runStartedAt));
-		const right = parts.map((part) => (part.includes("\x1b") ? part : theme.fg(selected ? "text" : "dim", part))).join(theme.fg("dim", " · "));
-		return rightAlign(left, right, width);
+		const cursor = selected ? theme.fg("accent", "→") : " ";
+		const glyph = statusGlyph(run.status, theme, { now, approval: Boolean(run.approval) });
+		const name = selected ? theme.fg("accent", theme.bold(run.name)) : theme.fg("text", run.name);
+		const description = selected ? theme.fg("accent", run.description) : theme.fg("muted", run.description);
+		const left = ` ${cursor} ${glyph} ${name} ${description}`;
+		const share = contextShare(run.contextTokens, run.spec.contextBudget, run.spec.contextWindow) ?? 0;
+		const context = contextLabel(run.contextTokens, run.spec.contextBudget, run.spec.contextWindow);
+		const parts = [
+			run.approval ? theme.fg("accent", "waiting for your approval") : run.status === "queued" ? theme.fg("muted", "queued") : "",
+			theme.fg("dim", shortModel(run.spec.model)),
+			share >= 0.75 ? theme.fg("warning", context) : theme.fg("dim", context),
+			theme.fg("dim", `${run.toolUses} tool call${run.toolUses === 1 ? "" : "s"}`),
+			theme.fg("dim", formatDuration((run.endedAt ?? now) - run.runStartedAt)),
+		].filter(Boolean);
+		return rightAlign(left, `${parts.join(theme.fg("dim", " · "))} `, width);
 	}
 }

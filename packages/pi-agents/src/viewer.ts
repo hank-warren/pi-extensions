@@ -1,65 +1,97 @@
-import type { Theme } from "@earendil-works/pi-coding-agent";
-import { type Component, type Focusable, Input, Key, matchesKey, type TUI, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { formatDuration, formatTokens } from "./format.js";
-import type { AgentManager, AgentRun, TranscriptItem } from "./manager.js";
-import { contextLabel, statusIcon, statusWord } from "./render.js";
+import {
+	AssistantMessageComponent,
+	createBashToolDefinition,
+	createEditToolDefinition,
+	createFindToolDefinition,
+	createGrepToolDefinition,
+	createLsToolDefinition,
+	createReadToolDefinition,
+	createWriteToolDefinition,
+	CustomMessageComponent,
+	getMarkdownTheme,
+	type Theme,
+	ToolExecutionComponent,
+	UserMessageComponent,
+} from "@earendil-works/pi-coding-agent";
+import { type Component, Container, type Focusable, Input, Key, matchesKey, Spacer, type TUI, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { contentText, formatDuration } from "./format.js";
+import type { AgentManager, AgentRun, ChildMessage, LogEntry } from "./manager.js";
+import { contextLabel, shortModel, statusGlyph } from "./render.js";
 
-export const VIEWER_HEIGHT_PCT = 80;
-/** Lines of chrome: top border, 2 header lines, separator, separator, input, footer, bottom border. */
-const CHROME = 8;
+/** Share of the terminal the transcript takes, like Pi's own full-height selectors. */
+export const VIEWER_HEIGHT_PCT = 75;
+/** Header, three rules, the input and the hint line. */
+const CHROME = 6;
 
-function wrap(text: string, width: number): string[] {
-	const out: string[] = [];
-	for (const line of text.split("\n")) out.push(...(line ? wrapTextWithAnsi(line, width) : [""]));
+type AnyToolDefinition = ConstructorParameters<typeof ToolExecutionComponent>[4];
+
+/** Pi's built-in tool definitions carry its renderers: `$ cmd` boxes, read previews, edit diffs. */
+function builtinRenderers(cwd: string): Record<string, AnyToolDefinition> {
+	const make: Record<string, (dir: string) => unknown> = {
+		bash: createBashToolDefinition,
+		read: createReadToolDefinition,
+		edit: createEditToolDefinition,
+		write: createWriteToolDefinition,
+		grep: createGrepToolDefinition,
+		find: createFindToolDefinition,
+		ls: createLsToolDefinition,
+	};
+	const out: Record<string, AnyToolDefinition> = {};
+	for (const [name, factory] of Object.entries(make)) {
+		try {
+			out[name] = factory(cwd) as AnyToolDefinition;
+		} catch {
+			// Unknown to this Pi version: Pi's generic tool rendering applies.
+		}
+	}
 	return out;
 }
 
-/** Transcript lines for one item, already styled and wrapped to `width`. */
-export function itemLines(item: TranscriptItem, width: number, theme: Theme): string[] {
-	const inner = Math.max(10, width - 4);
-	switch (item.kind) {
-		case "user":
-			return wrap(item.text, inner).map((line, index) => `${index === 0 ? theme.fg("accent", "› ") : "  "}${theme.fg("userMessageText", line)}`);
-		case "assistant":
-			return wrap(item.text, inner).map((line) => `  ${line}`);
-		case "notice":
-			return wrap(item.text, inner).map((line) => `  ${theme.fg("warning", line)}`);
-		case "tool": {
-			const color = item.status === "error" ? "error" : item.status === "done" ? "success" : "dim";
-			const indent = item.nested ? "    " : "";
-			const head = truncateToWidth(`${indent}${theme.fg(color, "●")} ${theme.fg("toolTitle", item.text)}`, width);
-			if (!item.output) return [head];
-			const preview = item.output.split("\n").filter((line) => line.trim()).slice(0, 2);
-			return [head, ...preview.map((line, index) => truncateToWidth(`${indent}${theme.fg("dim", index === 0 ? "  ⎿ " : "    ")}${theme.fg("dim", line)}`, width))];
-		}
+function markdownTheme() {
+	try {
+		const theme = getMarkdownTheme();
+		theme.heading("probe");
+		return theme;
+	} catch {
+		return undefined;
 	}
 }
 
 /**
- * Live transcript of one agent in an overlay. Typing goes to the agent: Enter
- * steers it while running, or resumes it with a follow-up once finished.
+ * A subagent's session, shown the way Pi shows any session: user messages,
+ * assistant markdown and tool boxes come from Pi's own components. It takes
+ * the editor's place like Pi's selectors do; typing steers the agent while it
+ * runs, or follows up once it is done.
  */
 export class AgentViewer implements Component, Focusable {
 	private readonly input = new Input();
+	private readonly transcript = new Container();
+	private readonly tools = new Map<string, ToolExecutionComponent>();
+	private readonly partialsShown = new Map<string, unknown>();
+	private readonly renderers: Record<string, AnyToolDefinition>;
+	private readonly markdown = markdownTheme();
+	private readonly streaming: AssistantMessageComponent;
+	private rendered: LogEntry[] = [];
+	private streamed = "";
 	private scroll = 0;
-	private unsubscribe: () => void;
-	private cache: { key: string; lines: string[] } | undefined;
+	private expanded = false;
 	private status = "";
 	private _focused = false;
+	private readonly unsubscribe: () => void;
 
 	constructor(
 		private readonly tui: TUI,
 		private readonly theme: Theme,
 		private readonly run: AgentRun,
-		private readonly manager: AgentManager,
+		manager: AgentManager,
 		private readonly done: () => void,
 		/** Steer or follow up; the host decides whether the result is reported to the parent. */
 		private readonly send: (text: string) => Promise<"steered" | "queued" | "started">,
+		private readonly stop: () => void,
 	) {
-		this.unsubscribe = manager.subscribe(() => {
-			this.cache = undefined;
-			tui.requestRender();
-		});
+		this.renderers = builtinRenderers(run.spec.cwd);
+		this.streaming = new AssistantMessageComponent(undefined, true, this.markdown);
+		this.unsubscribe = manager.subscribe(() => tui.requestRender());
 		this.input.onSubmit = (value) => this.submit(value);
 	}
 
@@ -72,6 +104,88 @@ export class AgentViewer implements Component, Focusable {
 		this.input.focused = value;
 	}
 
+	/** Append components for log entries that arrived since the last render, or rebuild if the log was trimmed. */
+	private sync(): void {
+		const log = this.run.log;
+		const last = this.rendered.at(-1);
+		let start = last ? log.lastIndexOf(last) + 1 : 0;
+		if (last && start === 0) {
+			this.transcript.clear();
+			this.tools.clear();
+			this.partialsShown.clear();
+			start = 0;
+		}
+		for (const entry of log.slice(start)) this.append(entry);
+		this.rendered = log.slice();
+		for (const [id, partial] of this.run.partials) {
+			const tool = this.tools.get(id);
+			if (!tool || this.partialsShown.get(id) === partial) continue;
+			this.partialsShown.set(id, partial);
+			tool.updateResult({ content: partial.content, details: partial.details, isError: false }, true);
+		}
+		const text = this.run.streaming;
+		if (text !== this.streamed) {
+			this.streamed = text;
+			this.streaming.updateContent({ role: "assistant", content: text ? [{ type: "text", text }] : [] } as never, true);
+		}
+	}
+
+	private append(entry: LogEntry): void {
+		if (entry.kind === "notice") {
+			this.transcript.addChild(new Spacer(1));
+			this.transcript.addChild(new Text(this.theme.fg("muted", entry.text), 1, 0));
+			return;
+		}
+		const message = entry.message;
+		try {
+			this.appendMessage(message);
+		} catch {
+			// A message Pi's components cannot draw: fall back to its text.
+			const text = contentText(message.content);
+			if (text) this.transcript.addChild(new Text(this.theme.fg("muted", text), 1, 0));
+		}
+	}
+
+	private appendMessage(message: ChildMessage): void {
+		switch (message.role) {
+			case "user": {
+				const text = contentText(message.content).trim();
+				if (text) this.transcript.addChild(new UserMessageComponent(text, this.markdown));
+				return;
+			}
+			case "assistant": {
+				this.transcript.addChild(new AssistantMessageComponent(message as never, true, this.markdown));
+				const blocks = Array.isArray(message.content) ? (message.content as Array<Record<string, unknown>>) : [];
+				for (const block of blocks) {
+					if (block.type !== "toolCall") continue;
+					const id = String(block.id ?? "");
+					const name = String(block.name ?? "tool");
+					const tool = new ToolExecutionComponent(name, id, block.arguments, { showImages: false }, this.renderers[name], this.tui, this.run.spec.cwd);
+					tool.setArgsComplete();
+					tool.markExecutionStarted();
+					tool.setExpanded(this.expanded);
+					this.tools.set(id, tool);
+					this.transcript.addChild(tool);
+				}
+				return;
+			}
+			case "toolResult": {
+				const tool = this.tools.get(String(message.toolCallId ?? ""));
+				tool?.updateResult({
+					content: Array.isArray(message.content) ? (message.content as Array<{ type: string; text?: string }>) : [],
+					details: message.details,
+					isError: message.isError === true,
+				});
+				return;
+			}
+			case "custom": {
+				if (message.display !== true) return;
+				this.transcript.addChild(new CustomMessageComponent(message as never, undefined, this.markdown));
+				return;
+			}
+		}
+	}
+
 	private submit(value: string): void {
 		const text = value.trim();
 		if (!text) return;
@@ -79,7 +193,7 @@ export class AgentViewer implements Component, Focusable {
 		this.scroll = 0;
 		this.send(text).then(
 			(outcome) => {
-				this.status = outcome === "steered" ? "steered" : outcome === "queued" ? "added to queued task" : "resumed";
+				this.status = outcome === "steered" ? "steering after its current tool calls" : outcome === "queued" ? "added to its queued task" : "resumed";
 				this.tui.requestRender();
 			},
 			(error: unknown) => {
@@ -96,8 +210,14 @@ export class AgentViewer implements Component, Focusable {
 			return;
 		}
 		if (matchesKey(data, "ctrl+x")) {
-			void this.manager.stop(this.run);
+			this.stop();
 			this.status = "stopping";
+			return;
+		}
+		if (matchesKey(data, "ctrl+o")) {
+			this.expanded = !this.expanded;
+			for (const tool of this.tools.values()) tool.setExpanded(this.expanded);
+			this.tui.requestRender();
 			return;
 		}
 		const page = Math.max(1, this.viewportHeight() - 2);
@@ -122,62 +242,72 @@ export class AgentViewer implements Component, Focusable {
 	}
 
 	invalidate(): void {
-		this.cache = undefined;
+		this.transcript.invalidate();
+		this.streaming.invalidate();
 		this.input.invalidate();
 	}
 
 	private viewportHeight(): number {
 		const rows = (this.tui as unknown as { terminal?: { rows?: number } }).terminal?.rows ?? 40;
-		return Math.max(4, Math.floor((rows * VIEWER_HEIGHT_PCT) / 100) - CHROME);
+		return Math.max(6, Math.floor((rows * VIEWER_HEIGHT_PCT) / 100) - CHROME);
 	}
 
-	private bodyLines(width: number): string[] {
-		const key = `${width}:${this.run.items.length}:${this.run.items.at(-1)?.status ?? ""}:${this.run.items.at(-1)?.output?.length ?? 0}`;
-		if (!this.cache || this.cache.key !== key) {
-			const lines: string[] = [];
-			for (const item of this.run.items) lines.push(...itemLines(item, width, this.theme));
-			this.cache = { key, lines };
-		}
-		const streaming = this.run.streaming ? wrap(this.run.streaming, Math.max(10, width - 4)).map((line) => `  ${this.theme.fg("muted", line)}`) : [];
-		const thinking = this.run.status === "running" && !this.run.streaming
-			? [`  ${this.theme.fg("dim", this.run.approval ? `waiting for approval: ${this.run.approval.split("\n")[0]}` : "working…")}`]
-			: [];
-		return [...this.cache.lines, ...streaming, ...thinking];
+	private rightAligned(left: string, right: string, width: number): string {
+		const room = width - visibleWidth(right) - 1;
+		if (room < 10) return truncateToWidth(left, width);
+		const clipped = truncateToWidth(left, room);
+		return `${clipped}${" ".repeat(Math.max(1, width - visibleWidth(clipped) - visibleWidth(right)))}${right}`;
 	}
 
 	render(width: number): string[] {
+		this.sync();
 		const th = this.theme;
-		const inner = Math.max(20, width - 2);
-		const border = (text: string) => th.fg("border", text);
-		const row = (content: string) => {
-			const clipped = truncateToWidth(content, inner);
-			return `${border("│")}${clipped}${" ".repeat(Math.max(0, inner - visibleWidth(clipped)))}${border("│")}`;
-		};
 		const run = this.run;
 		const now = Date.now();
-		const elapsed = formatDuration((run.endedAt ?? now) - run.runStartedAt);
-		const header1 = ` ${statusIcon(run.status, th, now)} ${th.bold(run.name)} ${th.fg("muted", `(${run.type})`)} ${th.fg("text", run.description)}`;
-		const header2 = th.fg("dim", ` ${statusWord(run.status)} · ${run.spec.model}${run.spec.thinking ? `:${run.spec.thinking}` : ""} · ctx ${contextLabel(run.contextTokens, run.spec.contextBudget, run.spec.contextWindow)}${run.spec.contextBudget && run.spec.contextWindow ? ` (window ${formatTokens(run.spec.contextWindow)})` : ""} · ${formatTokens(run.outputTokens)} out · $${run.cost.toFixed(2)} · ${run.toolUses} tools · ${elapsed}${run.spec.worktree ? ` · ${run.spec.worktree.path}` : run.spec.cwd ? ` · ${run.spec.cwd}` : ""}`);
+		const rule = th.fg("border", "─".repeat(Math.max(1, width)));
+
+		const type = run.name === run.type || run.name.startsWith(`${run.type}-`) ? "" : ` ${th.fg("muted", run.type)}`;
+		const name = `${statusGlyph(run.status, th, { now, approval: Boolean(run.approval) })} ${th.fg("accent", th.bold(run.name))}${type} ${th.fg("text", run.description)}`;
+		const meta = th.fg("muted", [
+			`${shortModel(run.spec.model)}${run.spec.thinking ? `:${run.spec.thinking}` : ""}`,
+			contextLabel(run.contextTokens, run.spec.contextBudget, run.spec.contextWindow),
+			`${run.toolUses} tool calls`,
+			formatDuration((run.endedAt ?? now) - run.runStartedAt),
+		].join(" · "));
+
+		const body = [...this.transcript.render(width)];
+		if (run.status === "running") {
+			const tail = this.streaming.render(width);
+			if (tail.some((line) => line.trim())) body.push(...tail);
+			else body.push("", ` ${th.fg("accent", statusGlyph("running", th, { now }))} ${th.fg("muted", run.approval ? `waiting for your approval: ${run.approval.split("\n")[0]}` : "working…")}`);
+		}
+
 		const height = this.viewportHeight();
-		const body = this.bodyLines(inner - 1);
-		const maxScroll = Math.max(0, body.length - height);
-		this.scroll = Math.min(this.scroll, maxScroll);
+		this.scroll = Math.min(this.scroll, Math.max(0, body.length - height));
 		const end = body.length - this.scroll;
 		const visible = body.slice(Math.max(0, end - height), end);
-		while (visible.length < height) visible.push("");
-		const action = run.status === "running" ? "enter steer" : run.status === "queued" ? "enter add to task" : "enter follow up";
-		const footer = th.fg("dim", ` ${action} · ↑↓ pgup/pgdn scroll${this.scroll ? ` (${this.scroll} up)` : ""} · ctrl+x stop · esc close${this.status ? ` · ${this.status}` : ""}`);
-		const inputLine = this.input.render(inner)[0] ?? "";
+		while (visible.length < height) visible.unshift("");
+
+		const action = run.status === "running" ? "steer" : run.status === "queued" ? "add to task" : "follow up";
+		const hint = (key: string, text: string) => `${th.fg("dim", key)} ${th.fg("muted", text)}`;
+		const hints = [
+			hint("enter", action),
+			hint("↑↓", this.scroll ? `scroll (${this.scroll} up)` : "scroll"),
+			hint("ctrl+o", this.expanded ? "collapse" : "expand"),
+			...(run.busy ? [hint("ctrl+x", "stop")] : []),
+			hint("esc", "back"),
+		].join(th.fg("dim", " · "));
+
 		return [
-			border(`╭${"─".repeat(inner)}╮`),
-			row(header1),
-			row(header2),
-			border(`├${"─".repeat(inner)}┤`),
-			...visible.map((line) => row(line)),
-			border(`├${"─".repeat(inner)}┤`),
-			row(inputLine),
-			row(footer),
-			border(`╰${"─".repeat(inner)}╯`),
+			rule,
+			this.rightAligned(` ${name}`, `${meta} `, width),
+			rule,
+			...visible,
+			rule,
+			this.status
+				? this.rightAligned(this.input.render(Math.max(10, width - visibleWidth(this.status) - 3))[0] ?? "", `${th.fg("muted", this.status)} `, width)
+				: truncateToWidth(this.input.render(width - 1)[0] ?? "", width),
+			truncateToWidth(` ${hints}`, width),
 		];
 	}
 }

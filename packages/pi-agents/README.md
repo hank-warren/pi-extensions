@@ -1,6 +1,6 @@
 # pi-agents
 
-Claude Code-style subagents for [Pi](https://pi.dev). Each agent is its own `pi --mode rpc` process with your normal extensions, skills and `AGENTS.md`. Agents are configured with markdown files, show up in a live panel below the editor, can be steered while they run, and stay within a context and turn budget.
+Subagents for [Pi](https://pi.dev) that look and feel like Pi. Each agent is its own `pi --mode rpc` process with your normal extensions, skills and `AGENTS.md`, configured with a markdown file. It renders with Pi's own tool rows, status line and transcript components, can be watched and steered while it runs, and optionally stays within a context budget.
 
 ```bash
 pi install npm:@hank-warren/pi-agents
@@ -43,32 +43,56 @@ return reports.map((r, i) => r.status === "fulfilled" ? `## ${areas[i]}\n${r.val
 
 Only the script's output reaches the parent's context. Pressing Esc, or a script that ends early, stops the agents it started.
 
-## The panel
+## How it looks
 
-The panel appears below the editor whenever agents are running or have just finished:
+The way of working comes from Claude Code's subagents: delegate, keep working, watch, steer. Everything is drawn with Pi's own pieces, so an agent looks like the rest of Pi rather than a port of another tool.
+
+**The Agent call is an ordinary Pi tool row.** It uses the same tinted box, the same `toolTitle` call line and the same `... (N more lines, ctrl+o to expand)` collapse as `bash` or `read`. While a foreground agent works, the box lists its latest tool calls in Pi's own notation (`$ rg -n foo`, `read src/a.ts:10-40`, `grep /x/ in src`). When it finishes, the box shows the report and a `took 1m03s` footer.
 
 ```
-  2 agents running · ↓ to manage
-    ⠹ reviewer  Review auth changes        claude-opus-5 · ctx 41k/1M · 18 tools · 2m10s
-    ✓ scout     Map payment flow           claude-sonnet-5 · ctx 22k/120k budget · 9 tools · 31s
+ agent scout map payment flow
+ ... (6 earlier tool calls, ctrl+o to expand)
+ read src/pay.ts:1-40
+ grep /refund/ in src
+ $ rg -n "issueRefund" src
+
+ claude-sonnet-5 · 41k/272k · 1m03s
+```
+
+**A background agent's report lands as a custom message** labeled `[agent]`, the same frame Pi gives `[skill]`:
+
+```
+ [agent] scout · done · 9 tool calls · 22k context · 31s
+ Refunds are issued from src/refund.ts:12 …
+ ... (8 more lines, ctrl+o to expand)
+```
+
+**The status line below the editor** uses the same shape as Pi's other status lines (`auto permissions · …`, `◆ plan · …`). It appears whenever agents are running or have just finished:
+
+```
+ agents · 2 running · 1 waiting for you                                          ↓ to manage
+   ⠹ reviewer review auth changes        claude-opus-5 · 41k/1M · 18 tool calls · 2m10s
+   ? pusher   push release branch        waiting for your approval · gpt-5.6-luna · 3k/272k · 2 tool calls · 40s
+   ✓ scout    map payment flow           claude-sonnet-5 · 22k/120k budget · 9 tool calls · 31s
 ```
 
 | Key | Action |
 |---|---|
-| `↓` (at an empty prompt) | Focus the list |
+| `↓` (at an empty prompt) | Focus the list; `→` marks the selection, as in Pi's selectors |
 | `↑` / `↓` | Move between rows |
-| `Enter` | Open the agent's live transcript |
+| `Enter` | Open the agent |
 | `x` | Stop a running agent, or dismiss a finished row |
 | `Esc` | Back to the prompt |
 
-In the transcript view:
+**Opening an agent shows its session as Pi would.** The view takes the editor's place, like `/tree` or `/resume`. Inside it, user messages, assistant markdown and tool boxes are drawn with Pi's own components and built-in tool renderers, so `$ bash` output, `read` previews and `edit` diffs look the same as in the main session. Assistant text streams in live.
 
 | Key | Action |
 |---|---|
-| Type, then `Enter` | Steer a running agent, or follow up on a finished one |
+| Type, then `Enter` | Steer a running agent (delivered after its current tool calls), or follow up on a finished one |
 | `↑` `↓` `PgUp` `PgDn` | Scroll |
+| `Ctrl+O` | Expand or collapse every tool box |
 | `Ctrl+X` | Stop the agent |
-| `Esc` | Close |
+| `Esc` | Back |
 
 `/agents` lists every agent in the session, including ones restored after a restart, and opens one. `/agents types` lists the agent definitions and any errors in them.
 

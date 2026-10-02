@@ -1,16 +1,15 @@
 import { existsSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir, type Theme } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
 import { type AgentDefinition, discoverAgents } from "./agents.js";
 import { registerChild } from "./child.js";
 import { type AgentsConfig, DEFAULT_CONFIG, loadConfig } from "./config.js";
 import { AgentManager, type AgentRun, type RunSnapshot } from "./manager.js";
 import { AgentPanel } from "./panel.js";
-import { type AgentDetails, detailsOf, statsLine, statusIcon, statusWord } from "./render.js";
+import { type AgentDetails, detailsOf, renderAgentMessage, statsLine } from "./render.js";
 import { registerTools, resultText, sendToAgent, type ToolHost } from "./tools.js";
-import { loadTranscript } from "./transcript.js";
-import { AgentViewer, VIEWER_HEIGHT_PCT } from "./viewer.js";
+import { loadLog } from "./transcript.js";
+import { AgentViewer } from "./viewer.js";
 
 const RUN_ENTRY = "pi-agents-run";
 const RESULT_MESSAGE = "pi-agents-result";
@@ -87,12 +86,19 @@ export default function piAgents(pi: ExtensionAPI): void {
 	const openViewer = async (run: AgentRun): Promise<void> => {
 		const ui = ctx?.ui;
 		if (!ui || ctx?.mode !== "tui") return;
-		if (!run.items.length && run.sessionFile) run.items = loadTranscript(run.sessionFile);
-		await ui.custom<void>(
-			(tui, theme, _keybindings, done) =>
-				new AgentViewer(tui, theme, run, manager, () => done(), (text) => sendToAgent({ manager, notify }, run, text)),
-			{ overlay: true, overlayOptions: { anchor: "center", width: "92%", maxHeight: `${VIEWER_HEIGHT_PCT}%` } },
-		);
+		if (!run.log.length && run.sessionFile) run.log = loadLog(run.sessionFile);
+		const current = manager;
+		// In the editor's place, like Pi's own selectors, rather than a floating box.
+		await ui.custom<void>((tui, theme, _keybindings, done) =>
+			new AgentViewer(
+				tui,
+				theme,
+				run,
+				current,
+				() => done(),
+				(text) => sendToAgent({ manager: current, notify }, run, text),
+				() => void current.stop(run),
+			));
 	};
 	const panel = new AgentPanel({ subscribe: (listener) => manager.subscribe(listener), list: () => manager.list(), stop: (run) => manager.stop(run) }, openViewer);
 
@@ -113,12 +119,7 @@ export default function piAgents(pi: ExtensionAPI): void {
 
 	pi.registerMessageRenderer<AgentDetails>(RESULT_MESSAGE, (message, options, theme: Theme) => {
 		const details = message.details;
-		if (!details) return undefined;
-		const head = `${statusIcon(details.status, theme)} ${theme.bold(details.name)} ${theme.fg("muted", `(${details.type})`)} ${details.description} ${theme.fg("dim", `· ${statusWord(details.status)} (${statsLine(details)})`)}`;
-		const lines = [head];
-		if (details.error) lines.push(theme.fg("error", `  ${details.error}`));
-		if (options.expanded && details.result) lines.push("", details.result);
-		return new Text(lines.join("\n"), 0, 0);
+		return details ? renderAgentMessage(details, options.expanded, theme) : undefined;
 	});
 
 	pi.on("session_start", async (_event, next) => {
@@ -168,7 +169,7 @@ export default function piAgents(pi: ExtensionAPI): void {
 				commandCtx.ui.notify("No subagents in this session. /agents types lists the definitions.", "info");
 				return;
 			}
-			const labels = runs.map((run) => `${statusWord(run.status).padEnd(7)} ${run.name} · ${run.description} · ${statsLine(detailsOf(run))}`);
+			const labels = runs.map((run) => `${run.status.padEnd(7)} ${run.name} · ${run.description} · ${statsLine(detailsOf(run))}`);
 			const choice = await commandCtx.ui.select("Subagents", labels);
 			const run = choice ? runs[labels.indexOf(choice)] : undefined;
 			if (run) panel.openRun(run);

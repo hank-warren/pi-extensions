@@ -1,7 +1,7 @@
 {
   "name": "@hank-warren/pi-agents",
   "version": "0.1.0",
-  "description": "Claude Code-style subagents for Pi: each agent is its own pi --mode rpc process with your extensions and AGENTS.md, a live panel below the editor, steering, budgets, and git worktrees.",
+  "description": "Subagents for Pi that look like Pi: each agent is its own pi --mode rpc process with your extensions and AGENTS.md, rendered with Pi's own components, watchable and steerable, with optional budgets and git worktrees.",
   "type": "module",
   "keywords": [
     "pi-package",

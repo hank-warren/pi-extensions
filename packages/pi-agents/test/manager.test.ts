@@ -51,11 +51,11 @@ test("a run streams tool use and usage, finishes with its last answer, and resum
 		assert.equal(run.status, "done");
 		assert.equal(run.result, "echo: hello");
 		assert.equal(run.toolUses, 1);
-		assert.deepEqual(run.recentTools, ["Bash ls -la"]);
+		assert.deepEqual(run.toolLog, [{ head: "$", rest: "ls -la" }]);
 		assert.equal(run.contextTokens, 1050);
 		assert.ok(run.sessionFile?.startsWith("/tmp/fake-"));
-		assert.deepEqual(run.items.map((item) => item.kind), ["user", "tool", "assistant"]);
-		assert.equal(run.items[1]?.output, "file-a\nfile-b");
+		const roles = run.log.map((entry) => (entry.kind === "message" ? entry.message.role : entry.kind));
+		assert.deepEqual(roles, ["user", "assistant"], "the child's own messages, as its session holds them");
 		assert.equal(finished.length, 1);
 		assert.ok(run.alive, "the process idles for follow-ups");
 
@@ -85,7 +85,8 @@ test("steering reaches a running agent", async () => {
 		assert.equal(await manager.message(run, "wrap up"), "steered");
 		await manager.waitFor(run);
 		assert.equal(run.result, "steered: wrap up");
-		assert.equal(run.items.filter((item) => item.kind === "user" && item.text === "wrap up").length, 1, "the echoed steer is not duplicated");
+		const steers = run.log.filter((entry) => entry.kind === "message" && entry.message.role === "user" && entry.message.content === "wrap up");
+		assert.equal(steers.length, 1, "the steer appears once, when the child delivers it");
 	} finally {
 		await manager.dispose();
 	}
@@ -148,7 +149,7 @@ test("an editor dialog from a child is declined without opening an uncancellable
 		await manager.waitFor(run);
 		assert.equal(opened, 0);
 		assert.equal(run.result, "dialog: cancelled");
-		assert.ok(run.items.some((item) => item.kind === "notice" && /declined an editor dialog \(Edit plan\)/.test(item.text)));
+		assert.ok(run.log.some((entry) => entry.kind === "notice" && /declined an editor dialog \(Edit plan\)/.test(entry.text)));
 	} finally {
 		await manager.dispose();
 	}
@@ -285,7 +286,7 @@ test("the Agent tool rejects unknown types and models, and announces a backgroun
 		const foreground = await call({ subagent_type: "general-purpose", run_in_background: false });
 		assert.equal(foreground.structuredContent?.status, "done");
 		assert.equal(foreground.structuredContent?.result, "echo: hi");
-		assert.match(foreground.content[0]!.text, /^echo: hi\n\n\[general-purpose \(general-purpose, id \w+\) · done · 1 tool use/);
+		assert.match(foreground.content[0]!.text, /^echo: hi\n\n\[general-purpose \(general-purpose, id \w+\) · done · 1 tool call · /);
 
 		const background = await call({ subagent_type: "general-purpose", name: "bg" });
 		assert.match(background.content[0]!.text, /^Started bg \(id \w+, general-purpose, test\/model\) in the background/);

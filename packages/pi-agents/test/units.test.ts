@@ -6,13 +6,13 @@ import test from "node:test";
 import { BUILTIN_AGENTS, discoverAgents, parseAgentFile, projectAgentDirs } from "../src/agents.js";
 import { budgetAfterTurn, budgetAtPromptStart, type BudgetState } from "../src/child.js";
 import { DEFAULT_EXCLUDED_TOOLS, loadConfig } from "../src/config.js";
-import { formatDuration, formatTokens, summarizeToolCall } from "../src/format.js";
+import { formatDuration, formatTokens, summarizeToolCall, summaryText } from "../src/format.js";
 import { contextLabel } from "../src/render.js";
 import { forwardedExtensionArgs } from "../src/index.js";
 import { buildChildArgs, buildChildEnv } from "../src/manager.js";
 import { buildChildPrompt } from "../src/prompts.js";
 import { createLineSplitter } from "../src/rpc.js";
-import { loadTranscript } from "../src/transcript.js";
+import { loadLog } from "../src/transcript.js";
 import { worktreeDirName } from "../src/worktree.js";
 
 test("formatters match the panel's compact style", () => {
@@ -26,10 +26,12 @@ test("formatters match the panel's compact style", () => {
 	assert.equal(formatDuration(42_000), "42s");
 	assert.equal(formatDuration(125_000), "2m05s");
 	assert.equal(formatDuration(3_780_000), "1h03m");
-	assert.equal(summarizeToolCall("bash", { command: "rg -n   foo\n src" }), "Bash rg -n foo src");
-	assert.equal(summarizeToolCall("read", { path: "/a/b.ts" }), "Read /a/b.ts");
-	assert.equal(summarizeToolCall("codemode", { code: '// @options: {"x":1}\nconst r = await tools.bash({})' }), "Codemode const r = await tools.bash({})");
-	assert.equal(summarizeToolCall("web_search", { query: "pi rpc" }), "web_search pi rpc");
+	const text = (name: string, args: unknown) => summaryText(summarizeToolCall(name, args));
+	assert.equal(text("bash", { command: "rg -n   foo\n src" }), "$ rg -n foo src", "Pi's own notation");
+	assert.equal(text("read", { path: "/a/b.ts", offset: 10, limit: 31 }), "read /a/b.ts:10-40");
+	assert.equal(text("grep", { pattern: "foo", path: "src" }), "grep /foo/ in src");
+	assert.equal(text("codemode", { code: '// @options: {"x":1}\nconst r = await tools.bash({})' }), "codemode const r = await tools.bash({})");
+	assert.equal(text("web_search", { query: "pi rpc" }), "web_search pi rpc");
 });
 
 test("an agent file parses Claude Code-style frontmatter and keeps the body as the prompt", () => {
@@ -213,20 +215,23 @@ test("-e extensions are forwarded to children as absolute paths", () => {
 	);
 });
 
-test("a restored agent's transcript is rebuilt from its session file", () => {
+test("a restored agent's log is rebuilt from its session file, messages intact", () => {
 	const dir = mkdtempSync(join(tmpdir(), "pi-agents-transcript-"));
 	const file = join(dir, "s.jsonl");
+	const assistant = { role: "assistant", content: [{ type: "text", text: "looking" }, { type: "toolCall", id: "c1", name: "bash", arguments: { command: "rg foo" } }] };
+	const result = { role: "toolResult", toolCallId: "c1", isError: true, content: [{ type: "text", text: "no matches" }] };
 	const entries = [
 		{ type: "session", id: "h" },
 		{ type: "message", message: { role: "user", content: "find foo" } },
-		{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "looking" }, { type: "toolCall", id: "c1", name: "bash", arguments: { command: "rg foo" } }] } },
-		{ type: "message", message: { role: "toolResult", toolCallId: "c1", isError: true, content: [{ type: "text", text: "no matches" }] } },
+		{ type: "model_change", id: "m" },
+		{ type: "message", message: assistant },
+		{ type: "message", message: result },
 	];
-	writeFileSync(file, `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
-	assert.deepEqual(loadTranscript(file), [
-		{ kind: "user", text: "find foo" },
-		{ kind: "assistant", text: "looking" },
-		{ kind: "tool", text: "Bash rg foo", toolCallId: "c1", status: "error", output: "no matches" },
+	writeFileSync(file, `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\nnot json\n`);
+	assert.deepEqual(loadLog(file), [
+		{ kind: "message", message: { role: "user", content: "find foo" } },
+		{ kind: "message", message: assistant },
+		{ kind: "message", message: result },
 	]);
-	assert.equal(loadTranscript(join(dir, "missing.jsonl"))[0]?.kind, "notice");
+	assert.equal(loadLog(join(dir, "missing.jsonl"))[0]?.kind, "notice");
 });

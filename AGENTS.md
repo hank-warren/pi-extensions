@@ -22,7 +22,7 @@ packages/                      # public, npm-published pi packages
   pi-codex-compaction/        # native Codex compaction, directly or through CPA (fork of @ogulcancelik/pi-codex-compaction)
   pi-thinking-step/            # step the thinking level up/down with Alt+= / Alt+-
   pi-auto-name/                # names the session from its work after the first turn; /rename regenerates
-  pi-agents/                   # Claude Code-style subagents as pi --mode rpc children: panel, steering, budgets, worktrees
+  pi-agents/                   # subagents as pi --mode rpc children, drawn with pi's own components: status line, steering, budgets, worktrees
 docs/                          # template-package/ (copy-to-create package skeleton)
 scripts/                       # validate.py, test.sh, scan-secrets.sh, smoke-load.mjs, create-releases.sh
 test/                          # cross-package composition tests and the shared test support in test/support/
