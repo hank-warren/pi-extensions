@@ -542,6 +542,27 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     }
   }
 
+  /**
+   * In a subagent with a UI, the first time a command would go to the human it
+   * is refused with a revise-first reason instead. Same-turn duplicates are
+   * refused too; an unchanged retry in a later turn returns undefined, and the
+   * caller asks the human.
+   */
+  function reviseFirstBlock(scope: ReviewScope, reason: string, source: "guardian" | "review_failure"): BlockResult | undefined {
+    if (!subagentSession || !scope.ctx.hasUI) return undefined;
+    const key = `${scope.gate.label}\0${scope.command}`;
+    const refusedIn = reviseFirst.get(key);
+    if (refusedIn !== undefined && refusedIn !== turnGeneration) return undefined;
+    if (refusedIn === undefined) reviseFirst.set(key, turnGeneration);
+    return settle(scope, {
+      display: "revise",
+      verdict: "revise",
+      source,
+      reason,
+      block: subagentReviseFirstReason(scope.gate.label, reason),
+    });
+  }
+
   /** Apply one settled review. Runs holding the decision slot. */
   function applyReview(
     scope: ReviewScope,
@@ -549,7 +570,8 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     lifecycleSignal: AbortSignal,
   ): Promise<BlockResult | undefined> | BlockResult | undefined {
     if (outcome.kind === "failed") {
-      return askUser(scope, `Automatic review failed: ${outcome.reason}`, lifecycleSignal, "review_failure");
+      const reason = `Automatic review failed: ${outcome.reason}`;
+      return reviseFirstBlock(scope, reason, "review_failure") ?? askUser(scope, reason, lifecycleSignal, "review_failure");
     }
     const { verdict } = outcome;
     if (verdict.decision === "approve") {
@@ -564,21 +586,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
         block: `Auto Permissions requested revision: ${verdict.reason}\nRevise the command and try again.`,
       });
     }
-    if (subagentSession && scope.ctx.hasUI) {
-      const key = `${scope.gate.label}\0${scope.command}`;
-      const refusedIn = reviseFirst.get(key);
-      if (refusedIn === undefined || refusedIn === turnGeneration) {
-        if (refusedIn === undefined) reviseFirst.set(key, turnGeneration);
-        return settle(scope, {
-          display: "revise",
-          verdict: "revise",
-          source: "guardian",
-          reason: verdict.reason,
-          block: subagentReviseFirstReason(scope.gate.label, verdict.reason),
-        });
-      }
-    }
-    return askUser(scope, verdict.reason, lifecycleSignal, "guardian");
+    return reviseFirstBlock(scope, verdict.reason, "guardian") ?? askUser(scope, verdict.reason, lifecycleSignal, "guardian");
   }
 
   /**

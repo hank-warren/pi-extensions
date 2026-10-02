@@ -1883,3 +1883,31 @@ test("39 · same-turn duplicates of a refused command stay refused; only a later
 			},
 		));
 });
+
+test("40 · in a subagent, a failed review is revise-first too, with review_failure attribution", async () => {
+	await asSubagentChild(() =>
+		withExtension(
+			{
+				rules: [GUARDED_RULE],
+				completeSimple: () => {
+					throw new Error("reviewer offline");
+				},
+			},
+			async (harness) => {
+				await harness.sessionStart();
+
+				const first = await harness.toolCall("git push origin main", "call-1");
+				assert.match(first?.reason ?? "", /^Git push needs human approval: Automatic review failed: reviewer offline/u);
+				assert.match(first?.reason ?? "", /You are a subagent/u);
+				assert.equal(harness.customCalls, 0, "a reviewer outage does not interrupt the human on the first try");
+				assert.equal(harness.denied[0]?.decisionSource, "review_failure");
+				assert.equal(harness.denied[0]?.verdict, "revise");
+
+				await harness.turnEnd();
+				harness.answers.push("Block");
+				assert.deepEqual(await harness.toolCall("git push origin main", "call-2"), { block: true, reason: "Blocked by user" });
+				assert.equal(harness.customCalls, 1, "the unchanged retry in a later turn asks the human");
+				assert.match(harness.prompts[0]!.join("\n"), /Automatic review failed: reviewer offline/u);
+			},
+		));
+});

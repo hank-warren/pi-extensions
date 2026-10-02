@@ -447,7 +447,7 @@ When a session is a subagent child (`PI_SUBAGENT_CHILD=1`, set by `@hank-warren/
 
 The child itself is told it is a subagent: a short section appended to its system prompt says that commands needing approval pause the supervising session, so it should prefer in-scope and read-only commands and revise when asked to.
 
-An `ask_user` verdict in a subagent never interrupts the human on the first try:
+An `ask_user` verdict in a subagent, or a failed review (timeout, unavailable reviewer, unparsable verdict), never interrupts the human on the first try:
 
 - **Child with a UI** (an RPC child whose prompts surface in the parent, as with pi-agents): the command is blocked with a revise-first reason. Issuing the *same* command again unchanged in a later turn escalates it to the human as an ordinary approval prompt. Duplicates within the same turn (sibling calls, or a codemode `Promise.all`) are refused as well, because the model has not seen the first refusal yet. Any other command gets its own revise-first turn.
 - **Child without a UI**: the command is blocked with a reason instructing the child to route around the gated operation or report the blocker.
