@@ -49,8 +49,8 @@ The panel appears below the editor whenever agents are running or have just fini
 
 ```
   2 agents running · ↓ to manage
-    ⠹ reviewer  Review auth changes        claude-opus-5 · ctx 41k/200k · 18 tools · 2m10s
-    ✓ scout     Map payment flow           claude-sonnet-5 · ctx 22k/120k · 9 tools · 31s
+    ⠹ reviewer  Review auth changes        claude-opus-5 · ctx 41k/1M · 18 tools · 2m10s
+    ✓ scout     Map payment flow           claude-sonnet-5 · ctx 22k/120k budget · 9 tools · 31s
 ```
 
 | Key | Action |
@@ -104,20 +104,20 @@ Report findings as file:line, severity, and why. No style nits.
 | `disallowedTools` | Removed from whatever the agent would otherwise get. |
 | `model` | `provider/id`. Omit it, or write `inherit`, to use the parent's current model. An unknown model is an error, never a silent fallback. |
 | `thinking` (or `effort`) | `off` … `max`. Default: the parent's current level. |
-| `maxTurns`, `contextBudget` | Budget overrides. See the next section. |
+| `maxTurns`, `contextBudget` | Turn budget (default 80) and an optional context budget. See the next section. |
 | `background` | Default for `run_in_background`. |
 | `contextFiles: false` | Skip `AGENTS.md` / `CLAUDE.md`. |
 
 ## Budgets: agents that stop on time
 
-Without limits, long-context models drift: an agent keeps reading until its context sits at hundreds of thousands of tokens and its answers degrade. Every child enforces a budget from inside its own process:
+Every child enforces its budget from inside its own process:
 
 - **At 75% of `contextBudget` or 80% of `maxTurns`**, the agent is steered: stop exploring, finish what is essential, and report.
 - **At 100%**, every further tool call is refused and the agent must write its final report. If it keeps calling tools, the run is aborted.
 
-The result says `budget exhausted` when this happened. The child's system prompt also tells it its budget and asks it to keep its context lean.
+The result says `budget exhausted` when this happened.
 
-The defaults are 200k tokens and 80 turns. The built-in `scout` uses 120k.
+`maxTurns` defaults to 80. **There is no context budget by default**: an agent can use its model's whole window, and Pi's compaction applies as in any session. Set `contextBudget` on an agent that should stop well short of its window. This matters most for long-context models, which tend to keep reading until their answers degrade. The panel shows `ctx 78k/150k budget` for an agent with a budget, and `ctx 78k/272k` against the model's window for one without.
 
 ## Worktrees for multi-repo workspaces
 
@@ -148,7 +148,6 @@ Settings live in `~/.pi/agent/pi-agents/config.json` (override the path with `PI
 ```json
 {
   "maxConcurrent": 6,
-  "contextBudget": 200000,
   "maxTurns": 80,
   "idleTtlSeconds": 600,
   "worktreeDir": "~/repos/worktrees",
@@ -160,6 +159,7 @@ Settings live in `~/.pi/agent/pi-agents/config.json` (override the path with `PI
 | Key | Meaning |
 |---|---|
 | `maxConcurrent` | Number of children running at once. Further spawns queue. |
+| `contextBudget` | A context budget for every agent that does not set its own. Unset by default. |
 | `idleTtlSeconds` | How long a finished child's process is kept for follow-ups. |
 | `excludeTools` | Added to the built-in exclusions: subagent tools, `ask_user_question`, and the goal tools. |
 | `piCommand` | Overrides how a child is started. |

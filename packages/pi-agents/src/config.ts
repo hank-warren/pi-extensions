@@ -24,8 +24,11 @@ export const DEFAULT_EXCLUDED_TOOLS = [
 export interface AgentsConfig {
 	/** Children running at once; further spawns queue. */
 	maxConcurrent: number;
-	/** Default context-token budget per child. The child is told to wrap up at 75% and cut off at 100%. */
-	contextBudget: number;
+	/**
+	 * Context-token budget for every child that does not set its own. Unset by
+	 * default: budgets are opt-in, per agent file or here.
+	 */
+	contextBudget?: number;
 	/** Default turn budget per prompt. */
 	maxTurns: number;
 	/** Keep a finished child's process this long so follow-ups skip the cold start. */
@@ -40,7 +43,6 @@ export interface AgentsConfig {
 
 export const DEFAULT_CONFIG: AgentsConfig = {
 	maxConcurrent: 6,
-	contextBudget: 200_000,
 	maxTurns: 80,
 	idleTtlSeconds: 600,
 	excludeTools: DEFAULT_EXCLUDED_TOOLS,
@@ -85,7 +87,7 @@ export function loadConfig(path = configPath()): { config: AgentsConfig; error?:
 	return {
 		config: {
 			maxConcurrent: positiveInt(input.maxConcurrent) ?? DEFAULT_CONFIG.maxConcurrent,
-			contextBudget: positiveInt(input.contextBudget) ?? DEFAULT_CONFIG.contextBudget,
+			contextBudget: positiveInt(input.contextBudget),
 			maxTurns: positiveInt(input.maxTurns) ?? DEFAULT_CONFIG.maxTurns,
 			idleTtlSeconds: typeof input.idleTtlSeconds === "number" && input.idleTtlSeconds >= 0
 				? input.idleTtlSeconds

@@ -1,6 +1,6 @@
 import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Editor, isKeyRelease, Key, matchesKey, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { formatDuration, formatTokens } from "./format.js";
+import { formatDuration } from "./format.js";
 import type { AgentRun } from "./manager.js";
 
 /** The slice of the manager the panel reads; the manager is replaced per session. */
@@ -9,7 +9,7 @@ export interface PanelSource {
 	list(): AgentRun[];
 	stop(run: AgentRun): Promise<void>;
 }
-import { shortModel, statusIcon } from "./render.js";
+import { contextLabel, contextShare, shortModel, statusIcon } from "./render.js";
 
 const WIDGET_KEY = "pi-agents";
 const MAX_ROWS = 6;
@@ -227,8 +227,8 @@ export class AgentPanel {
 		if (run.approval) parts.push(theme.fg("warning", "needs approval"));
 		else if (run.status === "queued") parts.push("queued");
 		parts.push(shortModel(run.spec.model));
-		const context = `ctx ${formatTokens(run.contextTokens)}/${formatTokens(run.spec.contextBudget)}`;
-		parts.push(run.contextTokens >= run.spec.contextBudget * 0.75 ? theme.fg("warning", context) : context);
+		const context = `ctx ${contextLabel(run.contextTokens, run.spec.contextBudget, run.spec.contextWindow)}`;
+		parts.push((contextShare(run.contextTokens, run.spec.contextBudget, run.spec.contextWindow) ?? 0) >= 0.75 ? theme.fg("warning", context) : context);
 		parts.push(`${run.toolUses} tools`);
 		parts.push(formatDuration((run.endedAt ?? now) - run.runStartedAt));
 		const right = parts.map((part) => (part.includes("\x1b") ? part : theme.fg(selected ? "text" : "dim", part))).join(theme.fg("dim", " · "));

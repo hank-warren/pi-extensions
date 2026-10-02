@@ -2,7 +2,7 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, type Focusable, Input, Key, matchesKey, type TUI, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { formatDuration, formatTokens } from "./format.js";
 import type { AgentManager, AgentRun, TranscriptItem } from "./manager.js";
-import { statusIcon, statusWord } from "./render.js";
+import { contextLabel, statusIcon, statusWord } from "./render.js";
 
 export const VIEWER_HEIGHT_PCT = 80;
 /** Lines of chrome: top border, 2 header lines, separator, separator, input, footer, bottom border. */
@@ -157,7 +157,7 @@ export class AgentViewer implements Component, Focusable {
 		const now = Date.now();
 		const elapsed = formatDuration((run.endedAt ?? now) - run.runStartedAt);
 		const header1 = ` ${statusIcon(run.status, th, now)} ${th.bold(run.name)} ${th.fg("muted", `(${run.type})`)} ${th.fg("text", run.description)}`;
-		const header2 = th.fg("dim", ` ${statusWord(run.status)} · ${run.spec.model}${run.spec.thinking ? `:${run.spec.thinking}` : ""} · ctx ${formatTokens(run.contextTokens)}/${formatTokens(run.spec.contextBudget)} · ${formatTokens(run.outputTokens)} out · $${run.cost.toFixed(2)} · ${run.toolUses} tools · ${elapsed}${run.spec.worktree ? ` · ${run.spec.worktree.path}` : run.spec.cwd ? ` · ${run.spec.cwd}` : ""}`);
+		const header2 = th.fg("dim", ` ${statusWord(run.status)} · ${run.spec.model}${run.spec.thinking ? `:${run.spec.thinking}` : ""} · ctx ${contextLabel(run.contextTokens, run.spec.contextBudget, run.spec.contextWindow)}${run.spec.contextBudget && run.spec.contextWindow ? ` (window ${formatTokens(run.spec.contextWindow)})` : ""} · ${formatTokens(run.outputTokens)} out · $${run.cost.toFixed(2)} · ${run.toolUses} tools · ${elapsed}${run.spec.worktree ? ` · ${run.spec.worktree.path}` : run.spec.cwd ? ` · ${run.spec.cwd}` : ""}`);
 		const height = this.viewportHeight();
 		const body = this.bodyLines(inner - 1);
 		const maxScroll = Math.max(0, body.length - height);

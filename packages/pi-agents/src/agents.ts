@@ -47,7 +47,6 @@ export const BUILTIN_AGENTS: readonly AgentDefinition[] = [
 		prompt: SCOUT_PROMPT,
 		tools: ["read", "bash", "grep", "find", "ls", "codemode"],
 		thinking: "low",
-		contextBudget: 120_000,
 		contextFiles: true,
 		source: "builtin",
 	},

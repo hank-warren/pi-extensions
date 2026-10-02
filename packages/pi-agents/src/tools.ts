@@ -226,6 +226,8 @@ export function registerTools(pi: ExtensionAPI, host: ToolHost): void {
 			if (worktree) cwd = worktree.path;
 			const name = host.manager.uniqueName((params.name?.trim() || definition.name).replace(/\s+/g, "-"));
 			const contextBudget = definition.contextBudget ?? config.contextBudget;
+			const slash = model.indexOf("/");
+			const contextWindow = ctx.modelRegistry.find(model.slice(0, slash), model.slice(slash + 1))?.contextWindow;
 			const maxTurns = definition.maxTurns ?? config.maxTurns;
 			const background = params.run_in_background ?? definition.background ?? true;
 			const run = host.manager.create({
@@ -237,6 +239,7 @@ export function registerTools(pi: ExtensionAPI, host: ToolHost): void {
 				cwd,
 				background,
 				contextBudget,
+				contextWindow,
 				maxTurns,
 				appendPrompt: buildChildPrompt({ name, definition, contextBudget, maxTurns, worktree }),
 				worktree,

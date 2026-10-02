@@ -7,6 +7,7 @@ import { BUILTIN_AGENTS, discoverAgents, parseAgentFile, projectAgentDirs } from
 import { budgetAfterTurn, type BudgetState } from "../src/child.js";
 import { DEFAULT_EXCLUDED_TOOLS, loadConfig } from "../src/config.js";
 import { formatDuration, formatTokens, summarizeToolCall } from "../src/format.js";
+import { contextLabel } from "../src/render.js";
 import { forwardedExtensionArgs } from "../src/index.js";
 import { buildChildArgs, buildChildEnv } from "../src/manager.js";
 import { buildChildPrompt } from "../src/prompts.js";
@@ -19,6 +20,9 @@ test("formatters match the panel's compact style", () => {
 	assert.equal(formatTokens(1500), "1.5k");
 	assert.equal(formatTokens(41_234), "41k");
 	assert.equal(formatTokens(1_200_000), "1.2M");
+	assert.equal(contextLabel(78_000, 150_000, 272_000), "78k/150k budget");
+	assert.equal(contextLabel(78_000, undefined, 272_000), "78k/272k");
+	assert.equal(contextLabel(78_000, undefined, undefined), "78k");
 	assert.equal(formatDuration(42_000), "42s");
 	assert.equal(formatDuration(125_000), "2m05s");
 	assert.equal(formatDuration(3_780_000), "1h03m");
@@ -95,7 +99,8 @@ test("config falls back to defaults, merges excludes, and reports a broken file"
 	writeFileSync(join(dir, "c.json"), JSON.stringify({ maxConcurrent: 2, contextBudget: 0, excludeTools: ["web_search"], worktreeDir: "~/wt" }));
 	const { config } = loadConfig(join(dir, "c.json"));
 	assert.equal(config.maxConcurrent, 2);
-	assert.equal(config.contextBudget, 200_000, "an invalid value keeps the default");
+	assert.equal(config.contextBudget, undefined, "an invalid value leaves the budget unset");
+	assert.equal(loadConfig(join(dir, "missing.json")).config.contextBudget, undefined, "there is no global context budget by default");
 	assert.ok(config.excludeTools.includes("web_search") && config.excludeTools.includes("Agent"));
 	assert.ok(config.worktreeDir?.endsWith("/wt") && !config.worktreeDir.startsWith("~"));
 	writeFileSync(join(dir, "bad.json"), "{");
@@ -115,8 +120,11 @@ test("the budget warns once near the limit and cuts tools at it, steering only c
 	assert.equal(state.exhausted, true);
 	assert.equal(budgetAfterTurn(state, { tokens: 130_000, continuing: true, ...limits }).kind, "none");
 
+	const unbudgeted: BudgetState = { turns: 0, warned: false, exhausted: false, blockedCalls: 0 };
+	assert.equal(budgetAfterTurn(unbudgeted, { tokens: 900_000, continuing: true, maxTurns: 10 }).kind, "none", "no context budget: context never triggers");
+
 	const turns: BudgetState = { turns: 0, warned: false, exhausted: false, blockedCalls: 0 };
-	const kinds = Array.from({ length: 10 }, () => budgetAfterTurn(turns, { tokens: 1, continuing: true, ...limits }).kind);
+	const kinds = Array.from({ length: 10 }, () => budgetAfterTurn(turns, { tokens: 1, continuing: true, maxTurns: 10 }).kind);
 	assert.deepEqual(kinds.slice(6), ["none", "warn", "none", "exhaust"]);
 });
 
@@ -147,6 +155,8 @@ test("child args and env carry the agent's model, prompt, tools and the subagent
 	assert.equal(env.PI_SUBAGENT_RUN_ID, "ab12");
 	assert.equal(env.PI_AGENTS_CONTEXT_BUDGET, "5");
 	assert.equal(env.PI_AGENTS_MAX_TURNS, "6");
+	const unbudgeted = buildChildEnv({ PI_AGENTS_CONTEXT_BUDGET: "9" }, { id: "x", name: "n", type: "t", maxTurns: 6 });
+	assert.equal(unbudgeted.PI_AGENTS_CONTEXT_BUDGET, undefined, "no budget, and none inherited from the parent's env");
 });
 
 test("the child prompt states the subagent contract, budget and worktree", () => {
@@ -163,6 +173,8 @@ test("the child prompt states the subagent contract, budget and worktree", () =>
 	assert.match(prompt, /about 120k tokens of context and 40 turns/);
 	assert.match(prompt, /git worktree \/w\/feat-x on branch feat\/x, created from origin\/main/);
 	assert.ok(prompt.endsWith(scout.prompt));
+	const unbudgeted = buildChildPrompt({ name: "s", definition: scout, maxTurns: 40 });
+	assert.match(unbudgeted, /- Budget: 40 turns\./);
 });
 
 test("the line splitter breaks on LF only, so U+2028 inside JSON survives", () => {

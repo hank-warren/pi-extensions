@@ -29,6 +29,7 @@ export interface RunSnapshot {
 	cwd: string;
 	sessionFile?: string;
 	worktree?: WorktreeInfo;
+	contextWindow?: number;
 	/** The child's system-prompt addition; a resumed child is started with it again. */
 	appendPrompt?: string;
 	status: RunStatus;
@@ -48,7 +49,10 @@ export interface RunSpec {
 	thinking?: string;
 	cwd: string;
 	background: boolean;
-	contextBudget: number;
+	/** Self-imposed context cap; undefined means none. */
+	contextBudget?: number;
+	/** The model's context window, for display. */
+	contextWindow?: number;
 	maxTurns: number;
 	appendPrompt: string;
 	worktree?: WorktreeInfo;
@@ -114,6 +118,7 @@ export class AgentRun {
 			cwd: this.spec.cwd,
 			sessionFile: this.sessionFile,
 			worktree: this.spec.worktree,
+			contextWindow: this.spec.contextWindow,
 			appendPrompt: this.spec.appendPrompt,
 			status: this.status,
 			startedAt: this.startedAt,
@@ -153,15 +158,16 @@ export function buildChildArgs(input: {
 }
 
 /** Pure: the child's environment. HERDR_PANE_ID is dropped so a child never drives the parent's pane state. */
-export function buildChildEnv(base: NodeJS.ProcessEnv, run: { id: string; name: string; type: string; contextBudget: number; maxTurns: number }): NodeJS.ProcessEnv {
+export function buildChildEnv(base: NodeJS.ProcessEnv, run: { id: string; name: string; type: string; contextBudget?: number; maxTurns: number }): NodeJS.ProcessEnv {
 	const env: NodeJS.ProcessEnv = { ...base };
 	delete env.HERDR_PANE_ID;
+	delete env.PI_AGENTS_CONTEXT_BUDGET;
 	return {
 		...env,
 		PI_AGENTS_CHILD: "1",
 		PI_AGENTS_NAME: run.name,
 		PI_AGENTS_TYPE: run.type,
-		PI_AGENTS_CONTEXT_BUDGET: String(run.contextBudget),
+		...(run.contextBudget ? { PI_AGENTS_CONTEXT_BUDGET: String(run.contextBudget) } : {}),
 		PI_AGENTS_MAX_TURNS: String(run.maxTurns),
 		// The env contract pi-auto-permissions already reads for subagent children.
 		PI_SUBAGENT_CHILD: "1",
@@ -229,6 +235,7 @@ export class AgentManager {
 			cwd: snapshot.cwd,
 			background: true,
 			contextBudget: definition.contextBudget ?? this.deps.config().contextBudget,
+			contextWindow: snapshot.contextWindow,
 			maxTurns: definition.maxTurns ?? this.deps.config().maxTurns,
 			appendPrompt: snapshot.appendPrompt ?? "",
 			worktree: snapshot.worktree,

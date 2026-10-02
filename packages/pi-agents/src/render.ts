@@ -15,7 +15,8 @@ export interface AgentDetails {
 	toolUses: number;
 	recentTools: string[];
 	contextTokens: number;
-	contextBudget: number;
+	contextBudget?: number;
+	contextWindow?: number;
 	outputTokens: number;
 	cost: number;
 	durationMs: number;
@@ -39,6 +40,7 @@ export function detailsOf(run: AgentRun, background = run.spec.background): Agen
 		recentTools: [...run.recentTools],
 		contextTokens: run.contextTokens,
 		contextBudget: run.spec.contextBudget,
+		contextWindow: run.spec.contextWindow,
 		outputTokens: run.outputTokens,
 		cost: run.cost,
 		durationMs: (run.endedAt ?? Date.now()) - run.runStartedAt,
@@ -81,6 +83,22 @@ export function statsLine(details: Pick<AgentDetails, "toolUses" | "contextToken
 
 export function statusWord(status: RunStatus): string {
 	return { queued: "Queued", running: "Running", done: "Done", failed: "Failed", stopped: "Stopped" }[status];
+}
+
+/**
+ * `78k/150k budget` when the agent has a context budget, else `78k/272k` against
+ * the model's window, else just `78k`.
+ */
+export function contextLabel(used: number, budget: number | undefined, window: number | undefined): string {
+	if (budget) return `${formatTokens(used)}/${formatTokens(budget)} budget`;
+	if (window) return `${formatTokens(used)}/${formatTokens(window)}`;
+	return formatTokens(used);
+}
+
+/** Share of the effective limit (budget, else window) in use, or undefined when neither is known. */
+export function contextShare(used: number, budget: number | undefined, window: number | undefined): number | undefined {
+	const limit = budget ?? window;
+	return limit ? used / limit : undefined;
 }
 
 /** Short model label: drop the provider. */

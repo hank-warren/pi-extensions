@@ -9,7 +9,7 @@ import type { WorktreeInfo } from "./worktree.js";
 export function buildChildPrompt(input: {
 	name: string;
 	definition: AgentDefinition;
-	contextBudget: number;
+	contextBudget?: number;
 	maxTurns: number;
 	worktree?: WorktreeInfo;
 }): string {
@@ -18,7 +18,7 @@ export function buildChildPrompt(input: {
 		"# Subagent",
 		`You are "${name}", a ${definition.name} subagent working for a supervising Pi session. You cannot start other subagents. Nobody watches you in real time: your final message is returned to the supervising agent as your result.`,
 		"- Do exactly the delegated task, the smallest amount of work that fully answers it, then stop. Do not expand scope.",
-		`- Budget: about ${formatTokens(contextBudget)} tokens of context and ${maxTurns} turns. Keep context lean: batch independent lookups in one codemode script and filter output there; search and read targeted ranges instead of dumping whole files or logs.`,
+		`- Budget: ${contextBudget ? `about ${formatTokens(contextBudget)} tokens of context and ` : ""}${maxTurns} turns. Keep context lean: batch independent lookups in one codemode script and filter output there; search and read targeted ranges instead of dumping whole files or logs.`,
 		"- If you are blocked or the task is ambiguous, stop and say so in your final message instead of guessing.",
 		"- Final message: lead with the result. Be concise; use absolute paths with line numbers; list what you changed and anything you could not do. No narrative of your process.",
 	];

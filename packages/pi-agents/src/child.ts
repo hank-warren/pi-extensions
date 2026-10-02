@@ -25,20 +25,23 @@ export type BudgetAction =
  */
 export function budgetAfterTurn(
 	state: BudgetState,
-	input: { tokens: number; continuing: boolean; contextBudget: number; maxTurns: number },
+	input: { tokens: number; continuing: boolean; contextBudget?: number; maxTurns: number },
 ): BudgetAction {
 	state.turns += 1;
 	if (!input.continuing || state.exhausted) return { kind: "none" };
 	const { tokens, contextBudget, maxTurns } = input;
-	const usage = `${formatTokens(tokens)}/${formatTokens(contextBudget)} tokens, ${state.turns}/${maxTurns} turns`;
-	if (tokens >= contextBudget || state.turns >= maxTurns) {
+	// Without a context budget only turns count; the model's own window and
+	// Pi's compaction bound the context.
+	const contextUsed = contextBudget ? tokens / contextBudget : 0;
+	const usage = `${contextBudget ? `${formatTokens(tokens)}/${formatTokens(contextBudget)} tokens, ` : ""}${state.turns}/${maxTurns} turns`;
+	if (contextUsed >= 1 || state.turns >= maxTurns) {
 		state.exhausted = true;
 		return {
 			kind: "exhaust",
 			message: `[pi-agents] Budget exhausted (${usage}). Tools are now disabled. Write your final report immediately: what you found or changed, what is unfinished, and where to continue.`,
 		};
 	}
-	if (!state.warned && (tokens >= contextBudget * 0.75 || state.turns >= Math.floor(maxTurns * 0.8))) {
+	if (!state.warned && (contextUsed >= 0.75 || state.turns >= Math.floor(maxTurns * 0.8))) {
 		state.warned = true;
 		return {
 			kind: "warn",
@@ -48,9 +51,9 @@ export function budgetAfterTurn(
 	return { kind: "none" };
 }
 
-function envInt(name: string, fallback: number): number {
+function envInt(name: string): number | undefined {
 	const value = Number(process.env[name]);
-	return Number.isInteger(value) && value > 0 ? value : fallback;
+	return Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
 /**
@@ -58,8 +61,8 @@ function envInt(name: string, fallback: number): number {
  * child can never spawn agents; only enforces the context and turn budget.
  */
 export function registerChild(pi: ExtensionAPI): void {
-	const contextBudget = envInt("PI_AGENTS_CONTEXT_BUDGET", 200_000);
-	const maxTurns = envInt("PI_AGENTS_MAX_TURNS", 80);
+	const contextBudget = envInt("PI_AGENTS_CONTEXT_BUDGET");
+	const maxTurns = envInt("PI_AGENTS_MAX_TURNS") ?? 80;
 	const state: BudgetState = { turns: 0, warned: false, exhausted: false, blockedCalls: 0 };
 
 	pi.on("agent_start", (_event, ctx) => {
@@ -68,10 +71,10 @@ export function registerChild(pi: ExtensionAPI): void {
 		const tokens = ctx.getContextUsage()?.tokens ?? 0;
 		// A follow-up prompt gets a fresh turn budget; the context budget only
 		// resets if the context itself is back under it (e.g. after compaction).
-		if (tokens < contextBudget) {
+		if (!contextBudget || tokens < contextBudget) {
 			if (state.exhausted) ctx.ui.setStatus(BUDGET_STATUS_KEY, undefined);
 			state.exhausted = false;
-			state.warned = tokens >= contextBudget * 0.75;
+			state.warned = contextBudget ? tokens >= contextBudget * 0.75 : false;
 		}
 	});
 
