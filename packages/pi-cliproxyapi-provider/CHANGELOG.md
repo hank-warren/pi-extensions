@@ -1,5 +1,15 @@
 # @hank-warren/pi-cliproxyapi-provider
 
+## 0.3.0
+
+### Minor Changes
+
+- Publish pi's native Claude mid-conversation system messages and tool changes, so a system-prompt or tool change mid-session no longer rewrites the prompt cache.
+
+  - Claude models that pi's native catalog marks with `supportsMidConvoSystemMessages` and `supportsMidConvoToolChanges` now carry them. A later system-prompt change is sent as a `role: "system"` message, and a tool change as `tool_addition`/`tool_removal` blocks against deferred declarations. Measured through CLIProxyAPI v8.0.15: across a mid-session tool change, the next turn read the whole 17.8k-token prefix from cache, where the previous behaviour read none of it and rewrote it.
+  - **This requires CLIProxyAPI v8.0.4 or later.** Earlier releases do not rewrite tool names inside `tool_addition`/`tool_removal` blocks for OAuth credentials (router-for-me/CLIProxyAPI#6174), so the first request after a tool change fails with "references unknown tool". Set `"midConversationUpdates": false` under `pi-cliproxyapi-provider` in `settings.json`, or disable it in `/cliproxyapi config` → `Models`, for older proxies. It is independent of `perTurnEffort` (v8.0.3+).
+  - `/cliproxyapi status` reports the new setting.
+
 ## 0.2.2
 
 ### Patch Changes
