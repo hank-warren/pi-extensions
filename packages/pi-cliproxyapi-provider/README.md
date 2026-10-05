@@ -84,13 +84,14 @@ Use `"full"` only when the selected CLIProxyAPI route and upstream account actua
 
 ### Model and display configuration
 
-Run `/cliproxyapi config` in pi's TUI to edit every package-level `settings.json` value. The tabbed panel has `Connection`, `Models`, and `Display` sections; it controls the GPT-5.6 context-window mode, per-turn Claude effort, and whether the model selector shows the published strict tool-schema capability.
+Run `/cliproxyapi config` in pi's TUI to edit every package-level `settings.json` value. The tabbed panel has `Connection`, `Models`, and `Display` sections; it controls the GPT-5.6 context-window mode, per-turn Claude effort, Claude mid-conversation updates, and whether the model selector shows the published strict tool-schema capability.
 
 ```json
 {
   "pi-cliproxyapi-provider": {
     "gpt56ContextWindow": "canonical",
     "perTurnEffort": true,
+    "midConversationUpdates": true,
     "showStrictMode": false
   }
 }
@@ -138,7 +139,19 @@ For Claude and Codex-served GPT models, pi's own native definition wins over all
 
 **Requires CLIProxyAPI v8.0.3 or later.** Older releases reject the per-turn directive with `messages.N.output_config: Extra inputs are not permitted`, which fails every request to these models; set `"perTurnEffort": false` (or disable it under `/cliproxyapi config` → `Models`) for them, and effort goes back to the request's top-level `output_config`.
 
-Claude models that pi's native catalog marks with `supportsMidConvoEffort` (Opus 5, Opus 5.5, Fable 5.1 at the time of writing) publish it here too, when CLIProxyAPI reports them under the `anthropic` owner. A model it serves from another upstream (Antigravity, an OpenAI-compatible provider) is translated away from the Messages shape, where the directive cannot survive, so it keeps top-level effort. Changing the thinking level mid-session then becomes a per-turn directive instead of a change to the request's top-level `output_config`, so the prompt cache survives the switch: verified through CLIProxyAPI v8.0.3, where an effort switch across a tool loop kept reading the whole cached conversation while the top-level form re-wrote it. Signed thinking replays across the switch. Other Claude models keep top-level effort. Pi's native mid-conversation system messages and tool changes are *not* carried over: CLIProxyAPI's OAuth tool-name aliasing does not rewrite `tool_addition`/`tool_removal` blocks ([router-for-me/CLIProxyAPI#6174](https://github.com/router-for-me/CLIProxyAPI/issues/6174)).
+Claude models that pi's native catalog marks with `supportsMidConvoEffort` (Opus 5, Opus 5.5, Sonnet 5.5 and Fable 5.1 in pi 1.0) publish it here too, when CLIProxyAPI reports them under the `anthropic` owner. A model it serves from another upstream (Antigravity, an OpenAI-compatible provider) is translated away from the Messages shape, where the directive cannot survive, so it keeps top-level effort. Changing the thinking level mid-session then becomes a per-turn directive instead of a change to the request's top-level `output_config`, so the prompt cache survives the switch: verified through CLIProxyAPI v8.0.3, where an effort switch across a tool loop kept reading the whole cached conversation while the top-level form re-wrote it. Signed thinking replays across the switch. Other Claude models keep top-level effort.
+
+### Mid-conversation updates (Claude)
+
+**Requires CLIProxyAPI v8.0.4 or later.** Earlier releases do not rewrite tool names inside `tool_addition`/`tool_removal` blocks for OAuth credentials ([router-for-me/CLIProxyAPI#6174](https://github.com/router-for-me/CLIProxyAPI/issues/6174)), so the first request after a tool change fails with "references unknown tool"; set `"midConversationUpdates": false` (or disable it under `/cliproxyapi config` → `Models`) for them.
+
+Claude models that pi's native catalog marks with `supportsMidConvoSystemMessages` (and `supportsMidConvoToolChanges`) publish them here too, under the same `anthropic`-owner rule as per-turn effort. Pi then sends a later system-prompt change as a `role: "system"` message and a tool change as `tool_addition`/`tool_removal` blocks against deferred declarations, instead of rewriting the request's system prompt and tool list. The cached prefix survives either change. Verified through CLIProxyAPI v8.0.15 on Opus 5 and Sonnet 5.5 with an OAuth credential:
+
+- Across a turn that removed one tool and added another, the cache read held at about 6300 tokens; the collapsed form read 0 and rewrote the whole prefix.
+- The added tool was called by its own name, and CPA mapped its OAuth alias back.
+- An effort switch on the same turn kept the cache too.
+
+Models pi does not mark keep the collapsed form, where any system-prompt or tool change rewrites the cache.
 
 ## Metadata aliases
 

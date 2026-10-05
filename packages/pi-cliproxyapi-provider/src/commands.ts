@@ -123,6 +123,7 @@ function statusText(config: ReturnType<typeof loadConfig>, snapshot: CatalogSnap
     metadataStatusLine(snapshot, metadataStale),
     `GPT-5.6 context window: ${snapshot.gpt56ContextWindow === "full" ? "full models.dev limit" : "canonical 272000"}`,
     `Per-turn Claude effort: ${snapshot.perTurnEffort ? "enabled (needs CLIProxyAPI v8.0.3+)" : "disabled"}`,
+    `Claude mid-conversation updates: ${snapshot.midConversationUpdates ? "enabled (needs CLIProxyAPI v8.0.4+)" : "disabled"}`,
   ].join("\n");
 }
 
