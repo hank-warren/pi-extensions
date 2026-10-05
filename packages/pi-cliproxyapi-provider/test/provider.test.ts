@@ -622,6 +622,18 @@ test("mid-conversation updates can be switched off for CLIProxyAPI releases befo
   assert.equal(result.models[1].compat, undefined);
 });
 
+test("mid-conversation updates stay on when per-turn effort is switched off", async () => {
+  const result = buildProviderModels(
+    [{ id: "claude-opus-5-5" }], {}, {}, "canonical", {}, null, await piProfiles,
+    { perTurnEffort: false, midConversationUpdates: true },
+  );
+
+  assert.deepEqual(result.models[0].compat, {
+    supportsMidConvoSystemMessages: true,
+    supportsMidConvoToolChanges: true,
+  });
+});
+
 test("pi's native thinking map wins over family rules and metadata", async () => {
   const models = await withProfiles(["claude-opus-5-5", "gpt-5.6-sol", "plus/gpt-5.6-sol", "gpt-6-sol"], {
     "anthropic/claude-opus-5-5": {
