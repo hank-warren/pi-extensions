@@ -188,7 +188,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   // Set per session: a subagent child (PI_SUBAGENT_CHILD=1) revises before it
   // asks. `reviseFirst` maps each command it was told to revise to the turn
   // it was told in; issuing it again unchanged in a *later* turn escalates it
-  // to the human. Same-turn duplicates (sibling calls, codemode Promise.all)
+  // to the human, once: the entry goes with it. Same-turn duplicates (sibling calls, codemode Promise.all)
   // are refused too, since the model has not yet seen the first refusal.
   let subagentSession = false;
   let turnGeneration = 0;
@@ -562,10 +562,15 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     if (!subagentSession || !scope.ctx.hasUI) return undefined;
     // As askUser does: a refusal the model will never see must not count as
     // its revise-first turn, or its retry would go straight to the human.
-    if (reviewer.isStale(lifecycleSignal) || reviewCancelled(callSignalOf(scope))) return reviewCancelledResult();
+    const cancelled = cancelledAfterAwait(scope, lifecycleSignal);
+    if (cancelled) return cancelled;
     const key = `${scope.gate.label}\0${scope.command}`;
     const refusedIn = reviseFirst.get(key);
-    if (refusedIn !== undefined && refusedIn !== turnGeneration) return undefined;
+    if (refusedIn !== undefined && refusedIn !== turnGeneration) {
+      // Escalated now: a later identical attempt is revised first again.
+      reviseFirst.delete(key);
+      return undefined;
+    }
     if (refusedIn === undefined) reviseFirst.set(key, turnGeneration);
     return settle(scope, {
       display: "revise",

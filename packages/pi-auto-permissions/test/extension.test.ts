@@ -1776,6 +1776,16 @@ test("35 · a subagent with a UI is told to revise first; the same command again
 				harness.answers.push("Allow");
 				assert.equal(await harness.toolCall("git push --force origin main", "call-3"), undefined);
 				assert.equal(harness.customCalls, 1, "repeating the command unchanged in a later turn escalates to the human");
+
+				await harness.turnEnd();
+				const later = await harness.toolCall("git push --force origin main", "call-4");
+				assert.ok(later?.block);
+				assert.match(later.reason, /You are a subagent/u, "once the human has answered, the next attempt is revised first again");
+				assert.equal(harness.customCalls, 1);
+				await harness.turnEnd();
+				harness.answers.push("Allow");
+				assert.equal(await harness.toolCall("git push --force origin main", "call-5"), undefined);
+				assert.equal(harness.customCalls, 2);
 			},
 		));
 });
