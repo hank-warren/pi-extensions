@@ -64,7 +64,7 @@ test("a run streams tool use and usage, finishes with its last answer, and resum
 		await manager.waitFor(run);
 		assert.equal(run.result, "echo: again");
 		assert.equal(run.proc!.pid, pid, "a follow-up reuses the idle process");
-		assert.equal(run.toolUses, 2);
+		assert.equal(run.toolUses, 1, "counted per prompt, like the elapsed time");
 
 		await manager.message(run, "FAIL");
 		await manager.waitFor(run);

@@ -108,6 +108,8 @@ export class AgentRun {
 	dialogs = new Map<AbortController, Set<string>>();
 	/** Tool calls the child is executing right now. */
 	runningTools = new Set<string>();
+	/** When each recent tool call started and ended, so a viewer opened later shows real durations. */
+	toolTimes = new Map<string, { start: number; end?: number }>();
 	/** Bumped by every launch, stop and dispose; a launch that sees a newer value gives up. */
 	launchSeq = 0;
 
@@ -355,6 +357,9 @@ export class AgentManager {
 		const current = () => seq === run.launchSeq && run.status === "running";
 		run.status = "running";
 		run.runStartedAt = Date.now();
+		// Counters cover this prompt, like its elapsed time, so a follow-up reports its own work.
+		run.toolUses = 0;
+		run.toolLog = [];
 		run.result = undefined;
 		run.lastAssistant = "";
 		run.lastStopReason = undefined;
@@ -527,6 +532,8 @@ export class AgentManager {
 			case "tool_execution_start": {
 				const id = String(event.toolCallId ?? "");
 				run.toolUses += 1;
+				run.toolTimes.set(id, { start: Date.now() });
+				if (run.toolTimes.size > MAX_LOG) run.toolTimes.delete(run.toolTimes.keys().next().value!);
 				run.toolLog = [...run.toolLog, summarizeToolCall(String(event.toolName ?? "tool"), event.args)].slice(-TOOL_LOG);
 				run.runningTools.add(id);
 				this.changed();
@@ -543,6 +550,8 @@ export class AgentManager {
 			case "tool_execution_end": {
 				const id = String(event.toolCallId ?? "");
 				run.runningTools.delete(id);
+				const times = run.toolTimes.get(id);
+				if (times) times.end = Date.now();
 				this.releaseDialogs(run, id);
 				this.changed();
 				return;

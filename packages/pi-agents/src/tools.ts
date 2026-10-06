@@ -204,7 +204,7 @@ export function registerTools(pi: ExtensionAPI, host: ToolHost): void {
 			const run = host.manager.create({
 				name,
 				definition,
-				description: params.description.trim() || params.subagent_type,
+				description: oneLine(params.description, 100) || params.subagent_type,
 				model,
 				thinking,
 				cwd,

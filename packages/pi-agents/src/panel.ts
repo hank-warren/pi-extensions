@@ -1,7 +1,8 @@
 import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Editor, isKeyRelease, Key, matchesKey, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { formatDuration } from "./format.js";
+import { formatDuration, oneLine } from "./format.js";
 import type { AgentRun } from "./manager.js";
+import { contextLabel, contextShare, shortModel, statusGlyph } from "./render.js";
 
 /** The slice of the manager the panel reads; the manager is replaced per session. */
 export interface PanelSource {
@@ -9,30 +10,43 @@ export interface PanelSource {
 	list(): AgentRun[];
 	stop(run: AgentRun): Promise<void>;
 }
-import { contextLabel, contextShare, shortModel, statusGlyph } from "./render.js";
 
-const WIDGET_KEY = "pi-agents";
+/** One-line summary above the prompt, shown while a batch of agents is listed. */
+const STATUS_KEY = "pi-agents";
+/** The selector below the prompt, shown only while managing agents. */
+const SELECT_KEY = "pi-agents-select";
 const MAX_ROWS = 6;
-/** Finished rows stay this long so the result can still be opened from the list. */
+/** A finished batch stays listed this long, so its results can still be opened. */
 const LINGER_MS = 60_000;
 const TICK_MS = 80;
 
-function rightAlign(left: string, right: string, width: number): string {
-	const rightWidth = visibleWidth(right);
-	const leftClamped = truncateToWidth(left, Math.max(0, width - rightWidth - 2));
-	const gap = Math.max(1, width - visibleWidth(leftClamped) - rightWidth);
-	return truncateToWidth(leftClamped + " ".repeat(gap) + right, width);
+/** Longest description column; longer ones are cut. */
+const DESCRIPTION_WIDTH = 48;
+
+function padTo(text: string, width: number): string {
+	const cut = truncateToWidth(text, width);
+	return cut + " ".repeat(Math.max(0, width - visibleWidth(cut)));
 }
 
+type Widget = { render(width: number): string[]; invalidate(): void; dispose(): void };
+
 /**
- * The Claude Code-style agent list below the editor. Render-only widget; all
- * keys arrive through onTerminalInput, which fires before the focused
- * component, and are only taken while the prompt editor itself has focus.
+ * A one-line summary above the prompt (`✓ Agents | 2/3 completed`) while a
+ * batch of agents runs and shortly after. ↓ at an empty prompt opens a
+ * selector below the prompt with a row per agent (state, name, task, model,
+ * context, time); ↑ off its top row or Esc closes it, so the next ↑ is the
+ * editor's history again. Both are render-only widgets; keys arrive through
+ * onTerminalInput, which fires before the focused component, and are only
+ * taken while Pi's prompt editor has focus.
+ *
+ * A batch is every agent that ran while another was still running: it fills
+ * as agents start, and empties LINGER_MS after the last one finished.
  */
 export class AgentPanel {
 	private ui: ExtensionUIContext | undefined;
 	private tui: TUI | undefined;
-	private registered = false;
+	private status = false;
+	private selector = false;
 	private unsubscribeInput: (() => void) | undefined;
 	private unsubscribeManager: (() => void) | undefined;
 	private timer: NodeJS.Timeout | undefined;
@@ -41,6 +55,7 @@ export class AgentPanel {
 	private selected = 0;
 	private viewing: string | undefined;
 	private dismissed = new Set<string>();
+	private batch = new Set<string>();
 
 	constructor(
 		private readonly manager: PanelSource,
@@ -63,28 +78,48 @@ export class AgentPanel {
 		this.unsubscribeManager = undefined;
 		if (this.timer) clearInterval(this.timer);
 		this.timer = undefined;
-		if (this.ui && this.registered) this.ui.setWidget(WIDGET_KEY, undefined);
-		this.registered = false;
+		if (this.ui && this.status) this.ui.setWidget(STATUS_KEY, undefined);
+		if (this.ui && this.selector) this.ui.setWidget(SELECT_KEY, undefined);
+		this.status = false;
+		this.selector = false;
 		this.tui = undefined;
 		this.ui = undefined;
 		this.active = false;
+		this.batch.clear();
 	}
 
 	rows(now = Date.now()): AgentRun[] {
-		return this.manager.list().filter((run) =>
-			!this.dismissed.has(run.id) && (
-				run.busy
-				|| run.id === this.viewing
-				|| (run.endedAt !== undefined && now - run.endedAt < LINGER_MS && run.log.length > 0)
-			));
+		const runs = this.manager.list();
+		for (const run of runs) if (run.busy) this.batch.add(run.id);
+		const members = runs.filter((run) => this.batch.has(run.id) && !this.dismissed.has(run.id));
+		const lastEnd = Math.max(0, ...members.map((run) => run.endedAt ?? 0));
+		if (members.every((run) => !run.busy) && now - lastEnd >= LINGER_MS) {
+			this.batch.clear();
+			return runs.filter((run) => run.id === this.viewing);
+		}
+		return runs.filter((run) => run.id === this.viewing || members.includes(run));
+	}
+
+	private widget(draw: (width: number, theme: Theme) => string[], onDispose: () => void) {
+		return (tui: TUI, theme: Theme): Widget => {
+			this.tui = tui;
+			return {
+				render: (width: number) => draw(width, theme).map((line) => truncateToWidth(line, width)),
+				invalidate: () => {},
+				dispose: onDispose,
+			};
+		};
 	}
 
 	update(): void {
-		if (!this.ui) return;
+		const ui = this.ui;
+		if (!ui) return;
 		const rows = this.rows();
 		if (!rows.length) {
-			if (this.registered) this.ui.setWidget(WIDGET_KEY, undefined);
-			this.registered = false;
+			if (this.status) ui.setWidget(STATUS_KEY, undefined);
+			if (this.selector) ui.setWidget(SELECT_KEY, undefined);
+			this.status = false;
+			this.selector = false;
 			this.tui = undefined;
 			this.active = false;
 			if (this.timer) clearInterval(this.timer);
@@ -103,22 +138,27 @@ export class AgentPanel {
 			this.timer = setInterval(() => this.update(), interval);
 			this.timer.unref();
 		}
-		if (!this.registered) {
-			this.ui.setWidget(WIDGET_KEY, (tui: TUI, theme: Theme) => {
-				this.tui = tui;
-				return {
-					render: (width: number) => this.render(width, theme),
-					invalidate: () => {},
-					dispose: () => {
-						this.registered = false;
-						this.tui = undefined;
-					},
-				};
-			}, { placement: "belowEditor" });
-			this.registered = true;
-		} else {
-			this.tui?.requestRender();
+		let changed = false;
+		if (!this.status) {
+			ui.setWidget(STATUS_KEY, this.widget((_width, theme) => this.renderStatus(theme), () => {
+				this.status = false;
+			}), { placement: "aboveEditor" });
+			this.status = true;
+			changed = true;
 		}
+		const managing = this.active && !this.viewing;
+		if (managing && !this.selector) {
+			ui.setWidget(SELECT_KEY, this.widget((width, theme) => this.renderSelector(width, theme), () => {
+				this.selector = false;
+			}), { placement: "belowEditor" });
+			this.selector = true;
+			changed = true;
+		} else if (!managing && this.selector) {
+			ui.setWidget(SELECT_KEY, undefined);
+			this.selector = false;
+			changed = true;
+		}
+		if (!changed) this.tui?.requestRender();
 	}
 
 	/** True when Pi's prompt editor owns the keyboard (dialogs and overlays are not Editors). */
@@ -136,7 +176,8 @@ export class AgentPanel {
 		const rows = this.rows();
 		if (!this.active) {
 			if (matchesKey(data, "down") && rows.length && this.ui.getEditorText() === "") {
-				this.selected = 0;
+				// Straight to the agent waiting on you, if one is.
+				this.selected = Math.max(0, rows.findIndex((run) => run.approval));
 				this.setActive(true);
 				return { consume: true };
 			}
@@ -152,6 +193,7 @@ export class AgentPanel {
 			return { consume: true };
 		}
 		if (matchesKey(data, "up")) {
+			// Off the top closes the selector and is consumed: only the next ↑ recalls a prompt.
 			if (this.selected === 0) this.setActive(false);
 			else {
 				this.selected -= 1;
@@ -163,20 +205,20 @@ export class AgentPanel {
 			this.setActive(false);
 			return { consume: true };
 		}
+		const run = rows[this.selected];
 		if (matchesKey(data, Key.enter)) {
-			const run = rows[this.selected];
 			if (run) this.openRun(run);
 			return { consume: true };
 		}
-		if (data === "x") {
-			const run = rows[this.selected];
-			if (run?.busy) void this.manager.stop(run);
-			else if (run) {
+		if (data === "x" && run) {
+			if (run.busy) void this.manager.stop(run);
+			else {
 				this.dismissed.add(run.id);
 				this.update();
 			}
 			return { consume: true };
 		}
+		// Anything else is typing: close the selector and let the key reach the editor.
 		this.setActive(false);
 		return undefined;
 	}
@@ -191,59 +233,99 @@ export class AgentPanel {
 		this.update();
 		void this.open(run).finally(() => {
 			this.viewing = undefined;
+			// Back in the selector on the agent just viewed: ↑/↓ move on, x stops it, typing goes to the prompt.
 			const index = this.rows().findIndex((item) => item.id === run.id);
-			if (index >= 0) this.selected = index;
+			this.active = index >= 0;
+			this.selected = Math.max(0, index);
 			this.update();
 		});
 	}
 
-	/**
-	 * Pi's widget idiom: an `agents` header in the same shape as the other
-	 * status lines (`auto permissions · …`, `◆ plan · …`), then one row per
-	 * agent with a selector-style `→` cursor while the list has focus.
-	 */
-	private render(width: number, theme: Theme): string[] {
+	/** Rows to show around `focus`, at most MAX_ROWS, with `↑ N more` / `↓ N more` around them. */
+	private window(rows: AgentRun[], focus: number): { shown: AgentRun[]; start: number; above: string[]; below: string[] } {
+		const visible = Math.min(MAX_ROWS, rows.length);
+		const start = Math.min(Math.max(0, focus - visible + 1), rows.length - visible);
+		const after = rows.length - start - visible;
+		return {
+			shown: rows.slice(start, start + visible),
+			start,
+			above: start > 0 ? [`↑ ${start} more`] : [],
+			below: after > 0 ? [`↓ ${after} more`] : [],
+		};
+	}
+
+	/** `⠹ Agents | 1/3 completed | 1 needs you | ↓ to manage`. */
+	private renderStatus(theme: Theme): string[] {
 		const now = Date.now();
 		const rows = this.rows(now);
 		if (!rows.length) return [];
-		const running = rows.filter((run) => run.status === "running").length;
+		const finished = rows.filter((run) => !run.busy).length;
 		const waiting = rows.filter((run) => run.approval).length;
-		const counts = [
-			running ? `${running} running` : "",
-			waiting ? theme.fg("accent", `${waiting} waiting for you`) : "",
-		].filter(Boolean);
+		const failed = rows.filter((run) => run.status === "failed").length;
+		const glyph = waiting
+			? theme.fg("warning", "?")
+			: finished < rows.length
+				? statusGlyph("running", theme, { now })
+				: failed ? theme.fg("error", "✗") : theme.fg("success", "✓");
+		const parts = [
+			theme.fg("text", theme.bold("Agents")),
+			theme.fg("muted", `${finished}/${rows.length} completed`),
+			...(waiting ? [theme.fg("warning", `${waiting} needs you`)] : []),
+			...(failed ? [theme.fg("error", `${failed} failed`)] : []),
+			...(this.active || this.viewing ? [] : [theme.fg("dim", "↓ to manage")]),
+		];
+		return [` ${glyph} ${parts.join(theme.fg("dim", " | "))}`];
+	}
+
+	/**
+	 * A drawer under the prompt, closed by a rule above the footer: a `→`
+	 * cursor over `⠹ reviewer  review auth changes   claude-opus-5-5 · 41k/1M · 2m10s`,
+	 * what each running agent is doing right now under its task, then the keys.
+	 */
+	private renderSelector(width: number, theme: Theme): string[] {
+		const now = Date.now();
+		const rows = this.rows(now);
+		if (!rows.length) return [];
+		const { shown, start, above, below } = this.window(rows, this.selected);
+		const nameWidth = Math.min(24, Math.max(...shown.map((run) => visibleWidth(run.name))));
+		const descriptionWidth = Math.min(DESCRIPTION_WIDTH, Math.max(...shown.map((run) => visibleWidth(oneLine(run.description, 100)))));
+		const lines = above.map((text) => theme.fg("dim", `  ${text}`));
+		shown.forEach((run, offset) => {
+			const current = start + offset === this.selected;
+			const glyph = statusGlyph(run.status, theme, { now, approval: Boolean(run.approval) });
+			const name = current ? theme.fg("accent", theme.bold(padTo(run.name, nameWidth))) : theme.fg("text", padTo(run.name, nameWidth));
+			const share = contextShare(run.contextTokens, run.spec.contextBudget, run.spec.contextWindow) ?? 0;
+			const context = contextLabel(run.contextTokens, run.spec.contextBudget, run.spec.contextWindow);
+			const stats = [
+				...(run.approval ? [theme.fg("warning", "needs you")] : run.status === "queued" ? [theme.fg("muted", "queued")] : []),
+				theme.fg("dim", shortModel(run.spec.model)),
+				share >= 0.75 ? theme.fg("warning", context) : theme.fg("dim", context),
+				theme.fg("dim", formatDuration((run.endedAt ?? now) - run.runStartedAt)),
+			].join(theme.fg("dim", " · "));
+			const prefix = `${current ? theme.fg("accent", "→") : " "} ${glyph} ${name}  `;
+			const room = width - visibleWidth(prefix) - 2 - visibleWidth(stats);
+			const description = padTo(oneLine(run.description, 100), Math.max(0, Math.min(descriptionWidth, room)));
+			lines.push(`${prefix}${theme.fg(current ? "text" : "muted", description)}  ${stats}`);
+			if (run.busy) lines.push(`${" ".repeat(visibleWidth(prefix))}${this.activity(run, theme)}`);
+		});
+		lines.push(...below.map((text) => theme.fg("dim", `  ${text}`)));
 		const key = (k: string, text: string) => `${theme.fg("dim", k)} ${theme.fg("muted", text)}`;
-		const hints = this.active
-			? [key("↑↓", "select"), key("enter", "open"), key("x", "stop"), key("esc", "back")].join(theme.fg("dim", " · "))
-			: key("↓", "to manage");
-		const header = `${theme.fg("accent", theme.bold("agents"))}${counts.length ? theme.fg("muted", ` · ${counts.join(theme.fg("muted", " · "))}`) : ""}`;
-		const lines = [rightAlign(` ${header}`, `${hints} `, width)];
-		const visible = Math.min(MAX_ROWS, rows.length);
-		const start = Math.min(Math.max(0, this.selected - visible + 1), rows.length - visible);
-		if (start > 0) lines.push(theme.fg("dim", `   ↑ ${start} more`));
-		for (let index = start; index < start + visible; index++) {
-			lines.push(this.renderRow(rows[index]!, index === this.selected && this.active, width, theme, now));
-		}
-		const below = rows.length - start - visible;
-		if (below > 0) lines.push(theme.fg("dim", `   ↓ ${below} more`));
+		const run = rows[this.selected];
+		lines.push(`  ${[
+			key("↑↓", "select"),
+			key("enter", "open"),
+			...(run ? [key("x", run.busy ? "stop" : "dismiss")] : []),
+			key("esc", "back"),
+		].join(theme.fg("dim", " · "))}`, theme.fg("borderMuted", "─".repeat(Math.max(1, width))));
 		return lines;
 	}
 
-	private renderRow(run: AgentRun, selected: boolean, width: number, theme: Theme, now: number): string {
-		const cursor = selected ? theme.fg("accent", "→") : " ";
-		const glyph = statusGlyph(run.status, theme, { now, approval: Boolean(run.approval) });
-		const name = selected ? theme.fg("accent", theme.bold(run.name)) : theme.fg("text", run.name);
-		const description = selected ? theme.fg("accent", run.description) : theme.fg("muted", run.description);
-		const left = ` ${cursor} ${glyph} ${name} ${description}`;
-		const share = contextShare(run.contextTokens, run.spec.contextBudget, run.spec.contextWindow) ?? 0;
-		const context = contextLabel(run.contextTokens, run.spec.contextBudget, run.spec.contextWindow);
-		const parts = [
-			run.approval ? theme.fg("accent", "waiting for your approval") : run.status === "queued" ? theme.fg("muted", "queued") : "",
-			theme.fg("dim", shortModel(run.spec.model)),
-			share >= 0.75 ? theme.fg("warning", context) : theme.fg("dim", context),
-			theme.fg("dim", `${run.toolUses} tool call${run.toolUses === 1 ? "" : "s"}`),
-			theme.fg("dim", formatDuration((run.endedAt ?? now) - run.runStartedAt)),
-		].filter(Boolean);
-		return rightAlign(left, `${parts.join(theme.fg("dim", " · "))} `, width);
+	/** The tool call it is running (`$ rg -n foo`), else `writing…`, `thinking…`, or why it waits. */
+	private activity(run: AgentRun, theme: Theme): string {
+		if (run.approval) return theme.fg("warning", `waiting for your approval: ${oneLine(run.approval, 120)}`);
+		if (run.status === "queued") return theme.fg("dim", "waiting for a free slot");
+		const last = run.toolLog.at(-1);
+		if (run.runningTools.size && last) return theme.fg("dim", oneLine(last.rest ? `${last.head} ${last.rest}` : last.head, 120));
+		return theme.fg("dim", run.streaming ? "writing…" : "thinking…");
 	}
 }

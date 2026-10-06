@@ -14,7 +14,7 @@ import {
 	UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
 import { type Component, Container, type Focusable, Input, Key, matchesKey, Spacer, type TUI, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { contentText, formatDuration } from "./format.js";
+import { contentText, formatDuration, oneLine } from "./format.js";
 import type { AgentManager, AgentRun, ChildMessage, LogEntry } from "./manager.js";
 import { contextLabel, shortModel, statusGlyph } from "./render.js";
 
@@ -57,6 +57,37 @@ function markdownTheme() {
 	}
 }
 
+/** The slice of Pi's keybindings manager the viewer uses. */
+export interface ViewerKeys {
+	matches(data: string, id: string): boolean;
+	getKeys(id: string): string[];
+}
+
+/** A muted line, colored at render time so a theme switch repaints it. */
+class Notice implements Component {
+	private text: Text | undefined;
+
+	constructor(
+		private readonly theme: Theme,
+		private readonly content: string,
+	) {}
+
+	render(width: number): string[] {
+		this.text ??= new Text(this.theme.fg("muted", this.content), 1, 0);
+		return this.text.render(width);
+	}
+
+	invalidate(): void {
+		this.text = undefined;
+	}
+}
+
+interface Drawn {
+	entry: LogEntry;
+	components: Component[];
+	toolIds: string[];
+}
+
 /**
  * A subagent's session, shown the way Pi shows any session: user messages,
  * assistant markdown and tool boxes come from Pi's own components. It takes
@@ -71,7 +102,8 @@ export class AgentViewer implements Component, Focusable {
 	private readonly renderers: Record<string, AnyToolDefinition>;
 	private readonly markdown = markdownTheme();
 	private readonly streaming: AssistantMessageComponent;
-	private rendered: LogEntry[] = [];
+	/** Log entries on screen, oldest first, with the components each one added. */
+	private drawn: Drawn[] = [];
 	private streamed = "";
 	private scroll = 0;
 	private expanded = false;
@@ -82,17 +114,56 @@ export class AgentViewer implements Component, Focusable {
 	constructor(
 		private readonly tui: TUI,
 		private readonly theme: Theme,
+		private readonly keys: ViewerKeys,
 		private readonly run: AgentRun,
 		manager: AgentManager,
 		private readonly done: () => void,
 		/** Steer or follow up; the host decides whether the result is reported to the parent. */
 		private readonly send: (text: string) => Promise<"steered" | "queued" | "started">,
-		private readonly stop: () => void,
 	) {
-		this.renderers = builtinRenderers(run.spec.cwd);
+		this.renderers = Object.fromEntries(Object.entries(builtinRenderers(run.spec.cwd)).map(([name, definition]) => [name, this.timed(definition)]));
 		this.streaming = new AssistantMessageComponent(undefined, true, this.markdown);
-		this.unsubscribe = manager.subscribe(() => tui.requestRender());
+		this.sync();
+		// Synced on change rather than in render(): building tool components requests renders of its own.
+		this.unsubscribe = manager.subscribe(() => {
+			this.sync();
+			tui.requestRender();
+		});
 		this.input.onSubmit = (value) => this.submit(value);
+	}
+
+	/** When each tool call ran: the manager's clock while live, else its messages' timestamps. */
+	private readonly timing = new Map<string, { start?: number; end?: number }>();
+
+	/**
+	 * Pi's renderers time a call from when its component starts (`Took 0.0s`
+	 * for a call that ran before the viewer opened); seed their state with
+	 * when it really ran.
+	 */
+	private timed(definition: AnyToolDefinition): AnyToolDefinition {
+		const render = (definition as { renderResult?: (...args: unknown[]) => unknown } | undefined)?.renderResult;
+		if (!definition || typeof render !== "function") return definition;
+		return {
+			...definition,
+			renderResult: (result: unknown, options: unknown, theme: unknown, context: { toolCallId?: string; state?: Record<string, unknown> } | undefined) => {
+				const known = context?.toolCallId ? this.timing.get(context.toolCallId) : undefined;
+				const state = context?.state;
+				if (known && state) {
+					// Unconditionally: the call renderer has already stamped its own start by now.
+					if (known.start !== undefined) state.startedAt = known.start;
+					if (known.end !== undefined) state.endedAt = known.end;
+				}
+				return render.call(definition, result, options, theme, context);
+			},
+		} as AnyToolDefinition;
+	}
+
+	private noteTiming(id: string, fallback: { start?: number; end?: number }): void {
+		const live = this.run.toolTimes.get(id);
+		const entry = this.timing.get(id) ?? {};
+		entry.start ??= live?.start ?? fallback.start;
+		entry.end ??= live?.end ?? fallback.end;
+		this.timing.set(id, entry);
 	}
 
 	get focused(): boolean {
@@ -104,19 +175,36 @@ export class AgentViewer implements Component, Focusable {
 		this.input.focused = value;
 	}
 
-	/** Append components for log entries that arrived since the last render, or rebuild if the log was trimmed. */
+	private reset(): void {
+		this.transcript.clear();
+		this.tools.clear();
+		this.partialsShown.clear();
+		this.timing.clear();
+		this.drawn = [];
+	}
+
+	/** Bring the transcript up to the run's log: drop entries trimmed from its front, append new ones. */
 	private sync(): void {
 		const log = this.run.log;
-		const last = this.rendered.at(-1);
-		let start = last ? log.lastIndexOf(last) + 1 : 0;
-		if (last && start === 0) {
-			this.transcript.clear();
-			this.tools.clear();
-			this.partialsShown.clear();
-			start = 0;
+		if (this.drawn.length && this.drawn[0]!.entry !== log[0]) {
+			const live = new Set(log);
+			let gone = 0;
+			while (gone < this.drawn.length && !live.has(this.drawn[gone]!.entry)) gone++;
+			if (gone === this.drawn.length) this.reset();
+			else {
+				for (const old of this.drawn.splice(0, gone)) {
+					for (const component of old.components) this.transcript.removeChild(component);
+					for (const id of old.toolIds) {
+						this.tools.delete(id);
+						this.timing.delete(id);
+						this.partialsShown.delete(id);
+					}
+				}
+			}
 		}
-		for (const entry of log.slice(start)) this.append(entry);
-		this.rendered = log.slice();
+		const last = this.drawn.at(-1)?.entry;
+		const start = last ? log.lastIndexOf(last) + 1 : 0;
+		for (let index = start; index < log.length; index++) this.append(log[index]!);
 		for (const [id, partial] of this.run.partials) {
 			const tool = this.tools.get(id);
 			if (!tool || this.partialsShown.get(id) === partial) continue;
@@ -131,56 +219,68 @@ export class AgentViewer implements Component, Focusable {
 	}
 
 	private append(entry: LogEntry): void {
+		const drawn: Drawn = { entry, components: [], toolIds: [] };
+		this.drawn.push(drawn);
+		const add = (component: Component) => {
+			drawn.components.push(component);
+			this.transcript.addChild(component);
+		};
 		if (entry.kind === "notice") {
-			this.transcript.addChild(new Spacer(1));
-			this.transcript.addChild(new Text(this.theme.fg("muted", entry.text), 1, 0));
+			add(new Spacer(1));
+			add(new Notice(this.theme, entry.text));
 			return;
 		}
 		const message = entry.message;
 		try {
-			this.appendMessage(message);
+			this.appendMessage(message, add, drawn.toolIds);
 		} catch {
 			// A message Pi's components cannot draw: fall back to its text.
 			const text = contentText(message.content);
-			if (text) this.transcript.addChild(new Text(this.theme.fg("muted", text), 1, 0));
+			if (text) add(new Notice(this.theme, text));
 		}
 	}
 
-	private appendMessage(message: ChildMessage): void {
+	private appendMessage(message: ChildMessage, add: (component: Component) => void, toolIds: string[]): void {
 		switch (message.role) {
 			case "user": {
 				const text = contentText(message.content).trim();
-				if (text) this.transcript.addChild(new UserMessageComponent(text, this.markdown));
+				if (text) add(new UserMessageComponent(text, this.markdown));
 				return;
 			}
 			case "assistant": {
-				this.transcript.addChild(new AssistantMessageComponent(message as never, true, this.markdown));
+				add(new AssistantMessageComponent(message as never, true, this.markdown));
 				const blocks = Array.isArray(message.content) ? (message.content as Array<Record<string, unknown>>) : [];
 				for (const block of blocks) {
 					if (block.type !== "toolCall") continue;
 					const id = String(block.id ?? "");
 					const name = String(block.name ?? "tool");
+					this.noteTiming(id, { start: typeof message.timestamp === "number" ? message.timestamp : undefined });
 					const tool = new ToolExecutionComponent(name, id, block.arguments, { showImages: false }, this.renderers[name], this.tui, this.run.spec.cwd);
 					tool.setArgsComplete();
 					tool.markExecutionStarted();
 					tool.setExpanded(this.expanded);
 					this.tools.set(id, tool);
-					this.transcript.addChild(tool);
+					toolIds.push(id);
+					add(tool);
 				}
 				return;
 			}
 			case "toolResult": {
-				const tool = this.tools.get(String(message.toolCallId ?? ""));
-				tool?.updateResult({
-					content: Array.isArray(message.content) ? (message.content as Array<{ type: string; text?: string }>) : [],
-					details: message.details,
-					isError: message.isError === true,
-				});
+				const content = Array.isArray(message.content) ? (message.content as Array<{ type: string; text?: string }>) : [];
+				const id = String(message.toolCallId ?? "");
+				const tool = this.tools.get(id);
+				this.noteTiming(id, { end: typeof message.timestamp === "number" ? message.timestamp : undefined });
+				if (tool) tool.updateResult({ content, details: message.details, isError: message.isError === true });
+				else {
+					// Its call was trimmed from the log: keep the output rather than dropping it.
+					const text = contentText(message.content).trim();
+					if (text) add(new Notice(this.theme, `${String(message.toolName ?? "tool")} result: ${text.split("\n").slice(0, 3).join(" ")}`));
+				}
 				return;
 			}
 			case "custom": {
 				if (message.display !== true) return;
-				this.transcript.addChild(new CustomMessageComponent(message as never, undefined, this.markdown));
+				add(new CustomMessageComponent(message as never, undefined, this.markdown));
 				return;
 			}
 		}
@@ -197,24 +297,20 @@ export class AgentViewer implements Component, Focusable {
 				this.tui.requestRender();
 			},
 			(error: unknown) => {
-				this.status = error instanceof Error ? error.message : String(error);
+				this.status = oneLine(error instanceof Error ? error.message : String(error), 200);
 				this.tui.requestRender();
 			},
 		);
 	}
 
 	handleInput(data: string): void {
-		if (matchesKey(data, "escape")) {
+		if (matchesKey(data, "escape") || this.keys.matches(data, "tui.select.cancel")) {
 			if (this.input.getValue()) this.input.setValue("");
 			else this.close();
+			this.tui.requestRender();
 			return;
 		}
-		if (matchesKey(data, "ctrl+x")) {
-			this.stop();
-			this.status = "stopping";
-			return;
-		}
-		if (matchesKey(data, "ctrl+o")) {
+		if (this.keys.matches(data, "app.tools.expand")) {
 			this.expanded = !this.expanded;
 			for (const tool of this.tools.values()) tool.setExpanded(this.expanded);
 			this.tui.requestRender();
@@ -259,19 +355,30 @@ export class AgentViewer implements Component, Focusable {
 		return `${clipped}${" ".repeat(Math.max(1, width - visibleWidth(clipped) - visibleWidth(right)))}${right}`;
 	}
 
+	private keyLabel(id: string, fallback: string): string {
+		try {
+			return this.keys.getKeys(id)[0] ?? fallback;
+		} catch {
+			return fallback;
+		}
+	}
+
 	render(width: number): string[] {
-		this.sync();
+		return this.draw(width).map((line) => truncateToWidth(line, width));
+	}
+
+	private draw(width: number): string[] {
 		const th = this.theme;
 		const run = this.run;
 		const now = Date.now();
 		const rule = th.fg("border", "─".repeat(Math.max(1, width)));
 
 		const type = run.name === run.type || run.name.startsWith(`${run.type}-`) ? "" : ` ${th.fg("muted", run.type)}`;
-		const name = `${statusGlyph(run.status, th, { now, approval: Boolean(run.approval) })} ${th.fg("accent", th.bold(run.name))}${type} ${th.fg("text", run.description)}`;
+		const name = `${statusGlyph(run.status, th, { now, approval: Boolean(run.approval) })} ${th.fg("accent", th.bold(run.name))}${type} ${th.fg("text", oneLine(run.description, 100))}`;
 		const meta = th.fg("muted", [
 			`${shortModel(run.spec.model)}${run.spec.thinking ? `:${run.spec.thinking}` : ""}`,
 			contextLabel(run.contextTokens, run.spec.contextBudget, run.spec.contextWindow),
-			`${run.toolUses} tool calls`,
+			`${run.toolUses} tool call${run.toolUses === 1 ? "" : "s"}`,
 			formatDuration((run.endedAt ?? now) - run.runStartedAt),
 		].join(" · "));
 
@@ -279,7 +386,12 @@ export class AgentViewer implements Component, Focusable {
 		if (run.status === "running") {
 			const tail = this.streaming.render(width);
 			if (tail.some((line) => line.trim())) body.push(...tail);
-			else body.push("", ` ${th.fg("accent", statusGlyph("running", th, { now }))} ${th.fg("muted", run.approval ? `waiting for your approval: ${run.approval.split("\n")[0]}` : "working…")}`);
+			else {
+				const waiting = run.approval
+					? th.fg("warning", `waiting for your approval: ${oneLine(run.approval, 200)}`)
+					: th.fg("muted", "working…");
+				body.push("", ` ${statusGlyph("running", th, { now })} ${waiting}`);
+			}
 		}
 
 		const height = this.viewportHeight();
@@ -293,8 +405,7 @@ export class AgentViewer implements Component, Focusable {
 		const hints = [
 			hint("enter", action),
 			hint("↑↓", this.scroll ? `scroll (${this.scroll} up)` : "scroll"),
-			hint("ctrl+o", this.expanded ? "collapse" : "expand"),
-			...(run.busy ? [hint("ctrl+x", "stop")] : []),
+			hint(this.keyLabel("app.tools.expand", "ctrl+o"), this.expanded ? "collapse" : "expand"),
 			hint("esc", "back"),
 		].join(th.fg("dim", " · "));
 
@@ -306,8 +417,8 @@ export class AgentViewer implements Component, Focusable {
 			rule,
 			this.status
 				? this.rightAligned(this.input.render(Math.max(10, width - visibleWidth(this.status) - 3))[0] ?? "", `${th.fg("muted", this.status)} `, width)
-				: truncateToWidth(this.input.render(width - 1)[0] ?? "", width),
-			truncateToWidth(` ${hints}`, width),
+				: this.input.render(width - 1)[0] ?? "",
+			` ${hints}`,
 		];
 	}
 }

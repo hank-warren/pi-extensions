@@ -1,6 +1,6 @@
 # pi-agents
 
-Subagents for [Pi](https://pi.dev) that look and feel like Pi. Each agent is its own `pi --mode rpc` process with your normal extensions, skills and `AGENTS.md`, configured with a markdown file. It renders with Pi's own tool rows, status line and transcript components, can be watched and steered while it runs, and optionally stays within a context budget.
+Subagents for [Pi](https://pi.dev) that look and feel like Pi. Each agent is its own `pi --mode rpc` process with your normal extensions, skills and `AGENTS.md`, configured with a markdown file. It renders with Pi's own tool rows and transcript components plus a one-line summary above the prompt, can be watched and steered while it runs, and optionally stays within a context budget.
 
 ```bash
 pi install npm:@hank-warren/pi-agents
@@ -67,22 +67,32 @@ The way of working comes from Claude Code's subagents: delegate, keep working, w
  ... (8 more lines, ctrl+o to expand)
 ```
 
-**The status line below the editor** uses the same shape as Pi's other status lines (`auto permissions · …`, `◆ plan · …`). It appears whenever agents are running or have just finished:
+**Above the prompt, one line sums up the agents** while a batch runs and for a minute after the last one finishes. A batch is every agent started while another was still running.
 
 ```
- agents · 2 running · 1 waiting for you                                          ↓ to manage
-   ⠹ reviewer review auth changes        claude-opus-5 · 41k/1M · 18 tool calls · 2m10s
-   ? pusher   push release branch        waiting for your approval · gpt-5.6-luna · 3k/272k · 2 tool calls · 40s
-   ✓ scout    map payment flow           claude-sonnet-5 · 22k/120k budget · 9 tool calls · 31s
+ ⠹ Agents | 1/3 completed | 1 needs you | ↓ to manage
+```
+
+**`↓` at an empty prompt opens them below the prompt.** It is a drawer that is only there while you use it: a row per agent with its state, name, task, model, context and elapsed time, and under each running agent the tool call it is running right now. The cursor starts on an agent waiting for your approval, if there is one.
+
+```
+→ ⠹ auth-review  review auth changes   claude-opus-5-5 · 41k/1M · 2m10s
+                 $ git diff origin/main...HEAD
+  ? pusher       push release branch   needs you · gpt-5.6-luna · 3k/272k · 40s
+                 waiting for your approval: git push origin release
+  ✓ scout        map payment flow      claude-sonnet-5 · 22k/120k budget · 31s
+  ↑↓ select · enter open · x stop · esc back
+──────────────────────────────────────────────────────────────────────────
 ```
 
 | Key | Action |
 |---|---|
-| `↓` (at an empty prompt) | Focus the list; `→` marks the selection, as in Pi's selectors |
-| `↑` / `↓` | Move between rows |
+| `↓` (at an empty prompt) | Open the drawer |
+| `↑` / `↓` | Move between agents; `↑` off the top closes the drawer, and only the next `↑` recalls a previous prompt |
 | `Enter` | Open the agent |
-| `x` | Stop a running agent, or dismiss a finished row |
-| `Esc` | Back to the prompt |
+| `x` | Stop a running agent, or dismiss a finished one |
+| `Esc` | Close the drawer |
+| Anything else | Closes the drawer and goes to the editor, so you can just start typing |
 
 **Opening an agent shows its session as Pi would.** The view takes the editor's place, like `/tree` or `/resume`. Inside it, user messages, assistant markdown and tool boxes are drawn with Pi's own components and built-in tool renderers, so `$ bash` output, `read` previews and `edit` diffs look the same as in the main session. Assistant text streams in live.
 
@@ -90,9 +100,8 @@ The way of working comes from Claude Code's subagents: delegate, keep working, w
 |---|---|
 | Type, then `Enter` | Steer a running agent (delivered after its current tool calls), or follow up on a finished one |
 | `↑` `↓` `PgUp` `PgDn` | Scroll |
-| `Ctrl+O` | Expand or collapse every tool box |
-| `Ctrl+X` | Stop the agent |
-| `Esc` | Back |
+| Pi's expand key (`Ctrl+O`) | Expand or collapse every tool box |
+| `Esc` | Back to the drawer, on this agent: `x` stops it, `Enter` reopens it, `↑` past the top or typing returns to the prompt |
 
 `/agents` lists every agent in the session, including ones restored after a restart, and opens one. `/agents types` lists the agent definitions and any errors in them.
 
@@ -141,7 +150,7 @@ Every child enforces its budget from inside its own process:
 
 The result says `budget exhausted` when this happened.
 
-`maxTurns` defaults to 80. **There is no context budget by default**: an agent can use its model's whole window, and Pi's compaction applies as in any session. Set `contextBudget` on an agent that should stop well short of its window. This matters most for long-context models, which tend to keep reading until their answers degrade. The panel shows `ctx 78k/150k budget` for an agent with a budget, and `ctx 78k/272k` against the model's window for one without.
+`maxTurns` defaults to 80. **There is no context budget by default**: an agent can use its model's whole window, and Pi's compaction applies as in any session. Set `contextBudget` on an agent that should stop well short of its window. This matters most for long-context models, which tend to keep reading until their answers degrade. The list shows `78k/150k budget` for an agent with a budget, and `78k/272k` against the model's window for one without.
 
 ## Worktrees for multi-repo workspaces
 

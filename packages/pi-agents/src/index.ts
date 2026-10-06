@@ -89,15 +89,15 @@ export default function piAgents(pi: ExtensionAPI): void {
 		if (!run.log.length && run.sessionFile) run.log = loadLog(run.sessionFile);
 		const current = manager;
 		// In the editor's place, like Pi's own selectors, rather than a floating box.
-		await ui.custom<void>((tui, theme, _keybindings, done) =>
+		await ui.custom<void>((tui, theme, keybindings, done) =>
 			new AgentViewer(
 				tui,
 				theme,
+				keybindings,
 				run,
 				current,
 				() => done(),
 				(text) => sendToAgent({ manager: current, notify }, run, text),
-				() => void current.stop(run),
 			));
 	};
 	const panel = new AgentPanel({ subscribe: (listener) => manager.subscribe(listener), list: () => manager.list(), stop: (run) => manager.stop(run) }, openViewer);

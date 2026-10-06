@@ -1,6 +1,6 @@
 import { getMarkdownTheme, keyHint, type Theme } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Markdown, Text } from "@earendil-works/pi-tui";
-import { formatDuration, formatTokens, type ToolCallSummary } from "./format.js";
+import { formatDuration, formatTokens, oneLine, type ToolCallSummary } from "./format.js";
 import type { AgentRun, RunStatus } from "./manager.js";
 import type { WorktreeInfo } from "./worktree.js";
 
@@ -66,7 +66,7 @@ export function spinnerFrame(now = Date.now()): string {
  * a spinner while working, `⋯` waiting its turn, `?` waiting for you.
  */
 export function statusGlyph(status: RunStatus, theme: Theme, options: { now?: number; approval?: boolean } = {}): string {
-	if (options.approval) return theme.fg("accent", "?");
+	if (options.approval) return theme.fg("warning", "?");
 	switch (status) {
 		case "queued":
 			return theme.fg("muted", "⋯");
@@ -159,7 +159,7 @@ export function collapsibleText(text: string, options: { expanded: boolean; maxL
 export function renderAgentCall(args: { subagent_type?: string; description?: string; name?: string }, theme: Theme): Text {
 	let text = theme.fg("toolTitle", theme.bold("agent"));
 	if (args.subagent_type) text += ` ${theme.fg("accent", args.subagent_type)}`;
-	if (args.description) text += ` ${theme.fg("toolOutput", args.description)}`;
+	if (args.description) text += ` ${theme.fg("toolOutput", oneLine(args.description, 100))}`;
 	return new Text(text, 0, 0);
 }
 
@@ -176,7 +176,7 @@ export function renderAgentResult(details: AgentDetails | undefined, fallback: s
 	const meta = (extra: string) => theme.fg("muted", `${shortModel(details.model)} · ${extra}`);
 	if (details.status === "running" || details.status === "queued") {
 		if (details.background) {
-			container.addChild(new Text(theme.fg("muted", `running in background as ${details.name} · ↓ to watch`), 0, 0));
+			container.addChild(new Text(theme.fg("muted", `running in background as ${details.name} · ↓ to manage`), 0, 0));
 			return container;
 		}
 		const shown = expanded ? details.toolLog : details.toolLog.slice(-3);
