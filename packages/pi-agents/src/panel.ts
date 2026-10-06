@@ -294,8 +294,8 @@ export class AgentPanel {
 			const current = start + offset === this.selected;
 			const glyph = statusGlyph(run.status, theme, { now, approval: Boolean(run.approval) });
 			const name = current ? theme.fg("accent", theme.bold(padTo(run.name, nameWidth))) : theme.fg("text", padTo(run.name, nameWidth));
-			const share = contextShare(run.contextTokens, run.spec.contextBudget, run.spec.contextWindow) ?? 0;
-			const context = contextLabel(run.contextTokens, run.spec.contextBudget, run.spec.contextWindow);
+			const share = contextShare(run.contextTokens, run.spec.contextWindow, run.spec.autocompact) ?? 0;
+			const context = contextLabel(run.contextTokens, run.spec.contextWindow, run.spec.autocompact);
 			const stats = [
 				...(run.approval ? [theme.fg("warning", "needs you")] : run.status === "queued" ? [theme.fg("muted", "queued")] : []),
 				theme.fg("dim", shortModel(run.spec.model)),
@@ -324,6 +324,7 @@ export class AgentPanel {
 	private activity(run: AgentRun, theme: Theme): string {
 		if (run.approval) return theme.fg("warning", `waiting for your approval: ${oneLine(run.approval, 120)}`);
 		if (run.status === "queued") return theme.fg("dim", "waiting for a free slot");
+		if (run.compacting) return theme.fg("dim", "compacting context");
 		const last = run.toolLog.at(-1);
 		if (run.runningTools.size && last) return theme.fg("dim", oneLine(last.rest ? `${last.head} ${last.rest}` : last.head, 120));
 		return theme.fg("dim", run.streaming ? "writing…" : "thinking…");

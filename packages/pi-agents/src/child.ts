@@ -1,8 +1,15 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { formatTokens } from "./format.js";
 
-/** Status key the child uses to tell the parent its budget ran out. */
+/** Status key the child uses to tell the parent its turn budget ran out. */
 export const BUDGET_STATUS_KEY = "pi-agents-budget";
+/** Status key for autocompact: `compacting` while the child compacts between runs, `stalled: …` if it cannot resume. */
+export const COMPACT_STATUS_KEY = "pi-agents-compact";
+/** What the child says to itself to pick the task back up after compacting. */
+export const CONTINUE_AFTER_COMPACTION = "Compaction completed. Continue.";
 
 export interface BudgetState {
 	turns: number;
@@ -18,62 +25,119 @@ export type BudgetAction =
 	| { kind: "exhaust"; message: string };
 
 /**
- * Decide what a finished turn means for the budget. Pure, so the thresholds
- * are testable: warn once at 75% of context or 80% of turns, cut tools at
- * 100% of either. Only a turn that will continue (it ran tools) is steered;
- * a final answer is left alone.
+ * Decide what a finished turn means for the turn budget. Pure, so the
+ * thresholds are testable: warn once at 80%, cut tools at 100%. Only a turn
+ * that will continue (it ran tools) is steered; a final answer is left alone.
  */
-export function budgetAfterTurn(
-	state: BudgetState,
-	input: { tokens: number; continuing: boolean; contextBudget?: number; maxTurns: number },
-): BudgetAction {
+export function budgetAfterTurn(state: BudgetState, input: { continuing: boolean; maxTurns: number }): BudgetAction {
 	state.turns += 1;
 	if (!input.continuing || state.exhausted) return { kind: "none" };
-	const { tokens, contextBudget, maxTurns } = input;
-	// Without a context budget only turns count; the model's own window and
-	// Pi's compaction bound the context.
-	const contextUsed = contextBudget ? tokens / contextBudget : 0;
-	const usage = `${contextBudget ? `${formatTokens(tokens)}/${formatTokens(contextBudget)} tokens, ` : ""}${state.turns}/${maxTurns} turns`;
-	if (contextUsed >= 1 || state.turns >= maxTurns) {
+	const usage = `${state.turns}/${input.maxTurns} turns`;
+	if (state.turns >= input.maxTurns) {
 		state.exhausted = true;
 		return {
 			kind: "exhaust",
-			message: `[pi-agents] Budget exhausted (${usage}). Tools are now disabled. Write your final report immediately: what you found or changed, what is unfinished, and where to continue.`,
+			message: `[pi-agents] Turn budget exhausted (${usage}). Tools are now disabled. Write your final report immediately: what you found or changed, what is unfinished, and where to continue.`,
 		};
 	}
-	if (!state.warned && (contextUsed >= 0.75 || state.turns >= Math.floor(maxTurns * 0.8))) {
+	if (!state.warned && state.turns >= Math.floor(input.maxTurns * 0.8)) {
 		state.warned = true;
-		return {
-			kind: "warn",
-			message: `[pi-agents] Budget nearly used (${usage}). Stop exploring. Finish only what is essential, then write your final report.`,
-		};
+		return { kind: "warn", message: `[pi-agents] Turn budget nearly used (${usage}). Stop exploring. Finish only what is essential, then write your final report.` };
 	}
 	return { kind: "none" };
 }
 
-/**
- * Budget state for a new prompt. Turns start over; the context budget does
- * not: a prompt that starts at or over it starts exhausted, with tools
- * refused from the first call. Pure, for tests.
- */
-export function budgetAtPromptStart(
-	state: BudgetState,
-	input: { tokens: number; contextBudget?: number },
-): { kind: "none" } | { kind: "exhaust"; message: string } {
-	const { tokens, contextBudget } = input;
+/** A new prompt starts a fresh turn budget. */
+export function budgetAtPromptStart(state: BudgetState): void {
 	state.turns = 0;
 	state.blockedCalls = 0;
-	if (contextBudget && tokens >= contextBudget) {
-		state.exhausted = true;
-		state.warned = true;
-		return {
-			kind: "exhaust",
-			message: `[pi-agents] Context budget already used (${formatTokens(tokens)}/${formatTokens(contextBudget)} tokens). Tools are disabled. Answer from what you already know, and say what would need a fresh agent.`,
-		};
-	}
+	state.warned = false;
 	state.exhausted = false;
-	state.warned = contextBudget ? tokens >= contextBudget * 0.75 : false;
-	return { kind: "none" };
+}
+
+export interface AutocompactState {
+	/** Over the threshold: the next model request is stopped so the child can compact. */
+	armed: boolean;
+	/** A request was stopped for it; compaction runs once the child settles. */
+	interrupted: boolean;
+	compacting: boolean;
+	/** Where the next compaction triggers; raised after one so a context that cannot shrink below the threshold does not compact every turn. */
+	nextAt?: number;
+	/** Set after compacting: the next measured size becomes the new floor. */
+	floorPending: boolean;
+	/** Compaction failed: Pi's own threshold takes over for the rest of the session. */
+	disabled: boolean;
+}
+
+/** Whether a context of `tokens` should compact now. Pure, for tests. */
+export function autocompactDue(state: AutocompactState, input: { tokens: number | null | undefined; threshold: number | undefined }): boolean {
+	const { tokens, threshold } = input;
+	if (state.disabled || state.compacting || state.armed || !threshold || tokens == null) return false;
+	if (state.floorPending) {
+		state.nextAt = Math.max(threshold, tokens + Math.floor(threshold / 2));
+		state.floorPending = false;
+	}
+	return tokens >= (state.nextAt ?? threshold);
+}
+
+/** `AGENTS.md`, else `CLAUDE.md`, in one directory, as Pi picks them. */
+function instructionFile(dir: string): string | undefined {
+	for (const name of ["AGENTS.md", "CLAUDE.md"]) {
+		const path = join(dir, name);
+		try {
+			if (statSync(path).isFile()) return path;
+		} catch {
+			// absent
+		}
+	}
+	return undefined;
+}
+
+function real(path: string): string {
+	try {
+		return realpathSync(path);
+	} catch {
+		return resolve(path);
+	}
+}
+
+function expandHome(path: string): string {
+	if (path === "~") return homedir();
+	return path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
+}
+
+const PATH_TOOLS = new Set(["read", "edit", "write", "grep", "find", "ls"]);
+
+/**
+ * Directories a tool call works in: the `path` of file tools, and for bash the
+ * targets of `cd`, `pushd` and `git -C` plus absolute paths it names. Only
+ * paths that exist count, except the directory of a file about to be written.
+ */
+export function workedPaths(toolName: string, input: unknown, cwd: string): string[] {
+	const args = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+	const raw: string[] = [];
+	if (PATH_TOOLS.has(toolName) && typeof args.path === "string") raw.push(args.path);
+	if (toolName === "bash" && typeof args.command === "string") {
+		const command = args.command;
+		const unquote = (token: string) => token.replace(/^(["'])(.*)\1$/, "$2");
+		for (const match of command.matchAll(/(?:^|[;&|(\n]\s*)(?:cd|pushd)\s+("[^"]+"|'[^']+'|[^\s;&|)]+)/g)) raw.push(unquote(match[1]!));
+		for (const match of command.matchAll(/\bgit\s+-C\s+("[^"]+"|'[^']+'|[^\s;&|)]+)/g)) raw.push(unquote(match[1]!));
+		for (const match of command.matchAll(/(?:^|[\s="'])((?:~|\/)[^\s'";|&<>()`$]*)/g)) raw.push(match[1]!);
+	}
+	const out: string[] = [];
+	for (const item of raw.slice(0, 24)) {
+		if (!item || item === "/" || item.startsWith("/dev") || item.startsWith("/proc")) continue;
+		const path = resolve(cwd, expandHome(item));
+		try {
+			out.push(statSync(path).isDirectory() ? path : dirname(path));
+		} catch {
+			if (toolName === "write" || toolName === "edit") {
+				const parent = dirname(path);
+				if (existsSync(parent)) out.push(parent);
+			}
+		}
+	}
+	return [...new Set(out)];
 }
 
 function envInt(name: string): number | undefined {
@@ -81,32 +145,96 @@ function envInt(name: string): number | undefined {
 	return Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
+function envList(name: string): string[] {
+	try {
+		const parsed = JSON.parse(process.env[name] ?? "[]") as unknown;
+		return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+	} catch {
+		return [];
+	}
+}
+
+type ContextFile = { path: string; content: string };
+
 /**
  * Runs inside a child process (`PI_AGENTS_CHILD=1`). Registers no tools, so a
- * child can never spawn agents; only enforces the context and turn budget.
+ * child can never spawn agents. It enforces the turn budget, compacts at the
+ * agent's autocompact threshold, adds the parent's instruction files to its
+ * own, and loads a directory's AGENTS.md the first time it works there.
  */
 export function registerChild(pi: ExtensionAPI): void {
-	const contextBudget = envInt("PI_AGENTS_CONTEXT_BUDGET");
 	const maxTurns = envInt("PI_AGENTS_MAX_TURNS") ?? 80;
-	const state: BudgetState = { turns: 0, warned: false, exhausted: false, blockedCalls: 0 };
+	const percent = Number(process.env.PI_AGENTS_AUTOCOMPACT);
+	const autocompact = Number.isFinite(percent) && percent > 0 && percent < 100 ? percent : undefined;
+	const instructions = process.env.PI_AGENTS_NO_CONTEXT_FILES !== "1";
+	const inherited = envList("PI_AGENTS_CONTEXT_FILES");
+	const budget: BudgetState = { turns: 0, warned: false, exhausted: false, blockedCalls: 0 };
+	const compaction: AutocompactState = { armed: false, interrupted: false, compacting: false, floorPending: false, disabled: false };
+	let resuming = false;
 
-	// before_agent_start fires once per prompt (a new task or follow-up), never
-	// for Pi's own continuations such as automatic retries, so a retry cannot
-	// hand out a fresh budget.
-	pi.on("before_agent_start", (_event, ctx) => {
-		const start = budgetAtPromptStart(state, { tokens: ctx.getContextUsage()?.tokens ?? 0, contextBudget });
-		ctx.ui.setStatus(BUDGET_STATUS_KEY, state.exhausted ? "exhausted" : undefined);
-		if (start.kind !== "exhaust") return;
-		return { message: { customType: "pi-agents-budget", content: start.message, display: true } };
+	/** Instruction files in the system prompt of the current run, by real path. */
+	const inPrompt = new Set<string>();
+	/** Instruction files the model has in front of it: the system prompt plus what tool results carried. */
+	const seen = new Set<string>();
+	/** Files loaded on entry, kept in the system prompt from the next prompt on. */
+	const entered = new Map<string, ContextFile>();
+	const checkedDirs = new Set<string>();
+	const pending: ContextFile[] = [];
+
+	const threshold = (ctx: ExtensionContext): number | undefined => {
+		const window = ctx.getContextUsage()?.contextWindow ?? ctx.model?.contextWindow;
+		return autocompact && window ? Math.floor((window * autocompact) / 100) : undefined;
+	};
+	const arm = (ctx: ExtensionContext) => {
+		if (autocompact && autocompactDue(compaction, { tokens: ctx.getContextUsage()?.tokens, threshold: threshold(ctx) })) compaction.armed = true;
+	};
+
+	pi.on("before_agent_start", (event, ctx) => {
+		// A continuation after compacting is the same task: its turns keep counting.
+		if (!resuming) budgetAtPromptStart(budget);
+		resuming = false;
+		ctx.ui.setStatus(BUDGET_STATUS_KEY, undefined);
+		arm(ctx);
+		if (!instructions) return;
+		const options = (event as { systemPromptOptions?: { contextFiles?: ContextFile[] } }).systemPromptOptions;
+		const fallback = (ctx as { getSystemPromptOptions?: () => { contextFiles?: ContextFile[] } }).getSystemPromptOptions?.().contextFiles;
+		const own: ContextFile[] = options?.contextFiles ?? fallback ?? [];
+		const ownReal = new Set(own.map((file) => real(file.path)));
+		const extra: ContextFile[] = [];
+		const add = (file: ContextFile) => {
+			const key = real(file.path);
+			if (!ownReal.has(key) && !extra.some((item) => real(item.path) === key)) extra.push(file);
+		};
+		for (const path of inherited) {
+			try {
+				add({ path, content: readFileSync(path, "utf8") });
+			} catch {
+				// Gone since the parent loaded it.
+			}
+		}
+		for (const file of entered.values()) add(file);
+		inPrompt.clear();
+		for (const key of ownReal) inPrompt.add(key);
+		for (const file of extra) inPrompt.add(real(file.path));
+		for (const key of inPrompt) seen.add(key);
+		if (!extra.length) return;
+		if (options?.contextFiles) {
+			// After the files the parent shares, before the child's own directory chain.
+			const parentReal = new Set(inherited.map(real));
+			let at = 0;
+			own.forEach((file, index) => {
+				if (parentReal.has(real(file.path))) at = index + 1;
+			});
+			options.contextFiles.splice(at, 0, ...extra);
+			return;
+		}
+		const section = extra.map((file) => `## ${file.path}\n\n${file.content}`).join("\n\n");
+		return { systemPrompt: `${event.systemPrompt}\n\n# Project Context (from the supervising session)\n\n${section}` };
 	});
 
 	pi.on("turn_end", (event, ctx) => {
-		const action = budgetAfterTurn(state, {
-			tokens: ctx.getContextUsage()?.tokens ?? 0,
-			continuing: event.toolResults.length > 0,
-			contextBudget,
-			maxTurns,
-		});
+		arm(ctx);
+		const action = budgetAfterTurn(budget, { continuing: event.toolResults.length > 0, maxTurns });
 		if (action.kind === "none") return;
 		if (action.kind === "exhaust") ctx.ui.setStatus(BUDGET_STATUS_KEY, "exhausted");
 		pi.sendUserMessage(action.message, { deliverAs: "steer" });
@@ -116,9 +244,98 @@ export function registerChild(pi: ExtensionAPI): void {
 	// but no tools), but every call is refused once the budget is gone. A model
 	// that keeps calling anyway is aborted, so the run always ends.
 	pi.on("tool_call", (_event, ctx) => {
-		if (!state.exhausted) return;
-		state.blockedCalls += 1;
-		if (state.blockedCalls > 3) ctx.abort();
-		return { block: true, reason: "Budget exhausted: tools are disabled. Write your final report now, without tool calls." };
+		if (!budget.exhausted) return;
+		budget.blockedCalls += 1;
+		if (budget.blockedCalls > 3) ctx.abort();
+		return { block: true, reason: "Turn budget exhausted: tools are disabled. Write your final report now, without tool calls." };
 	});
+
+	// Pi has no per-session compaction threshold, so autocompact stops before
+	// the next model request, compacts once the run settles (through Pi's own
+	// compaction, so compaction extensions apply), and continues the task.
+	pi.on("before_provider_request", (_event, ctx) => {
+		if (!compaction.armed || compaction.interrupted || compaction.compacting) return;
+		compaction.interrupted = true;
+		// Before the abort, so the parent never reads the stopped run as finished.
+		ctx.ui.setStatus(COMPACT_STATUS_KEY, "compacting");
+		ctx.abort();
+	});
+
+	pi.on("agent_settled", (_event, ctx) => {
+		if (!compaction.armed || !compaction.interrupted || compaction.compacting) return;
+		compaction.compacting = true;
+		const resume = (error?: Error) => {
+			compaction.armed = false;
+			compaction.interrupted = false;
+			compaction.compacting = false;
+			if (error && /nothing to compact|already compacted/i.test(error.message)) {
+				// Too little history to summarize yet (Pi keeps its recent tokens): try again once the context has grown.
+				const tokens = ctx.getContextUsage()?.tokens ?? threshold(ctx) ?? 0;
+				compaction.nextAt = tokens + Math.floor((threshold(ctx) ?? 0) / 2);
+			} else if (error) {
+				compaction.disabled = true;
+				ctx.ui.notify(`autocompact failed (${error.message}); continuing with Pi's own compaction threshold`, "warning");
+			} else {
+				compaction.floorPending = true;
+			}
+			try {
+				resuming = true;
+				pi.sendUserMessage(CONTINUE_AFTER_COMPACTION);
+				ctx.ui.setStatus(COMPACT_STATUS_KEY, undefined);
+			} catch (sendError) {
+				resuming = false;
+				ctx.ui.setStatus(COMPACT_STATUS_KEY, `stalled: ${sendError instanceof Error ? sendError.message : String(sendError)}`);
+			}
+		};
+		ctx.compact({ onComplete: () => resume(), onError: (error) => resume(error) });
+	});
+
+	pi.on("session_compact", () => {
+		// What tool results carried may be summarized away: load it again on the next visit.
+		seen.clear();
+		for (const key of inPrompt) seen.add(key);
+		checkedDirs.clear();
+	});
+
+	/** Queue the instruction files from `dir` up to the root that the model has not seen. */
+	const visit = (dir: string) => {
+		const found: ContextFile[] = [];
+		for (let current = dir; !checkedDirs.has(current); current = dirname(current)) {
+			checkedDirs.add(current);
+			const file = instructionFile(current);
+			const key = file ? real(file) : undefined;
+			if (file && key && !seen.has(key)) {
+				try {
+					const loaded = { path: file, content: readFileSync(file, "utf8") };
+					found.unshift(loaded);
+					seen.add(key);
+					entered.set(key, loaded);
+				} catch {
+					// Unreadable: skip it.
+				}
+			}
+			if (dirname(current) === current) break;
+		}
+		pending.push(...found);
+	};
+
+	pi.on("tool_result", (event, ctx) => {
+		if (!instructions) return;
+		const call = event as { toolName: string; input?: unknown; parentToolCallId?: string; content: Array<{ type: string; text?: string }> };
+		for (const dir of workedPaths(call.toolName, call.input, ctx.cwd)) visit(dir);
+		// A codemode script's own calls report through the script: attach to its result instead.
+		if (call.parentToolCallId || !pending.length) return;
+		const files = pending.splice(0);
+		const text = [
+			"[pi-agents] Instructions for the directories you just worked in. Follow them for work there:",
+			...files.map((file) => `## ${file.path}\n\n${file.content.trim()}`),
+		].join("\n\n");
+		return { content: [...call.content, { type: "text", text }] } as never;
+	});
+}
+
+/** For prompts and the UI: an autocompact percentage in tokens when the window is known. */
+export function describeAutocompact(percent: number | undefined, window: number | undefined): string | undefined {
+	if (!percent) return undefined;
+	return window ? `${percent}% of ${formatTokens(window)} (${formatTokens(Math.floor((window * percent) / 100))})` : `${percent}% of the context window`;
 }

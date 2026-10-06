@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { initTheme, type Theme } from "@earendil-works/pi-coding-agent";
-import { BUILTIN_AGENTS } from "../src/agents.js";
+import { composeAgent, parseAgentFile } from "../src/agents.js";
+
+const scoutAgent = parseAgentFile("---\nname: scout\ndescription: Finds things.\n---\n", "/x/scout.md").agent!;
+const reviewerAgent = { ...composeAgent(undefined, {}), name: "reviewer", source: "user" as const };
 import { AgentManager, AgentRun } from "../src/manager.js";
 import { AgentPanel } from "../src/panel.js";
 import { type AgentDetails, renderAgentCall, renderAgentMessage, renderAgentResult } from "../src/render.js";
@@ -50,7 +53,8 @@ function details(overrides: Partial<AgentDetails> = {}): AgentDetails {
 }
 
 test("the Agent row reads like Pi's own tool rows", () => {
-	assert.deepEqual(strip(renderAgentCall({ subagent_type: "scout", description: "map payment flow" }, plain).render(80)), ["agent scout map payment flow"]);
+	assert.deepEqual(strip(renderAgentCall({ agent: "scout", description: "map payment flow" }, plain).render(80)), ["agent scout map payment flow"]);
+	assert.deepEqual(strip(renderAgentCall({ description: "review the diff", model: "cpa/claude-opus-5-5" }, plain).render(80)), ["agent review the diff · claude-opus-5-5"]);
 
 	const running = strip(renderAgentResult(details({ status: "running" }), "", false, plain).render(80));
 	assert.match(running[0]!, /^\.\.\. \(2 earlier tool calls, /);
@@ -79,7 +83,7 @@ test("a background report lands in a Pi custom-message box labeled [agent]", () 
 function viewerRun(overrides: Partial<ConstructorParameters<typeof AgentRun>[0]> = {}): AgentRun {
 	return new AgentRun({
 		name: "scout",
-		definition: BUILTIN_AGENTS[1]!,
+		definition: scoutAgent,
 		description: "map payment flow",
 		model: "cpa/claude-sonnet-5",
 		cwd: process.cwd(),
@@ -214,7 +218,7 @@ function panelWith(runs: AgentRun[], opened: AgentRun[] = []) {
 test("above the prompt, one summary line; ↓ opens the agents below it and ↑ off the top closes them", async () => {
 	const run = viewerRun({
 		name: "auth-review",
-		definition: { ...BUILTIN_AGENTS[0]!, name: "reviewer" },
+		definition: reviewerAgent,
 		description: "review auth changes",
 		model: "cpa/claude-opus-5-5",
 		contextWindow: 1_000_000,

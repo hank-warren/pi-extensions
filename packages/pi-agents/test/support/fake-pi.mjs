@@ -6,6 +6,7 @@
 //   "SLOW ..." - keeps running until a steer arrives, then answers with it
 //   "FAIL ..." - ends with a provider error
 //   "EXIT ..." - exits mid-run
+//   "COMPACT"  - autocompact: stops its run, compacts, then continues the task
 // Anything else answers "echo: <prompt>" after one tool call.
 let buffer = "";
 let pendingDialog;
@@ -51,6 +52,16 @@ function run(message) {
 	}
 	if (message.startsWith("FAIL")) return finish("", "error", "529 overloaded");
 	if (message.startsWith("EXIT")) process.exit(3);
+	if (message.startsWith("COMPACT")) {
+		out({ type: "extension_ui_request", id: "s1", method: "setStatus", statusKey: "pi-agents-compact", statusText: "compacting" });
+		finish("", "aborted");
+		setTimeout(() => {
+			out({ type: "compaction_start", reason: "manual" });
+			out({ type: "extension_ui_request", id: "s2", method: "setStatus", statusKey: "pi-agents-compact" });
+			run("Compaction completed. Continue.");
+		}, 50);
+		return;
+	}
 	finish(`echo: ${message}`);
 }
 

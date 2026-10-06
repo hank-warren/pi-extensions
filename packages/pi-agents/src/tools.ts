@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
-import { type AgentDefinition, THINKING_LEVELS, type ThinkingLevel } from "./agents.js";
+import { type AgentDefinition, composeAgent, parsePercent, THINKING_LEVELS, type ThinkingLevel } from "./agents.js";
 import { type AgentsConfig, expandHome } from "./config.js";
 import { capText, contentText, formatDuration, oneLine } from "./format.js";
 import type { AgentManager, AgentRun } from "./manager.js";
@@ -21,17 +21,23 @@ export interface ToolHost {
 	setCtx(ctx: ExtensionContext): void;
 	/** Runs whose completion should be announced as a message. */
 	notify: Set<string>;
+	/** Paths of the instruction files in this session's own system prompt. */
+	contextFiles(): string[];
 }
 
 const thinkingSchema = Type.Union(THINKING_LEVELS.map((level) => Type.Literal(level)));
 
 const agentParams = Type.Object({
-	subagent_type: Type.String({ description: "Agent type to run, from the list in this tool's description." }),
 	description: Type.String({ description: "3-6 word summary of the task, shown in the UI." }),
 	prompt: Type.String({ description: "The complete, self-contained task for the agent." }),
-	name: Type.Optional(Type.String({ description: "Short addressable name for SendMessage/TaskStop. Default: the agent type." })),
-	model: Type.Optional(Type.String({ description: "Model override as provider/id. Default: the agent's model, else this session's." })),
+	instructions: Type.Optional(Type.String({ description: "Role and standing instructions for this agent (e.g. 'You review diffs for correctness bugs; report file:line, severity, fix'). Added to its system prompt." })),
+	agent: Type.Optional(Type.String({ description: "A saved agent to start from, by name. Parameters passed here override its settings." })),
+	name: Type.Optional(Type.String({ description: "Short addressable name for SendMessage/TaskStop. Default: derived from the description." })),
+	model: Type.Optional(Type.String({ description: "provider/id. Default: the saved agent's model, else this session's." })),
 	thinking: Type.Optional(thinkingSchema),
+	tools: Type.Optional(Type.Array(Type.String(), { description: "Allowlist of tool names, e.g. [\"read\", \"bash\", \"codemode\"] for read-only work. Default: every tool the user's extensions provide." })),
+	autocompact: Type.Optional(Type.Number({ description: "Compact the agent's context at this percentage of its model's context window, e.g. 10. Default: its full window." })),
+	max_turns: Type.Optional(Type.Integer({ minimum: 1, description: "Turn budget for the task. Default 80." })),
 	run_in_background: Type.Optional(Type.Boolean({ description: "Default true. False blocks until the agent finishes and returns its result." })),
 	cwd: Type.Optional(Type.String({ description: "Run in this directory (e.g. one repository of a multi-repo workspace); its AGENTS.md is loaded." })),
 	worktree: Type.Optional(Type.Object({
@@ -84,7 +90,7 @@ export function resultText(run: AgentRun): string {
 	const details = detailsOf(run);
 	const body = run.result ? capText(run.result, RESULT_MAX_CHARS) : { text: "(no output)", dropped: 0 };
 	const notes = [
-		`${run.name} (${run.type}, id ${run.id}) · ${run.status} · ${statsLine(details)}${run.budgetExhausted ? " · budget exhausted" : ""}`,
+		`${run.name} (${run.type ? `${run.type}, ` : ""}id ${run.id}) · ${run.status} · ${statsLine(details)}${run.budgetExhausted ? " · turn budget exhausted" : ""}`,
 		...(run.error ? [`error: ${run.error}`] : []),
 		...(run.spec.worktree ? [`worktree: ${run.spec.worktree.path} (branch ${run.spec.worktree.branch})`] : []),
 		...(body.dropped ? [`result truncated by ${body.dropped} characters; full transcript: ${run.sessionFile ?? "unavailable"}`] : []),
@@ -157,13 +163,31 @@ async function waitStoppingOnAbort(manager: AgentManager, run: AgentRun, signal:
 	}
 }
 
+/** `review auth changes` → `review-auth-changes`, for a name the parent can address. */
+export function nameFromDescription(description: string): string {
+	const slug = description.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+	return slug.slice(0, 32).replace(/-+$/, "") || "agent";
+}
+
 function noticeIn(run: AgentRun, ctxCwd: string): string {
 	const worktree = run.spec.worktree;
 	if (worktree) return ` in worktree ${worktree.path} (branch ${worktree.branch}${worktree.created ? ", new" : ", reused"})`;
 	return run.spec.cwd !== ctxCwd ? ` in ${run.spec.cwd}` : "";
 }
 
-export function registerTools(pi: ExtensionAPI, host: ToolHost): void {
+/** Codemode when the session has it, so agents are started from scripts; a direct tool otherwise. */
+export function toolExposure(pi: Pick<ExtensionAPI, "getActiveTools">): "codemode" | "direct" {
+	try {
+		return pi.getActiveTools().includes("codemode") ? "codemode" : "direct";
+	} catch {
+		// Not available while extensions load: assume codemode until session_start knows.
+		return "codemode";
+	}
+}
+
+export const TOOL_NAMES = ["Agent", "SendMessage", "TaskStop"];
+
+export function registerTools(pi: ExtensionAPI, host: ToolHost, exposure: "codemode" | "direct" = "codemode"): void {
 	const exec: Exec = (command, args, options) => pi.exec(command, args, options);
 
 	const agentTool = {
@@ -183,11 +207,15 @@ export function registerTools(pi: ExtensionAPI, host: ToolHost): void {
 		): Promise<ToolResultValue> {
 			host.setCtx(ctx);
 			const config = host.config();
-			const definition = host.agents().get(params.subagent_type);
-			if (!definition) {
-				throw new Error(`Unknown subagent_type "${params.subagent_type}". Available: ${[...host.agents().keys()].join(", ")}`);
+			const saved = params.agent ? host.agents().get(params.agent) : undefined;
+			if (params.agent && !saved) {
+				const names = [...host.agents().keys()];
+				throw new Error(`No saved agent "${params.agent}". ${names.length ? `Saved agents: ${names.join(", ")}.` : "There are no saved agents;"} Omit agent and pass instructions to compose one.`);
 			}
 			if (params.cwd && params.worktree) throw new Error("Pass cwd or worktree, not both");
+			const autocompact = params.autocompact === undefined ? undefined : parsePercent(params.autocompact);
+			if (params.autocompact !== undefined && autocompact === undefined) throw new Error("autocompact is a percentage of the context window between 0 and 100, e.g. 10");
+			const definition = composeAgent(saved, { instructions: params.instructions, tools: params.tools, autocompact, maxTurns: params.max_turns });
 			const model = resolveModel(ctx, params.model ?? definition.model);
 			const thinking = params.thinking ?? definition.thinking ?? (pi.getThinkingLevel() as ThinkingLevel);
 			let cwd = params.cwd ? resolveCwd(ctx.cwd, params.cwd) : ctx.cwd;
@@ -195,8 +223,8 @@ export function registerTools(pi: ExtensionAPI, host: ToolHost): void {
 				? await ensureWorktree(exec, params.worktree, { cwd: ctx.cwd, worktreeDir: config.worktreeDir, signal })
 				: undefined;
 			if (worktree) cwd = worktree.path;
-			const name = host.manager.uniqueName((params.name?.trim() || definition.name).replace(/\s+/g, "-"));
-			const contextBudget = definition.contextBudget ?? config.contextBudget;
+			const name = host.manager.uniqueName(params.name?.trim().replace(/\s+/g, "-") || nameFromDescription(params.description));
+			const effectiveAutocompact = definition.autocompact ?? config.autocompact;
 			const slash = model.indexOf("/");
 			const contextWindow = ctx.modelRegistry.find(model.slice(0, slash), model.slice(slash + 1))?.contextWindow;
 			const maxTurns = definition.maxTurns ?? config.maxTurns;
@@ -204,15 +232,16 @@ export function registerTools(pi: ExtensionAPI, host: ToolHost): void {
 			const run = host.manager.create({
 				name,
 				definition,
-				description: oneLine(params.description, 100) || params.subagent_type,
+				description: oneLine(params.description, 100) || name,
 				model,
 				thinking,
 				cwd,
 				background,
-				contextBudget,
+				autocompact: effectiveAutocompact,
+				contextFiles: definition.contextFiles ? host.contextFiles() : undefined,
 				contextWindow,
 				maxTurns,
-				appendPrompt: buildChildPrompt({ name, definition, contextBudget, maxTurns, worktree }),
+				appendPrompt: buildChildPrompt({ name, definition, cwd, maxTurns, autocompact: effectiveAutocompact, contextWindow, worktree, worktreeDir: config.worktreeDir }),
 				worktree,
 			});
 			if (background) host.notify.add(run.id);
@@ -220,7 +249,7 @@ export function registerTools(pi: ExtensionAPI, host: ToolHost): void {
 
 			if (background) {
 				return {
-					content: [{ type: "text", text: `Started ${name} (id ${run.id}, ${definition.name}, ${model})${noticeIn(run, ctx.cwd)} in the background. Its result arrives as a message when it finishes; do not poll. Steer it with SendMessage({ to: "${name}" }).` }],
+					content: [{ type: "text", text: `Started ${name} (id ${run.id}, ${definition.source === "inline" ? "" : `${definition.name}, `}${model})${noticeIn(run, ctx.cwd)} in the background. Its result arrives as a message when it finishes; do not poll. Steer it with SendMessage({ to: "${name}" }).` }],
 					details: detailsOf(run),
 					structuredContent: structured(run),
 				};
@@ -320,10 +349,17 @@ export function registerTools(pi: ExtensionAPI, host: ToolHost): void {
 		},
 	};
 
-	// outputSchema, structuredContent and renderShell are newer than the
-	// oldest Pi this package typechecks against; hosts without them ignore them.
+	// exposure, outputSchema and structuredContent are newer than the oldest Pi
+	// this package typechecks against; hosts without them ignore them.
 	type AnyTool = Parameters<ExtensionAPI["registerTool"]>[0];
-	pi.registerTool(agentTool as unknown as AnyTool);
-	pi.registerTool(sendMessageTool as unknown as AnyTool);
-	pi.registerTool(taskStopTool as unknown as AnyTool);
+	for (const tool of [agentTool, sendMessageTool, taskStopTool]) pi.registerTool({ ...tool, exposure } as unknown as AnyTool);
+	if (exposure === "codemode") {
+		// A registration as a direct tool earlier in this process left them declared.
+		try {
+			const active = pi.getActiveTools();
+			if (active.some((name) => TOOL_NAMES.includes(name))) pi.setActiveTools(active.filter((name) => !TOOL_NAMES.includes(name)));
+		} catch {
+			// Not available while extensions load.
+		}
+	}
 }

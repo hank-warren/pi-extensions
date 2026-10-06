@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { parsePercent } from "./agents.js";
 
 /**
  * Tools a child never gets, whatever its definition says: interactive tools
@@ -25,15 +26,15 @@ export interface AgentsConfig {
 	/** Children running at once; further spawns queue. */
 	maxConcurrent: number;
 	/**
-	 * Context-token budget for every child that does not set its own. Unset by
-	 * default: budgets are opt-in, per agent file or here.
+	 * Compact every child that does not set its own at this percentage of its
+	 * model's context window. Unset by default: agents get their full window.
 	 */
-	contextBudget?: number;
+	autocompact?: number;
 	/** Default turn budget per prompt. */
 	maxTurns: number;
 	/** Keep a finished child's process this long so follow-ups skip the cold start. */
 	idleTtlSeconds: number;
-	/** Where `worktree` requests create worktrees. Default: a `worktrees/` directory beside the repository. */
+	/** Where worktrees go, for `worktree` requests and for agents that make their own. Default: a `worktrees/` directory beside the repository. */
 	worktreeDir?: string;
 	/** Tools removed from every child, in addition to a definition's `disallowedTools`. */
 	excludeTools: string[];
@@ -84,10 +85,11 @@ export function loadConfig(path = configPath()): { config: AgentsConfig; error?:
 	}
 	const input = parsed as Record<string, unknown>;
 	const extraExcludes = stringList(input.excludeTools) ?? [];
+	const retired = input.contextBudget !== undefined ? `${path}: contextBudget is no longer supported and was ignored; use autocompact (a percentage of the context window)` : undefined;
 	return {
 		config: {
 			maxConcurrent: positiveInt(input.maxConcurrent) ?? DEFAULT_CONFIG.maxConcurrent,
-			contextBudget: positiveInt(input.contextBudget),
+			autocompact: parsePercent(input.autocompact),
 			maxTurns: positiveInt(input.maxTurns) ?? DEFAULT_CONFIG.maxTurns,
 			idleTtlSeconds: typeof input.idleTtlSeconds === "number" && input.idleTtlSeconds >= 0
 				? input.idleTtlSeconds
@@ -98,5 +100,6 @@ export function loadConfig(path = configPath()): { config: AgentsConfig; error?:
 			excludeTools: [...new Set([...DEFAULT_EXCLUDED_TOOLS, ...extraExcludes])],
 			piCommand: stringList(input.piCommand)?.length ? stringList(input.piCommand) : undefined,
 		},
+		...(retired ? { error: retired } : {}),
 	};
 }

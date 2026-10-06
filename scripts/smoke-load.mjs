@@ -124,11 +124,11 @@ const EXPECTED_SURFACES = {
 		commands: ["rename"],
 		handlers: ["agent_settled", "session_info_changed", "session_shutdown", "session_start"],
 	},
-	// Parent mode only: a child (PI_AGENTS_CHILD=1) registers its budget hooks instead.
+	// Parent mode only: a child (PI_AGENTS_CHILD=1) registers its budget, autocompact and instruction hooks instead.
 	"./packages/pi-agents/index.ts": {
 		tools: ["Agent", "SendMessage", "TaskStop"],
 		commands: ["agents"],
-		handlers: ["session_shutdown", "session_start"],
+		handlers: ["before_agent_start", "session_shutdown", "session_start"],
 	},
 };
 

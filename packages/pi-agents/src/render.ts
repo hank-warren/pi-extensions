@@ -17,7 +17,8 @@ export interface AgentDetails {
 	/** Latest tool calls in Pi notation, oldest first. */
 	toolLog: ToolCallSummary[];
 	contextTokens: number;
-	contextBudget?: number;
+	/** Compacts at this percentage of the context window. */
+	autocompact?: number;
 	contextWindow?: number;
 	outputTokens: number;
 	cost: number;
@@ -41,7 +42,7 @@ export function detailsOf(run: AgentRun, background = run.spec.background): Agen
 		toolUses: run.toolUses,
 		toolLog: [...run.toolLog],
 		contextTokens: run.contextTokens,
-		contextBudget: run.spec.contextBudget,
+		autocompact: run.spec.autocompact,
 		contextWindow: run.spec.contextWindow,
 		outputTokens: run.outputTokens,
 		cost: run.cost,
@@ -93,19 +94,24 @@ export function shortModel(model: string): string {
 	return slash >= 0 ? model.slice(slash + 1) : model;
 }
 
-/**
- * `78k/150k budget` when the agent has a context budget, else `78k/272k` against
- * the model's window, else just `78k`.
- */
-export function contextLabel(used: number, budget: number | undefined, window: number | undefined): string {
-	if (budget) return `${formatTokens(used)}/${formatTokens(budget)} budget`;
-	if (window) return `${formatTokens(used)}/${formatTokens(window)}`;
-	return formatTokens(used);
+/** Where the context compacts: the autocompact share of the window, else the window. */
+export function contextLimit(window: number | undefined, autocompact: number | undefined): number | undefined {
+	return window && autocompact ? Math.floor((window * autocompact) / 100) : window;
 }
 
-/** Share of the effective limit (budget, else window) in use, or undefined when neither is known. */
-export function contextShare(used: number, budget: number | undefined, window: number | undefined): number | undefined {
-	const limit = budget ?? window;
+/**
+ * `78k/100k autocompact` when the agent compacts early, else `78k/272k`
+ * against the model's window, else just `78k`.
+ */
+export function contextLabel(used: number, window: number | undefined, autocompact?: number): string {
+	const limit = contextLimit(window, autocompact);
+	if (!limit) return formatTokens(used);
+	return `${formatTokens(used)}/${formatTokens(limit)}${limit !== window ? " autocompact" : ""}`;
+}
+
+/** Share of the context limit in use, or undefined when the window is unknown. */
+export function contextShare(used: number, window: number | undefined, autocompact?: number): number | undefined {
+	const limit = contextLimit(window, autocompact);
 	return limit ? used / limit : undefined;
 }
 
@@ -155,11 +161,12 @@ export function collapsibleText(text: string, options: { expanded: boolean; maxL
 	return container;
 }
 
-/** `agent scout map payment flow`, in the shape of Pi's own `grep /x/ in src`. */
-export function renderAgentCall(args: { subagent_type?: string; description?: string; name?: string }, theme: Theme): Text {
+/** `agent reviewer review auth changes · claude-opus-5-5`, in the shape of Pi's own `grep /x/ in src`. */
+export function renderAgentCall(args: { agent?: string; description?: string; model?: string }, theme: Theme): Text {
 	let text = theme.fg("toolTitle", theme.bold("agent"));
-	if (args.subagent_type) text += ` ${theme.fg("accent", args.subagent_type)}`;
+	if (args.agent) text += ` ${theme.fg("accent", args.agent)}`;
 	if (args.description) text += ` ${theme.fg("toolOutput", oneLine(args.description, 100))}`;
+	if (args.model) text += theme.fg("muted", ` · ${shortModel(args.model)}`);
 	return new Text(text, 0, 0);
 }
 
@@ -185,7 +192,7 @@ export function renderAgentResult(details: AgentDetails | undefined, fallback: s
 		if (earlier > 0) lines.push(`${theme.fg("muted", `... (${earlier} earlier tool call${earlier === 1 ? "" : "s"}, `)}${expandHint(theme)}${theme.fg("muted", ")")}`);
 		for (const call of shown) lines.push(styleToolCall(call, theme));
 		if (details.status === "queued") lines.push(theme.fg("muted", "queued"));
-		lines.push("", meta(`${contextLabel(details.contextTokens, details.contextBudget, details.contextWindow)} · ${formatDuration(details.durationMs)}`));
+		lines.push("", meta(`${contextLabel(details.contextTokens, details.contextWindow, details.autocompact)} · ${formatDuration(details.durationMs)}`));
 		container.addChild(new Text(lines.join("\n"), 0, 0));
 		return container;
 	}
@@ -209,7 +216,7 @@ export function renderAgentResult(details: AgentDetails | undefined, fallback: s
 export function renderAgentMessage(details: AgentDetails, expanded: boolean, theme: Theme): Box {
 	const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
 	const label = theme.fg("customMessageLabel", theme.bold("[agent]"));
-	const type = details.name === details.type || details.name.startsWith(`${details.type}-`) ? "" : `${details.type} `;
+	const type = !details.type || details.name === details.type || details.name.startsWith(`${details.type}-`) ? "" : `${details.type} `;
 	const head = `${label} ${theme.fg("customMessageText", details.name)} ${theme.fg("muted", `${type}· ${details.status} · ${statsLine(details)}`)}`;
 	box.addChild(new Text(head, 0, 0));
 	if (details.error) box.addChild(new Text(theme.fg("error", details.error), 0, 0));

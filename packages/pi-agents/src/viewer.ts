@@ -373,11 +373,11 @@ export class AgentViewer implements Component, Focusable {
 		const now = Date.now();
 		const rule = th.fg("border", "─".repeat(Math.max(1, width)));
 
-		const type = run.name === run.type || run.name.startsWith(`${run.type}-`) ? "" : ` ${th.fg("muted", run.type)}`;
+		const type = !run.type || run.name === run.type || run.name.startsWith(`${run.type}-`) ? "" : ` ${th.fg("muted", run.type)}`;
 		const name = `${statusGlyph(run.status, th, { now, approval: Boolean(run.approval) })} ${th.fg("accent", th.bold(run.name))}${type} ${th.fg("text", oneLine(run.description, 100))}`;
 		const meta = th.fg("muted", [
 			`${shortModel(run.spec.model)}${run.spec.thinking ? `:${run.spec.thinking}` : ""}`,
-			contextLabel(run.contextTokens, run.spec.contextBudget, run.spec.contextWindow),
+			contextLabel(run.contextTokens, run.spec.contextWindow, run.spec.autocompact),
 			`${run.toolUses} tool call${run.toolUses === 1 ? "" : "s"}`,
 			formatDuration((run.endedAt ?? now) - run.runStartedAt),
 		].join(" · "));

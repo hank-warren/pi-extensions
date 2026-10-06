@@ -3,8 +3,8 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { BUILTIN_AGENTS, discoverAgents, parseAgentFile, projectAgentDirs } from "../src/agents.js";
-import { budgetAfterTurn, budgetAtPromptStart, type BudgetState } from "../src/child.js";
+import { composeAgent, discoverAgents, parseAgentFile } from "../src/agents.js";
+import { autocompactDue, type AutocompactState, budgetAfterTurn, budgetAtPromptStart, type BudgetState, workedPaths } from "../src/child.js";
 import { DEFAULT_EXCLUDED_TOOLS, loadConfig } from "../src/config.js";
 import { formatDuration, formatTokens, summarizeToolCall, summaryText } from "../src/format.js";
 import { contextLabel } from "../src/render.js";
@@ -20,9 +20,9 @@ test("formatters match the panel's compact style", () => {
 	assert.equal(formatTokens(1500), "1.5k");
 	assert.equal(formatTokens(41_234), "41k");
 	assert.equal(formatTokens(1_200_000), "1.2M");
-	assert.equal(contextLabel(78_000, 150_000, 272_000), "78k/150k budget");
-	assert.equal(contextLabel(78_000, undefined, 272_000), "78k/272k");
-	assert.equal(contextLabel(78_000, undefined, undefined), "78k");
+	assert.equal(contextLabel(78_000, 1_000_000, 10), "78k/100k autocompact");
+	assert.equal(contextLabel(78_000, 272_000), "78k/272k");
+	assert.equal(contextLabel(78_000, undefined, 10), "78k");
 	assert.equal(formatDuration(42_000), "42s");
 	assert.equal(formatDuration(125_000), "2m05s");
 	assert.equal(formatDuration(3_780_000), "1h03m");
@@ -36,9 +36,8 @@ test("formatters match the panel's compact style", () => {
 
 test("an agent file parses Claude Code-style frontmatter and keeps the body as the prompt", () => {
 	const { agent, error } = parseAgentFile(
-		"---\nname: reviewer\ndescription: >\n  Reviews a diff\n  with fresh context.\ntools: read, bash\ndisallowedTools: [edit]\nmodel: cpa/claude-opus-5\neffort: high\nmaxTurns: 40\ncontextBudget: 150000\nbackground: false\ncontextFiles: false\n---\nYou review diffs.\n",
+		"---\nname: reviewer\ndescription: >\n  Reviews a diff\n  with fresh context.\ntools: read, bash\ndisallowedTools: [edit]\nmodel: cpa/claude-opus-5\neffort: high\nmaxTurns: 40\nautocompact: 10%\nbackground: false\ncontextFiles: false\n---\nYou review diffs.\n",
 		"/x/reviewer.md",
-		"user",
 	);
 	assert.equal(error, undefined);
 	assert.deepEqual(
@@ -52,7 +51,7 @@ test("an agent file parses Claude Code-style frontmatter and keeps the body as t
 			model: "cpa/claude-opus-5",
 			thinking: "high",
 			maxTurns: 40,
-			contextBudget: 150000,
+			autocompact: 10,
 			background: false,
 			contextFiles: false,
 			source: "user",
@@ -61,89 +60,94 @@ test("an agent file parses Claude Code-style frontmatter and keeps the body as t
 	);
 });
 
-test("agent files fail loudly on bad fields and skip name-less markdown", () => {
-	assert.deepEqual(parseAgentFile("# notes\n", "/x/README.md", "user"), {});
-	assert.match(parseAgentFile("---\nname: a\n---\n", "/x/a.md", "user").error!, /missing description/);
-	assert.match(parseAgentFile("---\nname: a:b\ndescription: d\n---\n", "/x/a.md", "user").error!, /name must be/);
-	assert.match(parseAgentFile("---\nname: a\ndescription: d\nthinking: huge\n---\n", "/x/a.md", "user").error!, /thinking must be/);
-	assert.match(parseAgentFile("---\nname: [\n---\n", "/x/a.md", "user").error!, /invalid frontmatter/);
-	assert.equal(parseAgentFile("---\nname: a\ndescription: d\nmodel: inherit\n---\n", "/x/a.md", "user").agent?.model, undefined);
+test("agent files fail loudly on bad fields, skip name-less markdown, and name what replaced a retired field", () => {
+	assert.deepEqual(parseAgentFile("# notes\n", "/x/README.md"), {});
+	assert.match(parseAgentFile("---\nname: a\n---\n", "/x/a.md").error!, /missing description/);
+	assert.match(parseAgentFile("---\nname: a:b\ndescription: d\n---\n", "/x/a.md").error!, /name must be/);
+	assert.match(parseAgentFile("---\nname: a\ndescription: d\nthinking: huge\n---\n", "/x/a.md").error!, /thinking must be/);
+	assert.match(parseAgentFile("---\nname: a\ndescription: d\nautocompact: 120\n---\n", "/x/a.md").error!, /autocompact must be a percentage/);
+	assert.match(parseAgentFile("---\nname: [\n---\n", "/x/a.md").error!, /invalid frontmatter/);
+	assert.equal(parseAgentFile("---\nname: a\ndescription: d\nmodel: inherit\n---\n", "/x/a.md").agent?.model, undefined);
+	const retired = parseAgentFile("---\nname: a\ndescription: d\ncontextBudget: 120000\n---\n", "/x/a.md");
+	assert.equal(retired.agent?.name, "a", "the agent still loads");
+	assert.match(retired.error!, /contextBudget is no longer supported and was ignored; use autocompact/);
 });
 
-test("discovery layers built-ins, user agents, then project agents closest last", () => {
+test("saved agents come only from the config dir; there are no built-ins", () => {
 	const root = mkdtempSync(join(tmpdir(), "pi-agents-discovery-"));
 	const userDir = join(root, "agent", "agents");
 	mkdirSync(join(userDir, "review"), { recursive: true });
 	writeFileSync(join(userDir, "review", "reviewer.md"), "---\nname: reviewer\ndescription: user reviewer\n---\nuser");
-	writeFileSync(join(userDir, "scout.md"), "---\nname: scout\ndescription: my scout\nmodel: cpa/claude-sonnet-5\n---\n");
 	writeFileSync(join(userDir, "broken.md"), "---\nname: broken\n---\n");
-	const repo = join(root, "work", "repo");
-	mkdirSync(join(root, "work", ".pi", "agents"), { recursive: true });
-	mkdirSync(join(repo, ".pi", "agents"), { recursive: true });
-	writeFileSync(join(root, "work", ".pi", "agents", "reviewer.md"), "---\nname: reviewer\ndescription: outer\n---\n");
-	writeFileSync(join(repo, ".pi", "agents", "reviewer.md"), "---\nname: reviewer\ndescription: inner\n---\n");
-
-	assert.deepEqual(projectAgentDirs(repo).slice(-2), [join(root, "work", ".pi", "agents"), join(repo, ".pi", "agents")]);
-	const trusted = discoverAgents({ userDir, cwd: repo, includeProject: true });
-	assert.equal(trusted.agents.get("reviewer")?.description, "inner");
-	assert.equal(trusted.agents.get("scout")?.model, "cpa/claude-sonnet-5");
-	assert.equal(trusted.agents.get("general-purpose")?.source, "builtin");
-	assert.equal(trusted.errors.length, 1);
-	assert.match(trusted.errors[0]!, /broken\.md: missing description/);
-
-	const untrusted = discoverAgents({ userDir, cwd: repo, includeProject: false });
-	assert.equal(untrusted.agents.get("reviewer")?.description, "user reviewer");
+	const found = discoverAgents(userDir);
+	assert.deepEqual([...found.agents.keys()], ["reviewer"]);
+	assert.equal(found.errors.length, 1);
+	assert.match(found.errors[0]!, /broken\.md: missing description/);
+	assert.equal(discoverAgents(join(root, "missing")).agents.size, 0);
 });
 
-test("config falls back to defaults, merges excludes, and reports a broken file", () => {
+test("an inline agent is composed from the call, on top of a saved one when named", () => {
+	const inline = composeAgent(undefined, { instructions: "Review diffs.", tools: ["read"], autocompact: 10 });
+	assert.deepEqual(inline, { name: "agent", description: "", prompt: "Review diffs.", tools: ["read"], disallowedTools: undefined, model: undefined, thinking: undefined, maxTurns: undefined, autocompact: 10, background: undefined, contextFiles: true, source: "inline" });
+	const saved = parseAgentFile("---\nname: reviewer\ndescription: d\nmodel: m/x\nautocompact: 20\ntools: read, bash\n---\nBase role.", "/x/r.md").agent!;
+	const built = composeAgent(saved, { instructions: "Also check tests.", autocompact: 5 });
+	assert.equal(built.prompt, "Base role.\n\nAlso check tests.");
+	assert.equal(built.autocompact, 5, "the call wins");
+	assert.deepEqual(built.tools, ["read", "bash"]);
+	assert.equal(built.source, "user");
+});
+
+test("config falls back to defaults, merges excludes, and reports a broken or retired setting", () => {
 	const dir = mkdtempSync(join(tmpdir(), "pi-agents-config-"));
 	assert.deepEqual(loadConfig(join(dir, "missing.json")).config.excludeTools, DEFAULT_EXCLUDED_TOOLS);
-	writeFileSync(join(dir, "c.json"), JSON.stringify({ maxConcurrent: 2, contextBudget: 0, excludeTools: ["web_search"], worktreeDir: "~/wt" }));
+	assert.equal(loadConfig(join(dir, "missing.json")).config.autocompact, undefined, "agents get their full window by default");
+	writeFileSync(join(dir, "c.json"), JSON.stringify({ maxConcurrent: 2, autocompact: "15%", excludeTools: ["web_search"], worktreeDir: "~/wt" }));
 	const { config } = loadConfig(join(dir, "c.json"));
 	assert.equal(config.maxConcurrent, 2);
-	assert.equal(config.contextBudget, undefined, "an invalid value leaves the budget unset");
-	assert.equal(loadConfig(join(dir, "missing.json")).config.contextBudget, undefined, "there is no global context budget by default");
+	assert.equal(config.autocompact, 15);
 	assert.ok(config.excludeTools.includes("web_search") && config.excludeTools.includes("Agent"));
 	assert.ok(config.worktreeDir?.endsWith("/wt") && !config.worktreeDir.startsWith("~"));
+	writeFileSync(join(dir, "old.json"), JSON.stringify({ contextBudget: 100000 }));
+	assert.match(loadConfig(join(dir, "old.json")).error!, /contextBudget is no longer supported/);
 	writeFileSync(join(dir, "bad.json"), "{");
 	assert.match(loadConfig(join(dir, "bad.json")).error!, /bad\.json/);
 });
 
-test("the budget warns once near the limit and cuts tools at it, steering only continuing turns", () => {
-	const state: BudgetState = { turns: 0, warned: false, exhausted: false, blockedCalls: 0 };
-	const limits = { contextBudget: 100_000, maxTurns: 10 };
-	assert.equal(budgetAfterTurn(state, { tokens: 50_000, continuing: true, ...limits }).kind, "none");
-	const warn = budgetAfterTurn(state, { tokens: 76_000, continuing: true, ...limits });
-	assert.equal(warn.kind, "warn");
-	assert.match((warn as { message: string }).message, /76k\/100k tokens, 2\/10 turns/);
-	assert.equal(budgetAfterTurn(state, { tokens: 80_000, continuing: true, ...limits }).kind, "none", "warns once");
-	assert.equal(budgetAfterTurn(state, { tokens: 120_000, continuing: false, ...limits }).kind, "none", "a final answer is left alone");
-	assert.equal(budgetAfterTurn(state, { tokens: 101_000, continuing: true, ...limits }).kind, "exhaust");
-	assert.equal(state.exhausted, true);
-	assert.equal(budgetAfterTurn(state, { tokens: 130_000, continuing: true, ...limits }).kind, "none");
-
-	const unbudgeted: BudgetState = { turns: 0, warned: false, exhausted: false, blockedCalls: 0 };
-	assert.equal(budgetAfterTurn(unbudgeted, { tokens: 900_000, continuing: true, maxTurns: 10 }).kind, "none", "no context budget: context never triggers");
-
+test("the turn budget warns once near the limit and cuts tools at it, steering only continuing turns", () => {
 	const turns: BudgetState = { turns: 0, warned: false, exhausted: false, blockedCalls: 0 };
-	const kinds = Array.from({ length: 10 }, () => budgetAfterTurn(turns, { tokens: 1, continuing: true, maxTurns: 10 }).kind);
+	const kinds = Array.from({ length: 10 }, () => budgetAfterTurn(turns, { continuing: true, maxTurns: 10 }).kind);
 	assert.deepEqual(kinds.slice(6), ["none", "warn", "none", "exhaust"]);
+	assert.equal(turns.exhausted, true);
+	const final: BudgetState = { turns: 9, warned: true, exhausted: false, blockedCalls: 0 };
+	assert.equal(budgetAfterTurn(final, { continuing: false, maxTurns: 10 }).kind, "none", "a final answer is left alone");
+	budgetAtPromptStart(turns);
+	assert.deepEqual(turns, { turns: 0, warned: false, exhausted: false, blockedCalls: 0 });
 });
 
-test("a new prompt resets turns but starts exhausted when context is already over budget", () => {
-	const state: BudgetState = { turns: 9, warned: true, exhausted: true, blockedCalls: 4 };
-	assert.equal(budgetAtPromptStart(state, { tokens: 50_000, contextBudget: 100_000 }).kind, "none");
-	assert.deepEqual(state, { turns: 0, warned: false, exhausted: false, blockedCalls: 0 });
+test("autocompact triggers at its share of the window, then not again until the context has grown", () => {
+	const state: AutocompactState = { armed: false, interrupted: false, compacting: false, floorPending: false, disabled: false };
+	assert.equal(autocompactDue(state, { tokens: 90_000, threshold: 100_000 }), false);
+	assert.equal(autocompactDue(state, { tokens: null, threshold: 100_000 }), false, "unknown right after compacting");
+	assert.equal(autocompactDue(state, { tokens: 100_000, threshold: undefined }), false, "no window, no threshold");
+	assert.equal(autocompactDue(state, { tokens: 101_000, threshold: 100_000 }), true);
+	state.floorPending = true;
+	assert.equal(autocompactDue(state, { tokens: 104_000, threshold: 100_000 }), false, "a context that cannot shrink below the threshold does not compact every turn");
+	assert.equal(state.nextAt, 154_000);
+	assert.equal(autocompactDue(state, { tokens: 155_000, threshold: 100_000 }), true);
+	assert.equal(autocompactDue({ ...state, disabled: true }, { tokens: 999_000, threshold: 100_000 }), false, "after a failure Pi's own threshold takes over");
+});
 
-	const over = budgetAtPromptStart(state, { tokens: 120_000, contextBudget: 100_000 });
-	assert.equal(over.kind, "exhaust");
-	assert.match((over as { message: string }).message, /120k\/100k tokens\). Tools are disabled/);
-	assert.equal(state.exhausted, true, "tools are refused from the first call");
-
-	assert.equal(budgetAtPromptStart(state, { tokens: 900_000 }).kind, "none", "no context budget, never exhausted by context");
-	assert.equal(state.exhausted, false);
-	budgetAtPromptStart(state, { tokens: 80_000, contextBudget: 100_000 });
-	assert.equal(state.warned, true, "a prompt starting past 75% is not warned twice");
+test("a child notices the directories it works in, from file tools and from bash", () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-agents-paths-"));
+	const repo = join(root, "repo");
+	mkdirSync(join(repo, "src"), { recursive: true });
+	writeFileSync(join(repo, "src", "a.ts"), "");
+	assert.deepEqual(workedPaths("read", { path: "src/a.ts" }, repo), [join(repo, "src")]);
+	assert.deepEqual(workedPaths("write", { path: join(repo, "new.ts") }, root), [repo], "a file about to be written");
+	assert.deepEqual(workedPaths("bash", { command: `cd ${repo} && git status` }, root), [repo]);
+	assert.deepEqual(workedPaths("bash", { command: `git -C "${repo}" log -1` }, root), [repo]);
+	assert.deepEqual(workedPaths("bash", { command: `rg -n foo ${join(repo, "src", "a.ts")} /nonexistent` }, root), [join(repo, "src")]);
+	assert.deepEqual(workedPaths("bash", { command: "echo hi" }, root), []);
 });
 
 test("child args and env carry the agent's model, prompt, tools and the subagent contract", () => {
@@ -165,34 +169,44 @@ test("child args and env carry the agent's model, prompt, tools and the subagent
 	assert.deepEqual(buildChildArgs({ model: "m/x", appendPrompt: "p", excludeTools: [], contextFiles: true, name: "n", sessionFile: "/f.jsonl" }).slice(0, 4), ["--mode", "rpc", "--session", "/f.jsonl"]);
 	assert.ok(buildChildArgs({ model: "m/x", appendPrompt: "p", excludeTools: [], contextFiles: true, name: "n" }).includes("--no-session"));
 
-	const env = buildChildEnv({ HERDR_PANE_ID: "p1", HERDR_ENV: "1", PATH: "/bin" }, { id: "ab12", name: "rev", type: "reviewer", contextBudget: 5, maxTurns: 6 });
+	const env = buildChildEnv({ HERDR_PANE_ID: "p1", HERDR_ENV: "1", PATH: "/bin" }, { id: "ab12", name: "rev", type: "reviewer", maxTurns: 6, autocompact: 10, contextFiles: ["/w/AGENTS.md"], loadContextFiles: true });
 	assert.equal(env.HERDR_PANE_ID, undefined, "a child never drives the parent's pane");
 	assert.equal(env.PATH, "/bin");
 	assert.equal(env.PI_AGENTS_CHILD, "1");
 	assert.equal(env.PI_SUBAGENT_CHILD, "1");
 	assert.equal(env.PI_SUBAGENT_RUN_ID, "ab12");
-	assert.equal(env.PI_AGENTS_CONTEXT_BUDGET, "5");
 	assert.equal(env.PI_AGENTS_MAX_TURNS, "6");
-	const unbudgeted = buildChildEnv({ PI_AGENTS_CONTEXT_BUDGET: "9" }, { id: "x", name: "n", type: "t", maxTurns: 6 });
-	assert.equal(unbudgeted.PI_AGENTS_CONTEXT_BUDGET, undefined, "no budget, and none inherited from the parent's env");
+	assert.equal(env.PI_AGENTS_AUTOCOMPACT, "10");
+	assert.deepEqual(JSON.parse(env.PI_AGENTS_CONTEXT_FILES!), ["/w/AGENTS.md"]);
+	assert.equal(env.PI_AGENTS_NO_CONTEXT_FILES, undefined);
+	const plain = buildChildEnv({ PI_AGENTS_AUTOCOMPACT: "9", PI_AGENTS_CONTEXT_FILES: "[\"/x\"]" }, { id: "x", name: "n", type: "t", maxTurns: 6, loadContextFiles: false });
+	assert.equal(plain.PI_AGENTS_AUTOCOMPACT, undefined, "nothing inherited from the parent's own env");
+	assert.equal(plain.PI_AGENTS_CONTEXT_FILES, undefined);
+	assert.equal(plain.PI_AGENTS_NO_CONTEXT_FILES, "1");
 });
 
-test("the child prompt states the subagent contract, budget and worktree", () => {
-	const scout = BUILTIN_AGENTS.find((agent) => agent.name === "scout")!;
+test("the child prompt states the subagent contract, where it works, and how it compacts", () => {
+	const saved = parseAgentFile("---\nname: scout\ndescription: d\n---\nYou scout.", "/x/s.md").agent!;
 	const prompt = buildChildPrompt({
 		name: "scout-2",
-		definition: scout,
-		contextBudget: 120_000,
+		definition: saved,
+		cwd: "/w/feat-x",
 		maxTurns: 40,
+		autocompact: 10,
+		contextWindow: 1_000_000,
 		worktree: { path: "/w/feat-x", branch: "feat/x", base: "main", repoRoot: "/r", created: true },
 	});
 	assert.match(prompt, /You are "scout-2", a scout subagent/);
 	assert.match(prompt, /You cannot start other subagents/);
-	assert.match(prompt, /about 120k tokens of context and 40 turns/);
+	assert.match(prompt, /- Budget: 40 turns\. Your context is compacted at 10% of 1M \(100k\)/);
+	assert.match(prompt, /You start in \/w\/feat-x, and every bash call starts there/);
+	assert.match(prompt, /its AGENTS\.md instructions are added to that tool result/);
 	assert.match(prompt, /git worktree \/w\/feat-x on branch feat\/x, created from origin\/main/);
-	assert.ok(prompt.endsWith(scout.prompt));
-	const unbudgeted = buildChildPrompt({ name: "s", definition: scout, maxTurns: 40 });
-	assert.match(unbudgeted, /- Budget: 40 turns\./);
+	assert.ok(prompt.endsWith("You scout."));
+	const inline = buildChildPrompt({ name: "s", definition: composeAgent(undefined, {}), cwd: "/repos/workbench", maxTurns: 40, worktreeDir: "/home/h/repos/worktrees" });
+	assert.match(inline, /You are "s", a subagent working/);
+	assert.match(inline, /- Budget: 40 turns\. Keep context lean/);
+	assert.match(inline, /worktree add \/home\/h\/repos\/worktrees\/<branch-with-dashes> -b <branch> origin\/<default branch>/);
 });
 
 test("the line splitter breaks on LF only, so U+2028 inside JSON survives", () => {

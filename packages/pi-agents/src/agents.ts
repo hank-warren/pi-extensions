@@ -1,14 +1,18 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join, relative } from "node:path";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 
+/**
+ * How an agent is set up. A saved one comes from a markdown file in the
+ * config dir; an inline one is composed by the parent for a single task.
+ */
 export interface AgentDefinition {
 	name: string;
 	description: string;
-	/** Markdown body, appended to the child's system prompt. */
+	/** Role instructions, appended to the child's system prompt. */
 	prompt: string;
 	/** Allowlist of tool names. Omitted: every tool the child loads, minus exclusions. */
 	tools?: string[];
@@ -17,40 +21,18 @@ export interface AgentDefinition {
 	model?: string;
 	thinking?: ThinkingLevel;
 	maxTurns?: number;
-	contextBudget?: number;
+	/** Compact at this percentage of the model's context window. Omitted: Pi's own threshold, near the full window. */
+	autocompact?: number;
 	/** Run in the background unless the caller asks otherwise. */
 	background?: boolean;
 	/** Load AGENTS.md/CLAUDE.md context files (default true). */
 	contextFiles: boolean;
-	source: "builtin" | "user" | "project";
+	source: "user" | "inline";
 	path?: string;
 }
 
-const SCOUT_PROMPT = `You are a scout: fast, read-only reconnaissance of a codebase or system.
-
-- Never modify anything: no edits, no writes, no state-changing commands, no temporary files.
-- Prefer targeted searches (rg, find, git log/grep) and partial reads over reading whole files. Batch independent lookups in one codemode script and filter the output there.
-- Match effort to the thoroughness the task asks for; stop as soon as the question is answered.
-- Report locations as absolute paths with line numbers, and say what each location does in one line.`;
-
-export const BUILTIN_AGENTS: readonly AgentDefinition[] = [
-	{
-		name: "general-purpose",
-		description: "Capable agent for multi-step tasks that need investigation and changes together. Use when no specialized agent fits.",
-		prompt: "",
-		contextFiles: true,
-		source: "builtin",
-	},
-	{
-		name: "scout",
-		description: "Fast read-only reconnaissance: find files, symbols, call sites and config, and report where things are with file:line references. Say how thorough to be (quick, medium, very thorough).",
-		prompt: SCOUT_PROMPT,
-		tools: ["read", "bash", "grep", "find", "ls", "codemode"],
-		thinking: "low",
-		contextFiles: true,
-		source: "builtin",
-	},
-];
+/** The type name an inline agent reports; the UI omits it. */
+export const INLINE_TYPE = "agent";
 
 function toList(value: unknown): string[] | undefined {
 	if (typeof value === "string") {
@@ -68,15 +50,18 @@ function positiveInt(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
+/** `10`, `10%` or `"10"` as a percentage in (0, 100), else undefined. */
+export function parsePercent(value: unknown): number | undefined {
+	const number = typeof value === "number" ? value : typeof value === "string" ? Number(value.trim().replace(/%$/, "")) : Number.NaN;
+	return Number.isFinite(number) && number > 0 && number < 100 ? number : undefined;
+}
+
 /**
- * Parse one agent file. Returns undefined (no error) for markdown without a
+ * Parse one agent file. Returns no agent and no error for markdown without a
  * `name`, which is documentation kept beside the agents, as in Claude Code.
+ * A retired field still loads the agent, with an error saying what replaced it.
  */
-export function parseAgentFile(
-	content: string,
-	path: string,
-	source: "user" | "project",
-): { agent?: AgentDefinition; error?: string } {
+export function parseAgentFile(content: string, path: string): { agent?: AgentDefinition; error?: string } {
 	let parsed: { frontmatter: Record<string, unknown>; body: string };
 	try {
 		parsed = parseFrontmatter<Record<string, unknown>>(content);
@@ -99,24 +84,30 @@ export function parseAgentFile(
 		}
 		thinking = thinkingRaw as ThinkingLevel;
 	}
+	const autocompact = parsePercent(fm.autocompact);
+	if (fm.autocompact !== undefined && autocompact === undefined) {
+		return { error: `${path}: autocompact must be a percentage of the context window between 0 and 100, e.g. 10` };
+	}
 	const model = typeof fm.model === "string" && fm.model.trim() && fm.model.trim() !== "inherit" ? fm.model.trim() : undefined;
-	return {
-		agent: {
-			name: fm.name,
-			description: fm.description.trim().replace(/\s+/g, " "),
-			prompt: parsed.body.trim(),
-			tools: toList(fm.tools),
-			disallowedTools: toList(fm.disallowedTools),
-			model,
-			thinking,
-			maxTurns: positiveInt(fm.maxTurns),
-			contextBudget: positiveInt(fm.contextBudget),
-			background: typeof fm.background === "boolean" ? fm.background : undefined,
-			contextFiles: fm.contextFiles !== false,
-			source,
-			path,
-		},
+	const agent: AgentDefinition = {
+		name: fm.name,
+		description: fm.description.trim().replace(/\s+/g, " "),
+		prompt: parsed.body.trim(),
+		tools: toList(fm.tools),
+		disallowedTools: toList(fm.disallowedTools),
+		model,
+		thinking,
+		maxTurns: positiveInt(fm.maxTurns),
+		...(autocompact !== undefined ? { autocompact } : {}),
+		background: typeof fm.background === "boolean" ? fm.background : undefined,
+		contextFiles: fm.contextFiles !== false,
+		source: "user",
+		path,
 	};
+	if (fm.contextBudget !== undefined) {
+		return { agent, error: `${path}: contextBudget is no longer supported and was ignored; use autocompact (a percentage of the context window)` };
+	}
+	return { agent };
 }
 
 function markdownFiles(dir: string): string[] {
@@ -141,55 +132,61 @@ function markdownFiles(dir: string): string[] {
 	return out;
 }
 
-/** `.pi/agents` directories from the filesystem root down to `cwd`, so closer ones are applied last and win. */
-export function projectAgentDirs(cwd: string): string[] {
-	const dirs: string[] = [];
-	let current = resolve(cwd);
-	for (;;) {
-		const candidate = join(current, ".pi", "agents");
-		if (existsSync(candidate)) dirs.unshift(candidate);
-		const parent = dirname(current);
-		if (parent === current) break;
-		current = parent;
-	}
-	return dirs;
-}
-
 export interface DiscoveryResult {
 	agents: Map<string, AgentDefinition>;
 	errors: string[];
 }
 
-/** Built-ins, then `<agentDir>/agents`, then project `.pi/agents` (when trusted). Later definitions replace earlier ones by name. */
-export function discoverAgents(options: { userDir: string; cwd: string; includeProject: boolean }): DiscoveryResult {
+/** Saved agents: every `*.md` with a `name` under `<agentDir>/agents`. There are no built-ins. */
+export function discoverAgents(userDir: string): DiscoveryResult {
 	const agents = new Map<string, AgentDefinition>();
 	const errors: string[] = [];
-	for (const agent of BUILTIN_AGENTS) agents.set(agent.name, agent);
-	const load = (dir: string, source: "user" | "project") => {
-		const seen = new Map<string, string>();
-		for (const file of markdownFiles(dir)) {
-			let content: string;
-			try {
-				content = readFileSync(file, "utf8");
-			} catch (error) {
-				errors.push(`${file}: ${error instanceof Error ? error.message : String(error)}`);
-				continue;
-			}
-			const { agent, error } = parseAgentFile(content, file, source);
-			if (error) errors.push(error);
-			if (!agent) continue;
-			const duplicate = seen.get(agent.name);
-			if (duplicate) {
-				errors.push(`${file}: duplicate agent name "${agent.name}" (also ${relative(dir, duplicate)}); keeping the first`);
-				continue;
-			}
-			seen.set(agent.name, file);
-			agents.set(agent.name, agent);
+	const seen = new Map<string, string>();
+	for (const file of markdownFiles(userDir)) {
+		let content: string;
+		try {
+			content = readFileSync(file, "utf8");
+		} catch (error) {
+			errors.push(`${file}: ${error instanceof Error ? error.message : String(error)}`);
+			continue;
 		}
-	};
-	load(options.userDir, "user");
-	if (options.includeProject) for (const dir of projectAgentDirs(options.cwd)) {
-		if (resolve(dir) !== resolve(options.userDir)) load(dir, "project");
+		const { agent, error } = parseAgentFile(content, file);
+		if (error) errors.push(error);
+		if (!agent) continue;
+		const duplicate = seen.get(agent.name);
+		if (duplicate) {
+			errors.push(`${file}: duplicate agent name "${agent.name}" (also ${relative(userDir, duplicate)}); keeping the first`);
+			continue;
+		}
+		seen.set(agent.name, file);
+		agents.set(agent.name, agent);
 	}
 	return { agents, errors };
+}
+
+/**
+ * An agent composed for one task. Fields the parent did not pass come from
+ * the saved agent it builds on, if any.
+ */
+export function composeAgent(
+	base: AgentDefinition | undefined,
+	inline: { instructions?: string; tools?: string[]; autocompact?: number; maxTurns?: number },
+): AgentDefinition {
+	const prompt = [base?.prompt, inline.instructions?.trim()].filter(Boolean).join("\n\n");
+	const autocompact = inline.autocompact ?? base?.autocompact;
+	return {
+		name: base?.name ?? INLINE_TYPE,
+		description: base?.description ?? "",
+		prompt,
+		tools: inline.tools?.length ? inline.tools : base?.tools,
+		disallowedTools: base?.disallowedTools,
+		model: base?.model,
+		thinking: base?.thinking,
+		maxTurns: inline.maxTurns ?? base?.maxTurns,
+		...(autocompact !== undefined ? { autocompact } : {}),
+		background: base?.background,
+		contextFiles: base?.contextFiles ?? true,
+		source: base ? base.source : "inline",
+		...(base?.path ? { path: base.path } : {}),
+	};
 }

@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentDefinition } from "./agents.js";
-import { BUDGET_STATUS_KEY } from "./child.js";
+import { BUDGET_STATUS_KEY, COMPACT_STATUS_KEY } from "./child.js";
 import type { AgentsConfig } from "./config.js";
 import { contentText, summarizeToolCall, type ToolCallSummary } from "./format.js";
 import { RpcProcess, type UiRequest } from "./rpc.js";
@@ -42,6 +42,12 @@ export interface RunSnapshot {
 	contextWindow?: number;
 	/** The child's system-prompt addition; a resumed child is started with it again. */
 	appendPrompt?: string;
+	autocompact?: number;
+	maxTurns?: number;
+	/** The parent's instruction files the child also follows. */
+	contextFiles?: string[];
+	/** An inline agent's setup, which no saved file can restore. */
+	definition?: AgentDefinition;
 	status: RunStatus;
 	startedAt: number;
 	endedAt?: number;
@@ -59,8 +65,10 @@ export interface RunSpec {
 	thinking?: string;
 	cwd: string;
 	background: boolean;
-	/** Self-imposed context cap; undefined means none. */
-	contextBudget?: number;
+	/** Compact at this percentage of the model's context window; undefined leaves it to Pi. */
+	autocompact?: number;
+	/** The parent's instruction files, added to the child's own. */
+	contextFiles?: string[];
 	/** The model's context window, for display. */
 	contextWindow?: number;
 	maxTurns: number;
@@ -89,6 +97,8 @@ export class AgentRun {
 	result: string | undefined;
 	error: string | undefined;
 	budgetExhausted = false;
+	/** The child is compacting between runs of the same task (autocompact). */
+	compacting = false;
 	sessionFile: string | undefined;
 	log: LogEntry[] = [];
 	/** Partial output of tool calls still running, by call id. */
@@ -118,7 +128,8 @@ export class AgentRun {
 	}
 
 	get name(): string { return this.spec.name; }
-	get type(): string { return this.spec.definition.name; }
+	/** The saved agent it runs as; empty for an agent composed inline. */
+	get type(): string { return this.spec.definition.source === "inline" ? "" : this.spec.definition.name; }
 	get description(): string { return this.spec.description; }
 	get busy(): boolean { return this.status === "queued" || this.status === "running"; }
 	/** A process that can take a prompt: started, not exited, and not being shut down. */
@@ -146,6 +157,10 @@ export class AgentRun {
 			worktree: this.spec.worktree,
 			contextWindow: this.spec.contextWindow,
 			appendPrompt: this.spec.appendPrompt,
+			autocompact: this.spec.autocompact,
+			maxTurns: this.spec.maxTurns,
+			contextFiles: this.spec.contextFiles,
+			...(this.spec.definition.source === "inline" ? { definition: this.spec.definition } : {}),
 			status: this.status,
 			startedAt: this.startedAt,
 			endedAt: this.endedAt,
@@ -184,17 +199,21 @@ export function buildChildArgs(input: {
 }
 
 /** Pure: the child's environment. HERDR_PANE_ID is dropped so a child never drives the parent's pane state. */
-export function buildChildEnv(base: NodeJS.ProcessEnv, run: { id: string; name: string; type: string; contextBudget?: number; maxTurns: number }): NodeJS.ProcessEnv {
+export function buildChildEnv(
+	base: NodeJS.ProcessEnv,
+	run: { id: string; name: string; type: string; maxTurns: number; autocompact?: number; contextFiles?: string[]; loadContextFiles: boolean },
+): NodeJS.ProcessEnv {
 	const env: NodeJS.ProcessEnv = { ...base };
-	delete env.HERDR_PANE_ID;
-	delete env.PI_AGENTS_CONTEXT_BUDGET;
+	for (const key of ["HERDR_PANE_ID", "PI_AGENTS_AUTOCOMPACT", "PI_AGENTS_CONTEXT_FILES", "PI_AGENTS_NO_CONTEXT_FILES"]) delete env[key];
 	return {
 		...env,
 		PI_AGENTS_CHILD: "1",
 		PI_AGENTS_NAME: run.name,
 		PI_AGENTS_TYPE: run.type,
-		...(run.contextBudget ? { PI_AGENTS_CONTEXT_BUDGET: String(run.contextBudget) } : {}),
 		PI_AGENTS_MAX_TURNS: String(run.maxTurns),
+		...(run.autocompact ? { PI_AGENTS_AUTOCOMPACT: String(run.autocompact) } : {}),
+		...(run.contextFiles?.length ? { PI_AGENTS_CONTEXT_FILES: JSON.stringify(run.contextFiles) } : {}),
+		...(run.loadContextFiles ? {} : { PI_AGENTS_NO_CONTEXT_FILES: "1" }),
 		// The env contract pi-auto-permissions already reads for subagent children.
 		PI_SUBAGENT_CHILD: "1",
 		PI_SUBAGENT_RUN_ID: run.id,
@@ -260,9 +279,10 @@ export class AgentManager {
 			thinking: snapshot.thinking,
 			cwd: snapshot.cwd,
 			background: true,
-			contextBudget: definition.contextBudget ?? this.deps.config().contextBudget,
+			autocompact: snapshot.autocompact,
+			contextFiles: snapshot.contextFiles,
 			contextWindow: snapshot.contextWindow,
-			maxTurns: definition.maxTurns ?? this.deps.config().maxTurns,
+			maxTurns: snapshot.maxTurns ?? definition.maxTurns ?? this.deps.config().maxTurns,
 			appendPrompt: snapshot.appendPrompt ?? "",
 			worktree: snapshot.worktree,
 		}, snapshot.id);
@@ -299,6 +319,7 @@ export class AgentManager {
 		run.error = undefined;
 		run.endedAt = undefined;
 		run.budgetExhausted = false;
+		run.compacting = false;
 		if (run.idleTimer) clearTimeout(run.idleTimer);
 		run.idleTimer = undefined;
 		if (this.runningCount() >= this.deps.config().maxConcurrent) {
@@ -340,8 +361,10 @@ export class AgentManager {
 				id: run.id,
 				name: run.name,
 				type: run.type,
-				contextBudget: run.spec.contextBudget,
 				maxTurns: run.spec.maxTurns,
+				autocompact: run.spec.autocompact,
+				contextFiles: run.spec.contextFiles,
+				loadContextFiles: definition.contextFiles,
 			}),
 		});
 		proc.onEvent = (event) => this.handleEvent(run, proc, event);
@@ -455,6 +478,7 @@ export class AgentManager {
 		run.endedAt = Date.now();
 		run.streaming = "";
 		run.approval = undefined;
+		run.compacting = false;
 		run.runningTools.clear();
 		run.partials.clear();
 		this.abortDialogs(run);
@@ -571,7 +595,8 @@ export class AgentManager {
 				this.changed();
 				return;
 			case "agent_settled": {
-				if (!run.busy) return;
+				// Autocompact stopped this run on purpose and continues it after compacting.
+				if (!run.busy || run.compacting) return;
 				if (run.lastStopReason === "error") {
 					run.error = run.lastErrorMessage ?? "provider error";
 					this.finish(run, "failed");
@@ -600,9 +625,20 @@ export class AgentManager {
 				this.changed();
 				return;
 			case "setStatus":
+				if (request.statusKey === COMPACT_STATUS_KEY) {
+					const text = request.statusText ?? "";
+					run.compacting = text === "compacting";
+					if (run.compacting) run.notice("autocompact: compacting context, then continuing");
+					if (text.startsWith("stalled") && run.busy) {
+						run.error = `autocompact could not resume the task (${text.slice("stalled".length).replace(/^:\s*/, "")})`;
+						this.finish(run, "failed");
+					}
+					this.changed();
+					return;
+				}
 				if (request.statusKey === BUDGET_STATUS_KEY) {
 					run.budgetExhausted = request.statusText === "exhausted";
-					if (run.budgetExhausted) run.notice("budget exhausted: tools disabled, final report requested");
+					if (run.budgetExhausted) run.notice("turn budget exhausted: tools disabled, final report requested");
 					this.changed();
 				}
 				return;
