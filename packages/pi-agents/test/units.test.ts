@@ -176,6 +176,10 @@ test("child args and env carry the agent's model, prompt, tools and the subagent
 	assert.equal(env.PI_AGENTS_CHILD, "1");
 	assert.equal(env.PI_SUBAGENT_CHILD, "1");
 	assert.equal(env.PI_SUBAGENT_RUN_ID, "ab12");
+	assert.equal(env.PI_SUBAGENT_DEPTH, "1");
+	const nested = { id: "x", name: "n", type: "t", maxTurns: 6, loadContextFiles: true };
+	assert.equal(buildChildEnv({ PI_SUBAGENT_CHILD: "1", PI_SUBAGENT_DEPTH: "1" }, nested).PI_SUBAGENT_DEPTH, "2", "agents of a pi started inside a child are one level deeper");
+	assert.equal(buildChildEnv({ PI_SUBAGENT_DEPTH: "junk" }, nested).PI_SUBAGENT_DEPTH, "1");
 	assert.equal(env.PI_AGENTS_MAX_TURNS, "6");
 	assert.equal(env.PI_AGENTS_AUTOCOMPACT, "10");
 	assert.deepEqual(JSON.parse(env.PI_AGENTS_CONTEXT_FILES!), ["/w/AGENTS.md"]);

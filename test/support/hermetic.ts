@@ -65,7 +65,6 @@ const CLEARED_ENV = [
 	"PI_AGENTS_TOOLS",
 	"PI_AGENTS_DENY_TOOLS",
 	"PI_AGENTS_CONFIG",
-	"PI_AGENTS_CONTEXT_BUDGET",
 	// pi-cliproxyapi-provider's connection, credential and metadata settings.
 	// A host pointed at a live CLIProxyAPI would otherwise steer the provider's
 	// config tests and let its discovery tests reach a real proxy.

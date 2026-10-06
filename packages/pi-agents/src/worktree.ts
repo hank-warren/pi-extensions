@@ -18,6 +18,18 @@ export interface WorktreeInfo {
 	repoRoot: string;
 	/** False when an existing worktree for the same branch was reused. */
 	created: boolean;
+	/** A new worktree of a local branch that already existed: checked out as it was, not from `origin/<base>`. */
+	existingBranch?: boolean;
+	/** For an existing branch, how many commits of `origin/<base>` it lacks. */
+	behind?: number;
+}
+
+/** How the worktree came to be, for the agent's prompt and the caller. */
+export function worktreeOrigin(worktree: WorktreeInfo): string {
+	if (!worktree.created) return `an existing worktree of ${worktree.repoRoot}, reused as it is`;
+	if (!worktree.existingBranch) return `created from origin/${worktree.base} of ${worktree.repoRoot}`;
+	const behind = worktree.behind ? `, ${worktree.behind} commit${worktree.behind === 1 ? "" : "s"} behind it` : "";
+	return `a new worktree of the local branch ${worktree.branch}, which already existed in ${worktree.repoRoot}: checked out as it was, not from origin/${worktree.base}${behind}`;
 }
 
 export type Exec = (command: string, args: string[], options?: { cwd?: string; timeout?: number; signal?: AbortSignal }) => Promise<{
@@ -84,6 +96,9 @@ export async function ensureWorktree(
 	const path = join(root, name);
 
 	if (existsSync(path)) {
+		// A plain directory inside another checkout would answer for that checkout.
+		const own = await git(["rev-parse", "--show-toplevel"], path);
+		if (own.code !== 0 || real(own.stdout) !== real(path)) throw new Error(`${path} already exists and is not a worktree of ${repoRoot} on ${branch}`);
 		const current = await git(["rev-parse", "--abbrev-ref", "HEAD"], path);
 		const common = await git(["rev-parse", "--path-format=absolute", "--git-common-dir"], path);
 		const repoCommon = await git(["rev-parse", "--path-format=absolute", "--git-common-dir"], repoRoot);
@@ -101,5 +116,8 @@ export async function ensureWorktree(
 		? await git(["worktree", "add", path, branch], repoRoot, 120_000)
 		: await git(["worktree", "add", "-b", branch, path, `origin/${base}`], repoRoot, 120_000);
 	if (add.code !== 0) throw new Error(`git worktree add failed: ${add.stderr || add.stdout}`);
-	return { path, branch, base, repoRoot, created: true };
+	if (exists.code !== 0) return { path, branch, base, repoRoot, created: true };
+	const count = await git(["rev-list", "--count", `${branch}..origin/${base}`], repoRoot);
+	const behind = count.code === 0 ? Number(count.stdout) : undefined;
+	return { path, branch, base, repoRoot, created: true, existingBranch: true, ...(behind !== undefined && Number.isFinite(behind) ? { behind } : {}) };
 }

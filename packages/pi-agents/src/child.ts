@@ -198,37 +198,75 @@ function envList(name: string): string[] {
 
 type ContextFile = { path: string; content: string };
 
+/** A child's setup and what it has tracked so far. One per process. */
+export interface ChildState {
+	maxTurns: number;
+	autocompact: number | undefined;
+	instructions: boolean;
+	inherited: string[];
+	allowTools: string[] | undefined;
+	denyTools: string[];
+	announced: boolean;
+	budget: BudgetState;
+	compaction: AutocompactState;
+	/** Instruction files in the system prompt of the current run, by real path. */
+	inPrompt: Set<string>;
+	/** Instruction files the model has in front of it: the system prompt plus what tool results carried. */
+	seen: Set<string>;
+	/** Files loaded on entry, kept in the system prompt from the next prompt on. */
+	entered: Map<string, ContextFile>;
+	checkedDirs: Set<string>;
+	pending: ContextFile[];
+}
+
+/** Where a child keeps its state for the life of its process; exported so tests can reset it. */
+export const CHILD_STATE_SLOT = Symbol.for("pi-agents.child");
+
+/**
+ * The child's state, or undefined in a parent. Read from the environment once
+ * and kept on globalThis: the child drops its variables at session start, and
+ * a reload (`ctx.reload()`, from any extension's command) runs this extension
+ * again in the same process, which must come back as the same child.
+ */
+export function childState(): ChildState | undefined {
+	const slot = globalThis as { [CHILD_STATE_SLOT]?: ChildState };
+	if (slot[CHILD_STATE_SLOT]) return slot[CHILD_STATE_SLOT];
+	if (process.env.PI_AGENTS_CHILD !== "1") return undefined;
+	const percent = Number(process.env.PI_AGENTS_AUTOCOMPACT);
+	const state: ChildState = {
+		maxTurns: envInt("PI_AGENTS_MAX_TURNS") ?? 80,
+		autocompact: Number.isFinite(percent) && percent > 0 && percent < 100 ? percent : undefined,
+		instructions: process.env.PI_AGENTS_NO_CONTEXT_FILES !== "1",
+		inherited: envList("PI_AGENTS_CONTEXT_FILES"),
+		allowTools: process.env.PI_AGENTS_TOOLS !== undefined ? envList("PI_AGENTS_TOOLS") : undefined,
+		denyTools: envList("PI_AGENTS_DENY_TOOLS"),
+		announced: false,
+		budget: { turns: 0, warned: false, exhausted: false, blockedCalls: 0 },
+		compaction: { armed: false, interrupted: false, compacting: false, floorPending: false, disabled: false },
+		inPrompt: new Set(),
+		seen: new Set(),
+		entered: new Map(),
+		checkedDirs: new Set(),
+		pending: [],
+	};
+	slot[CHILD_STATE_SLOT] = state;
+	return state;
+}
+
 /**
  * Runs inside a child process (`PI_AGENTS_CHILD=1`). Registers no tools, so a
  * child can never spawn agents. It enforces the turn budget, compacts at the
  * agent's autocompact threshold, adds the parent's instruction files to its
  * own, and loads a directory's AGENTS.md the first time it works there.
  */
-export function registerChild(pi: ExtensionAPI): void {
-	const maxTurns = envInt("PI_AGENTS_MAX_TURNS") ?? 80;
-	const percent = Number(process.env.PI_AGENTS_AUTOCOMPACT);
-	const autocompact = Number.isFinite(percent) && percent > 0 && percent < 100 ? percent : undefined;
-	const instructions = process.env.PI_AGENTS_NO_CONTEXT_FILES !== "1";
-	const inherited = envList("PI_AGENTS_CONTEXT_FILES");
-	const allowTools = process.env.PI_AGENTS_TOOLS !== undefined ? envList("PI_AGENTS_TOOLS") : undefined;
-	const denyTools = envList("PI_AGENTS_DENY_TOOLS");
-	let announced = false;
+export function registerChild(pi: ExtensionAPI, state: ChildState): void {
+	const { maxTurns, autocompact, instructions, inherited, allowTools, denyTools, budget, compaction } = state;
+	const { inPrompt, seen, entered, checkedDirs, pending } = state;
 
 	// Every extension has loaded by now, so none still needs them.
 	pi.on("session_start", () => {
 		for (const key of CHILD_ENV_KEYS) delete process.env[key];
 	});
-	const budget: BudgetState = { turns: 0, warned: false, exhausted: false, blockedCalls: 0 };
-	const compaction: AutocompactState = { armed: false, interrupted: false, compacting: false, floorPending: false, disabled: false };
-
-	/** Instruction files in the system prompt of the current run, by real path. */
-	const inPrompt = new Set<string>();
-	/** Instruction files the model has in front of it: the system prompt plus what tool results carried. */
-	const seen = new Set<string>();
-	/** Files loaded on entry, kept in the system prompt from the next prompt on. */
-	const entered = new Map<string, ContextFile>();
-	const checkedDirs = new Set<string>();
-	const pending: ContextFile[] = [];
 
 	const threshold = (ctx: ExtensionContext): number | undefined => {
 		const window = ctx.getContextUsage()?.contextWindow ?? ctx.model?.contextWindow;
@@ -241,8 +279,8 @@ export function registerChild(pi: ExtensionAPI): void {
 	pi.on("before_agent_start", (event, ctx) => {
 		// A continuation after compacting is the same task: its turns keep counting.
 		if (event.prompt !== CONTINUE_AFTER_COMPACTION) budgetAtPromptStart(budget);
-		if (!announced) {
-			announced = true;
+		if (!state.announced) {
+			state.announced = true;
 			ctx.ui.setStatus(CHILD_STATUS_KEY, "ready");
 		}
 		ctx.ui.setStatus(BUDGET_STATUS_KEY, undefined);

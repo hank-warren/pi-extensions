@@ -1,6 +1,6 @@
 import type { AgentDefinition } from "./agents.js";
 import { describeAutocompact } from "./child.js";
-import type { WorktreeInfo } from "./worktree.js";
+import { type WorktreeInfo, worktreeOrigin } from "./worktree.js";
 
 /**
  * Appended to the child's normal Pi system prompt (tools, AGENTS.md and skills
@@ -32,7 +32,7 @@ export function buildChildPrompt(input: {
 		`You start in ${cwd}, and every bash call starts there. Work wherever the task needs: use absolute paths, or \`cd <dir> && …\` and \`git -C <dir>\`. The first time you work in another repository or directory, its AGENTS.md instructions are added to that tool result; follow them there.`,
 	];
 	if (worktree) {
-		lines.push(`You work in the git worktree ${worktree.path} on branch ${worktree.branch}, created from origin/${worktree.base} of ${worktree.repoRoot}. Make all changes there.`);
+		lines.push(`You work in the git worktree ${worktree.path} on branch ${worktree.branch}, ${worktreeOrigin(worktree)}. Make all changes there.`);
 	} else {
 		const where = worktreeDir ? `${worktreeDir}/<branch with "/" replaced by "-">` : "a worktrees/ directory beside the repository, named after the branch";
 		lines.push(`If the task needs changes in a repository, make them in a git worktree, never in its main checkout: \`git -C <repo> fetch origin && git -C <repo> worktree add ${worktreeDir ? `${worktreeDir}/<branch-with-dashes>` : "<worktree path>"} -b <branch> origin/<default branch>\`, in ${where}. Reuse a worktree that already exists for the branch, and never remove one.`);

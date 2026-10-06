@@ -137,6 +137,8 @@ export class AgentRun {
 	waiters: Array<() => void> = [];
 	/** Open or queued forwarded dialogs, each with the tool calls that were running when it was asked. */
 	dialogs = new Map<AbortController, Set<string>>();
+	/** Messages sent while its previous process was still exiting, delivered with the next prompt. */
+	pendingMessages: string[] = [];
 	/** Tool calls the child is executing right now. */
 	runningTools = new Set<string>();
 	/** When each recent tool call started and ended, so a viewer opened later shows real durations. */
@@ -237,6 +239,12 @@ export function buildChildArgs(input: {
 	return args;
 }
 
+/** This process's subagent depth: 0 for a top-level session. */
+export function subagentDepth(value: string | undefined): number {
+	const depth = Number(value);
+	return Number.isInteger(depth) && depth > 0 ? depth : 0;
+}
+
 /** Pure: the child's environment. HERDR_PANE_ID is dropped so a child never drives the parent's pane state. */
 export function buildChildEnv(
 	base: NodeJS.ProcessEnv,
@@ -269,7 +277,8 @@ export function buildChildEnv(
 		// The env contract pi-auto-permissions already reads for subagent children.
 		PI_SUBAGENT_CHILD: "1",
 		PI_SUBAGENT_RUN_ID: run.id,
-		PI_SUBAGENT_DEPTH: "1",
+		// One deeper than this process: a pi started from a child's commands is a parent at depth 1, so its agents are at 2.
+		PI_SUBAGENT_DEPTH: String(subagentDepth(base.PI_SUBAGENT_DEPTH) + 1),
 	};
 }
 
@@ -278,7 +287,7 @@ export interface ManagerDeps {
 	ctx(): ExtensionContext | undefined;
 	spawnCommand(): string[];
 	sessionDir(): string | undefined;
-	/** A run started or resumed: record it, so a parent that exits mid-run can still list and resume it. */
+	/** A run started or resumed, and again once its session file is known: record it, so a parent that exits or crashes mid-run can still list and resume it. */
 	onStarted?(run: AgentRun): void;
 	onFinished(run: AgentRun): void;
 }
@@ -447,11 +456,14 @@ export class AgentManager {
 		run.lastStopReason = undefined;
 		run.lastErrorMessage = undefined;
 		this.changed();
-		try {
-			this.deps.onStarted?.(run);
-		} catch {
-			// Recording is best effort; the run goes ahead.
-		}
+		const record = () => {
+			try {
+				this.deps.onStarted?.(run);
+			} catch {
+				// Recording is best effort; the run goes ahead.
+			}
+		};
+		record();
 		try {
 			const previous = run.proc;
 			if (previous && !run.alive) {
@@ -467,11 +479,16 @@ export class AgentManager {
 			if (!run.sessionFile) {
 				proc.request<{ sessionFile?: string }>({ type: "get_state" })
 					.then((state) => {
-						if (state?.sessionFile) run.sessionFile = state.sessionFile;
+						if (!state?.sessionFile) return;
+						run.sessionFile = state.sessionFile;
+						// The record taken at start had no session file to resume from after a crash.
+						if (run.status === "running") record();
 					})
 					.catch(() => {});
 			}
-			const accepted = await proc.request<{ disposition?: string }>({ type: "prompt", message: prompt });
+			// Messages that arrived while the old process was still exiting.
+			const message = [prompt, ...run.pendingMessages.splice(0)].join("\n\n");
+			const accepted = await proc.request<{ disposition?: string }>({ type: "prompt", message });
 			if (accepted?.disposition === "handled" && current()) this.finish(run, "done");
 		} catch (error) {
 			if (current()) {
@@ -486,6 +503,11 @@ export class AgentManager {
 		if (run.status === "running" && run.alive) {
 			await run.proc!.request({ type: "steer", message: text });
 			return "steered";
+		}
+		if (run.status === "running") {
+			// Its previous process is still exiting: the new one takes this with its prompt.
+			run.pendingMessages.push(text);
+			return "queued";
 		}
 		if (run.status === "queued") {
 			const entry = this.queue.find((item) => item.run === run);
@@ -510,6 +532,7 @@ export class AgentManager {
 		}
 		run.stopRequested = true;
 		run.launchSeq += 1;
+		run.pendingMessages = [];
 		this.finish(run, "stopped");
 		await run.proc?.stop();
 	}
@@ -847,7 +870,12 @@ export class AgentManager {
 		// waiting on this dialog is among these.
 		run.dialogs.set(controller, new Set(run.runningTools));
 		this.uiChain = this.uiChain.then(async () => {
-			if (proc.exited || controller.signal.aborted) return;
+			if (proc.exited) return;
+			if (controller.signal.aborted) {
+				// Its call finished while it waited its turn: answer it, so nothing in the child waits on it.
+				proc.respondUi(request.id, { cancelled: true });
+				return;
+			}
 			run.approval = request.title ?? request.method;
 			this.changed();
 			const title = `[${run.name}] ${request.title ?? ""}`;
