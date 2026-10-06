@@ -4,7 +4,7 @@ import { fetchCpaModels, parseCpaModelsCache, type CpaModel } from "./cpa.ts";
 import { builtinSeedCatalog } from "./builtin-seed.ts";
 import { fetchModelsDevCatalog, hasSourceProviderMetadata, parseModelsDevCatalog } from "./models-dev.ts";
 import { loadPiModelProfiles, NO_PI_PROFILES, type PiModelProfiles } from "./pi-profiles.ts";
-import { buildProviderModels, type BuildProviderModelsResult } from "./provider.ts";
+import { buildProviderModels, type BuildProviderModelsResult, type ClaudeWireFeatures } from "./provider.ts";
 import type { Gpt56ContextWindowMode } from "./settings.ts";
 import type { CpaProviderConfig, ModelsDevCatalog } from "./types.ts";
 
@@ -37,6 +37,7 @@ export interface CatalogSnapshot {
   metadataSource: MetadataSource;
   gpt56ContextWindow: Gpt56ContextWindowMode;
   perTurnEffort: boolean;
+  midConversationUpdates: boolean;
   built: BuildProviderModelsResult;
 }
 
@@ -58,6 +59,8 @@ export interface ProviderCatalogOptions {
   gpt56ContextWindow: Gpt56ContextWindowMode;
   /** Publish pi's native per-turn Claude effort. Defaults to true. */
   perTurnEffort?: boolean;
+  /** Publish pi's native Claude mid-conversation system messages and tool changes. Defaults to true. */
+  midConversationUpdates?: boolean;
   getApiKey: () => Promise<string | undefined>;
   backgroundTimeoutMs?: number;
   manualTimeoutMs?: number;
@@ -280,6 +283,10 @@ export class ProviderCatalog {
     metadataUpdatedAt: number | undefined,
     metadataSource: MetadataSource,
   ): CatalogSnapshot {
+    const features: ClaudeWireFeatures = {
+      perTurnEffort: this.options.perTurnEffort ?? true,
+      midConversationUpdates: this.options.midConversationUpdates ?? true,
+    };
     this.snapshot = {
       cpaModels,
       cpaUpdatedAt,
@@ -287,7 +294,8 @@ export class ProviderCatalog {
       metadataUpdatedAt,
       metadataSource,
       gpt56ContextWindow: this.options.gpt56ContextWindow,
-      perTurnEffort: this.options.perTurnEffort ?? true,
+      perTurnEffort: features.perTurnEffort,
+      midConversationUpdates: features.midConversationUpdates,
       built: buildProviderModels(
         cpaModels,
         metadata,
@@ -296,7 +304,7 @@ export class ProviderCatalog {
         this.options.config.modelOverrides,
         this.options.config.metadataFallbackProvider,
         this.piProfiles,
-        this.options.perTurnEffort ?? true,
+        features,
       ),
     };
     return this.snapshot;

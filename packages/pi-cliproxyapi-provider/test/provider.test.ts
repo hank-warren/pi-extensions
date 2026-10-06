@@ -564,8 +564,18 @@ const piProfiles = loadPiModelProfiles({
     anthropic: [
       piModel("claude-opus-5-5", {
         thinkingLevelMap: { off: null, minimal: null, xhigh: "xhigh", max: "max" },
-        compat: { supportsMidConvoEffort: true, supportsMidConvoToolChanges: true } as Model<Api>["compat"],
+        compat: {
+          supportsMidConvoEffort: true,
+          supportsMidConvoSystemMessages: true,
+          supportsMidConvoToolChanges: true,
+          supportsStrictTools: true,
+        } as Model<Api>["compat"],
       }),
+      piModel("claude-opus-4-8", {
+        compat: { supportsMidConvoSystemMessages: true, supportsMidConvoToolChanges: true } as Model<Api>["compat"],
+      }),
+      // Tool changes are only usable alongside mid-conversation system messages.
+      piModel("claude-haiku-9", { compat: { supportsMidConvoToolChanges: true } as Model<Api>["compat"] }),
       piModel("claude-sonnet-5", { thinkingLevelMap: { xhigh: "xhigh", max: "max" } }),
     ],
     "openai-codex": [
@@ -585,13 +595,43 @@ async function withProfiles(ids: string[], metadata: ModelsDevCatalog = {}) {
   return Object.fromEntries(result.models.map((model) => [model.id, model]));
 }
 
-test("publishes per-turn effort only for Claude models pi marks as supporting it", async () => {
-  const models = await withProfiles(["claude-opus-5-5", "claude-sonnet-5", "claude-opus-4-6"]);
+const ALL_CLAUDE_UPDATES = {
+  supportsMidConvoEffort: true,
+  supportsMidConvoSystemMessages: true,
+  supportsMidConvoToolChanges: true,
+};
 
-  assert.deepEqual(models["claude-opus-5-5"].compat, { supportsMidConvoEffort: true });
-  // Native tool changes are never carried: CPA's OAuth tool aliasing breaks them.
+test("publishes pi's native Claude transcript flags only for models pi marks with them", async () => {
+  const models = await withProfiles(["claude-opus-5-5", "claude-opus-4-8", "claude-haiku-9", "claude-sonnet-5", "claude-opus-4-6"]);
+
+  // Only the three transcript flags are carried; other native compat stays pi's business.
+  assert.deepEqual(models["claude-opus-5-5"].compat, ALL_CLAUDE_UPDATES);
+  assert.deepEqual(models["claude-opus-4-8"].compat, { supportsMidConvoSystemMessages: true, supportsMidConvoToolChanges: true });
+  assert.equal(models["claude-haiku-9"].compat, undefined, "tool changes need mid-conversation system messages");
   assert.equal(models["claude-sonnet-5"].compat, undefined);
   assert.equal(models["claude-opus-4-6"].compat, undefined, "unknown to pi");
+});
+
+test("mid-conversation updates can be switched off for CLIProxyAPI releases before v8.0.4", async () => {
+  const result = buildProviderModels(
+    [{ id: "claude-opus-5-5" }, { id: "claude-opus-4-8" }], {}, {}, "canonical", {}, null, await piProfiles,
+    { perTurnEffort: true, midConversationUpdates: false },
+  );
+
+  assert.deepEqual(result.models[0].compat, { supportsMidConvoEffort: true }, "per-turn effort is independent");
+  assert.equal(result.models[1].compat, undefined);
+});
+
+test("mid-conversation updates stay on when per-turn effort is switched off", async () => {
+  const result = buildProviderModels(
+    [{ id: "claude-opus-5-5" }], {}, {}, "canonical", {}, null, await piProfiles,
+    { perTurnEffort: false, midConversationUpdates: true },
+  );
+
+  assert.deepEqual(result.models[0].compat, {
+    supportsMidConvoSystemMessages: true,
+    supportsMidConvoToolChanges: true,
+  });
 });
 
 test("pi's native thinking map wins over family rules and metadata", async () => {
@@ -656,14 +696,17 @@ test("an unreadable pi catalog degrades to family rules", async () => {
 });
 
 test("per-turn effort can be switched off for CLIProxyAPI releases before v8.0.3", async () => {
-  const result = buildProviderModels([{ id: "claude-opus-5-5" }], {}, {}, "canonical", {}, null, await piProfiles, false);
+  const result = buildProviderModels(
+    [{ id: "claude-opus-5-5" }], {}, {}, "canonical", {}, null, await piProfiles,
+    { perTurnEffort: false, midConversationUpdates: false },
+  );
 
   assert.equal(result.models[0].compat, undefined);
   assert.equal(result.models[0].api, "anthropic-messages", "Claude keeps the Messages API");
   assert.deepEqual(result.models[0].thinkingLevelMap, { off: null, minimal: null, xhigh: "xhigh", max: "max" });
 });
 
-test("publishes per-turn effort only when CPA serves the model from an Anthropic owner", async () => {
+test("publishes Claude transcript flags only when CPA serves the model from an Anthropic owner", async () => {
   const result = buildProviderModels(
     [
       { id: "claude-opus-5-5", owned_by: "anthropic" },
@@ -673,7 +716,7 @@ test("publishes per-turn effort only when CPA serves the model from an Anthropic
   );
   const [anthropic, antigravity] = result.models;
 
-  assert.deepEqual(anthropic.compat, { supportsMidConvoEffort: true });
+  assert.deepEqual(anthropic.compat, ALL_CLAUDE_UPDATES);
   assert.equal(antigravity.compat, undefined, "translated away from the Messages shape");
 });
 

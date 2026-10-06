@@ -156,8 +156,15 @@ function providerSettingsItems(
     {
       id: "perTurnEffort",
       label: "Per-turn Claude effort",
-      description: "Switch Opus 5/5.5 and Fable 5.1 effort per turn so the prompt cache survives. Needs CLIProxyAPI v8.0.3+; disable for older proxies.",
+      description: "Switch Claude effort per turn on models pi supports it for, so the prompt cache survives. Needs CLIProxyAPI v8.0.3+; disable for older proxies.",
       currentValue: settings.perTurnEffort ? "enabled" : "disabled",
+      values: ["enabled", "disabled"],
+    },
+    {
+      id: "midConversationUpdates",
+      label: "Claude mid-conversation updates",
+      description: "Send system-prompt and tool changes as native mid-conversation updates, so the prompt cache survives them. Needs CLIProxyAPI v8.0.4+; disable for older proxies.",
+      currentValue: settings.midConversationUpdates ? "enabled" : "disabled",
       values: ["enabled", "disabled"],
     },
   ];
@@ -205,6 +212,9 @@ export async function openProviderConfig(
         }
         if (id === "perTurnEffort" && (value === "enabled" || value === "disabled")) {
           edited.perTurnEffort = value === "enabled";
+        }
+        if (id === "midConversationUpdates" && (value === "enabled" || value === "disabled")) {
+          edited.midConversationUpdates = value === "enabled";
         }
         if (id === "showStrictMode" && (value === "enabled" || value === "disabled")) {
           edited.showStrictMode = value === "enabled";
