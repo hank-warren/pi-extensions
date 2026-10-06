@@ -14,7 +14,7 @@ Each agent runs as a separate Pi process. The main thing that buys is a **respon
 - **A clean stop.** Stopping an agent ends its process.
 - **Permission prompts from the right place.** A child's dialogs (Auto Permissions approvals, mostly) are forwarded over RPC and shown in the parent, labeled with the agent's name.
 
-The cost is a cold start of a second or more per spawn, depending on how many extensions you load. A finished agent keeps its process for `idleTtlSeconds`, so follow-ups to it skip the cold start.
+The cost is a cold start of a second or more per spawn, depending on how many extensions you load. A finished agent keeps its process for `idleTtlSeconds`, so follow-ups to it skip the cold start; only the `maxConcurrent` most recent ones do, so many agents do not each hold a process.
 
 Children are spawned with the parent's own Pi binary and Node, plus any `-e` extensions the parent was started with.
 
@@ -214,7 +214,7 @@ Settings live in `~/.pi/agent/pi-agents/config.json` (override the path with `PI
 | `autocompact` | Autocompact percentage for every agent that does not set its own. Unset by default: agents get their full window. |
 | `maxTurns` | Turn budget for every agent that does not set its own. |
 | `worktreeDir` | Where worktrees go, for `worktree` requests and for agents that make their own. |
-| `idleTtlSeconds` | How long a finished child's process is kept for follow-ups. |
+| `idleTtlSeconds` | How long a finished child's process is kept for follow-ups. At most `maxConcurrent` finished children keep one, the most recent; an older one is stopped and resumes from its session file when messaged. |
 | `excludeTools` | Added to the built-in exclusions: subagent tools, `ask_user_question`, and the goal tools. |
 | `piCommand` | Overrides how a child is started. It must load pi-agents in the child, as an installed package does; a child without it fails its run rather than run without its tool allowlist, turn budget and autocompact. |
 

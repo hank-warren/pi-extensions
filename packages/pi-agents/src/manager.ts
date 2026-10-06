@@ -104,6 +104,15 @@ export class AgentRun {
 	budgetExhausted = false;
 	/** The current process announced that pi-agents loaded in it. */
 	childReady = false;
+
+	/**
+	 * What a row, a tool box or the summary line draws of this run, besides the
+	 * clock. Views compare it to redraw only when it changed: deltas stream from
+	 * every agent, and Pi redraws the whole screen for each render request.
+	 */
+	get look(): string {
+		return `${this.status}|${this.toolUses}|${this.toolLog.length}|${this.contextTokens}|${this.approval ?? ""}|${this.compacting}|${this.compactingNow}|${this.budgetExhausted}|${this.runningTools.size}|${this.streaming ? 1 : 0}`;
+	}
 	/** The child is compacting between runs of the same task (autocompact). */
 	compacting = false;
 	sessionFile: string | undefined;
@@ -551,6 +560,7 @@ export class AgentManager {
 			const ttl = this.deps.config().idleTtlSeconds * 1000;
 			run.idleTimer = setTimeout(() => void run.proc?.stop(), ttl);
 			run.idleTimer.unref();
+			this.trimIdle();
 		}
 		this.changed();
 		if (!this.disposed) {
@@ -561,6 +571,23 @@ export class AgentManager {
 			}
 		}
 		this.drain();
+	}
+
+	/**
+	 * Keep at most `maxConcurrent` finished agents' processes for follow-ups,
+	 * the most recent ones; older ones stop now and resume from their session
+	 * file if messaged. Many agents would otherwise hold a process each for the
+	 * whole idle TTL.
+	 */
+	private trimIdle(): void {
+		const idle = [...this.runs.values()]
+			.filter((run) => !run.busy && run.alive && run.sessionFile)
+			.sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0));
+		for (const run of idle.slice(this.deps.config().maxConcurrent)) {
+			if (run.idleTimer) clearTimeout(run.idleTimer);
+			run.idleTimer = undefined;
+			void run.proc?.stop();
+		}
 	}
 
 	private drain(): void {
@@ -611,8 +638,13 @@ export class AgentManager {
 				if (!update) return;
 				run.partial ??= startAssistant();
 				applyAssistantEvent(run.partial, update);
-				if (update.type === "text_delta" && typeof update.delta === "string") run.streaming = (run.streaming + update.delta).slice(-4000);
-				this.changed();
+				// A delta changes nothing a row or the summary draws, except the moment the agent starts writing;
+				// the viewer follows deltas through run events. Notifying per delta redrew everything per delta.
+				if (update.type === "text_delta" && typeof update.delta === "string") {
+					const started = run.streaming === "";
+					run.streaming = (run.streaming + update.delta).slice(-4000);
+					if (started) this.changed();
+				}
 				return;
 			}
 			case "message_end": {

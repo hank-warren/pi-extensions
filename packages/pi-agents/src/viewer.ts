@@ -158,7 +158,13 @@ export class AgentViewer implements Component, Focusable {
 			this.handle(event);
 			tui.requestRender();
 		});
-		this.unsubscribeChanges = manager.subscribe(() => tui.requestRender());
+		// Other agents' changes do not show here; this one's do (its header, its working line).
+		let look = run.look;
+		this.unsubscribeChanges = manager.subscribe(() => {
+			if (run.look === look) return;
+			look = run.look;
+			tui.requestRender();
+		});
 		this.input.onSubmit = (value) => this.submit(value);
 	}
 

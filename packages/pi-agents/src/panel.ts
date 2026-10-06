@@ -51,6 +51,8 @@ export class AgentPanel {
 	private unsubscribeManager: (() => void) | undefined;
 	private timer: NodeJS.Timeout | undefined;
 	private timerInterval = 0;
+	/** What the summary line and the drawer last drew, besides spinners and clocks. */
+	private drawn = "";
 	private active = false;
 	private selected = 0;
 	private viewing: string | undefined;
@@ -67,7 +69,8 @@ export class AgentPanel {
 		this.detach();
 		this.ui = ui;
 		this.unsubscribeInput = ui.onTerminalInput((data) => this.handleKey(data));
-		this.unsubscribeManager = this.manager.subscribe(() => this.update());
+		// Spinners, clocks and activity lines refresh on the tick; a change only redraws when it shows.
+		this.unsubscribeManager = this.manager.subscribe(() => this.update({ onlyIfChanged: true }));
 		this.update();
 	}
 
@@ -111,7 +114,7 @@ export class AgentPanel {
 		};
 	}
 
-	update(): void {
+	update(options: { onlyIfChanged?: boolean } = {}): void {
 		const ui = this.ui;
 		if (!ui) return;
 		const rows = this.rows();
@@ -158,7 +161,9 @@ export class AgentPanel {
 			this.selector = false;
 			changed = true;
 		}
-		if (!changed) this.tui?.requestRender();
+		const drawn = `${this.active}|${this.viewing}|${rows.map((run) => run.look).join(",")}`;
+		if (!changed && (!options.onlyIfChanged || drawn !== this.drawn)) this.tui?.requestRender();
+		this.drawn = drawn;
 	}
 
 	/** True when Pi's prompt editor owns the keyboard (dialogs and overlays are not Editors). */

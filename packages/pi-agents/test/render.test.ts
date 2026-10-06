@@ -380,3 +380,37 @@ test("no summary or selector line is wider than the terminal", () => {
 	assert.ok(lines.some((line) => /↓ \d+ more/.test(line)));
 	panel.detach();
 });
+
+test("the summary redraws for a change it shows, not for every streamed delta", () => {
+	const run = viewerRun();
+	run.status = "running";
+	let notify = () => {};
+	const panel = new AgentPanel({ subscribe: (listener) => ((notify = listener), () => {}), list: () => [run], stop: async () => {} }, async () => {});
+	type Factory = (tui: unknown, theme: Theme) => { render(width: number): string[] };
+	let factory: Factory | undefined;
+	panel.attach({
+		onTerminalInput: () => () => {},
+		setWidget: (key: string, value: Factory | undefined) => {
+			if (key === "pi-agents" && value) factory = value;
+		},
+		getEditorText: () => "",
+	} as never);
+	let renders = 0;
+	factory!({ requestRender: () => renders++ }, plain).render(100);
+	renders = 0;
+	try {
+		// Synchronous, so the spinner's own tick cannot run in between.
+		for (let i = 0; i < 500; i++) {
+			run.streaming += "x";
+			notify();
+		}
+		assert.ok(renders <= 1, `${renders} redraws for 500 deltas: Pi redraws the whole screen for each`);
+		renders = 0;
+		run.toolUses += 1;
+		run.toolLog.push({ head: "read", rest: "a.ts" } as never);
+		notify();
+		assert.equal(renders, 1, "a new tool call shows, so it redraws");
+	} finally {
+		panel.detach();
+	}
+});

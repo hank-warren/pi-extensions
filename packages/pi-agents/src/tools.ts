@@ -133,11 +133,17 @@ function resolveCwd(base: string, requested: string): string {
 	return path;
 }
 
-/** Push live progress to a foreground tool row: coalesced to one update per 250ms, plus a 1s clock tick. */
-function streamProgress(manager: AgentManager, emit: () => void): () => void {
+/**
+ * Push live progress to a foreground tool row when its run changes in a way the
+ * row shows, coalesced to one update per 250ms, plus a 1s clock tick. Other
+ * agents' changes are not this row's.
+ */
+function streamProgress(manager: AgentManager, run: AgentRun, emit: () => void): () => void {
 	let timer: NodeJS.Timeout | undefined;
+	let look = run.look;
 	const unsubscribe = manager.subscribe(() => {
-		if (timer) return;
+		if (timer || run.look === look) return;
+		look = run.look;
 		timer = setTimeout(() => {
 			timer = undefined;
 			emit();
@@ -253,7 +259,7 @@ export function registerTools(pi: ExtensionAPI, host: ToolHost, exposure: "codem
 					structuredContent: structured(run),
 				};
 			}
-			const stopStreaming = streamProgress(host.manager, () => onUpdate?.({ content: [{ type: "text", text: "" }], details: detailsOf(run) }));
+			const stopStreaming = streamProgress(host.manager, run, () => onUpdate?.({ content: [{ type: "text", text: "" }], details: detailsOf(run) }));
 			try {
 				await waitStoppingOnAbort(host.manager, run, signal);
 			} finally {

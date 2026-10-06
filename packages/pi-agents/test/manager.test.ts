@@ -642,3 +642,38 @@ test("ten agents streaming large writes at once cost the parent little CPU", asy
 		await manager.dispose();
 	}
 });
+
+test("finished agents keep at most maxConcurrent processes, and a stopped one still takes a follow-up", async () => {
+	const { manager, create } = managerWith({ maxConcurrent: 2 });
+	try {
+		const runs = ["a", "b", "c", "d"].map((name) => create(name));
+		for (const run of runs) {
+			manager.start(run, "hello");
+			await manager.waitFor(run);
+		}
+		assert.deepEqual(runs.filter((run) => run.alive).map((run) => run.name), ["c", "d"], "the two most recent keep their process");
+		manager.start(runs[0]!, "again");
+		await manager.waitFor(runs[0]!);
+		assert.equal(runs[0]!.status, "done");
+		assert.equal(runs[0]!.result, "echo: again", "resumed from its session file in a new process");
+		assert.deepEqual(runs.filter((run) => run.alive).map((run) => run.name).sort(), ["a", "d"]);
+	} finally {
+		await manager.dispose();
+	}
+});
+
+test("a streamed answer notifies views a handful of times, not once per delta", async () => {
+	const { manager, create } = managerWith();
+	let notifications = 0;
+	const unsubscribe = manager.subscribe(() => notifications++);
+	try {
+		const run = create();
+		manager.start(run, "STREAM 50");
+		await manager.waitFor(run);
+		assert.equal(run.result, "streamed 50 KB");
+		assert.ok(notifications < 40, `${notifications} notifications for about 4,300 deltas; each one redraws every view`);
+	} finally {
+		unsubscribe();
+		await manager.dispose();
+	}
+});
