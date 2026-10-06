@@ -1,5 +1,5 @@
 import { getMarkdownTheme, keyHint, type Theme } from "@earendil-works/pi-coding-agent";
-import { Box, Container, Markdown, Text } from "@earendil-works/pi-tui";
+import { Box, type Component, Container, Markdown, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { formatDuration, formatTokens, oneLine, type ToolCallSummary } from "./format.js";
 import type { AgentRun, RunStatus } from "./manager.js";
 import type { WorktreeInfo } from "./worktree.js";
@@ -140,24 +140,59 @@ function markdownTheme() {
 	}
 }
 
+const ANSI = /\x1b\[[0-9;]*m|\x1b\]8;;[^\x07]*\x07/g;
+const blank = (line: string) => line.replace(ANSI, "").trim() === "";
+
 /**
- * Text cut to `max` lines with Pi's own "(N more lines, ctrl+o to expand)"
- * trailer, or the whole text as Markdown when expanded.
+ * Rendered lines cut to at most `maxLines`, at the last blank line between
+ * blocks so a paragraph or table is never sliced; inside the first block only
+ * when it alone is taller. Pure, for tests.
+ */
+export function clampAtBlock(lines: string[], maxLines: number): { shown: string[]; hidden: number } {
+	let end = lines.length;
+	while (end > 0 && blank(lines[end - 1]!)) end--;
+	if (end <= maxLines) return { shown: lines.slice(0, end), hidden: 0 };
+	let cut = maxLines;
+	for (let i = maxLines; i > 0; i--) {
+		if (blank(lines[i]!)) {
+			cut = i;
+			break;
+		}
+	}
+	while (cut > 0 && blank(lines[cut - 1]!)) cut--;
+	return { shown: lines.slice(0, cut), hidden: end - cut };
+}
+
+/** A component cut with `clampAtBlock`, then Pi's "... (N more lines, ctrl+o to expand)". */
+class Clamped implements Component {
+	constructor(
+		private readonly inner: Component,
+		private readonly maxLines: number,
+		private readonly theme: Theme,
+	) {}
+
+	render(width: number): string[] {
+		const { shown, hidden } = clampAtBlock(this.inner.render(width), this.maxLines);
+		if (hidden === 0) return shown;
+		const trailer = `${this.theme.fg("muted", `... (${hidden} more line${hidden === 1 ? "" : "s"}, `)}${expandHint(this.theme)}${this.theme.fg("muted", ")")}`;
+		return [...shown, "", truncateToWidth(trailer, width)];
+	}
+
+	invalidate(): void {
+		this.inner.invalidate();
+	}
+}
+
+/**
+ * A report rendered with Pi's Markdown, cut between blocks to `maxLines`
+ * until expanded.
  */
 export function collapsibleText(text: string, options: { expanded: boolean; maxLines: number; color: (line: string) => string; theme: Theme }): Container {
 	const { expanded, maxLines, color, theme } = options;
 	const container = new Container();
-	const markdown = expanded ? markdownTheme() : undefined;
-	if (expanded && markdown) {
-		container.addChild(new Markdown(text, 0, 0, markdown, { color }));
-		return container;
-	}
-	const lines = text.split("\n");
-	const shown = expanded ? lines : lines.slice(0, maxLines);
-	let body = shown.map(color).join("\n");
-	const hidden = lines.length - shown.length;
-	if (hidden > 0) body += `\n${theme.fg("muted", `... (${hidden} more line${hidden === 1 ? "" : "s"}, `)}${expandHint(theme)}${theme.fg("muted", ")")}`;
-	container.addChild(new Text(body, 0, 0));
+	const markdown = markdownTheme();
+	const body: Component = markdown ? new Markdown(text, 0, 0, markdown, { color }) : new Text(text.split("\n").map(color).join("\n"), 0, 0);
+	container.addChild(expanded ? body : new Clamped(body, maxLines, theme));
 	return container;
 }
 
@@ -197,7 +232,7 @@ export function renderAgentResult(details: AgentDetails | undefined, fallback: s
 		return container;
 	}
 	if (details.result) {
-		container.addChild(collapsibleText(details.result, { expanded, maxLines: 10, color: (line) => theme.fg("toolOutput", line), theme }));
+		container.addChild(collapsibleText(details.result, { expanded, maxLines: REPORT_LINES, color: (line) => theme.fg("toolOutput", line), theme }));
 	}
 	const notes: string[] = [];
 	if (details.error) notes.push(theme.fg("error", details.error));
@@ -209,20 +244,24 @@ export function renderAgentResult(details: AgentDetails | undefined, fallback: s
 	return container;
 }
 
+/** Rendered report lines shown before ctrl+o. */
+const REPORT_LINES = 8;
+
 /**
- * A background agent's report as it lands in the session: a custom-message box
- * labeled `[agent]`, the same frame Pi gives `[skill]` and other injected text.
+ * A background agent's report as it lands in the session, in the frame Pi
+ * gives injected messages: `agent ✓ name · stats`, then the report.
  */
 export function renderAgentMessage(details: AgentDetails, expanded: boolean, theme: Theme): Box {
 	const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
-	const label = theme.fg("customMessageLabel", theme.bold("[agent]"));
-	const type = !details.type || details.name === details.type || details.name.startsWith(`${details.type}-`) ? "" : `${details.type} `;
-	const head = `${label} ${theme.fg("customMessageText", details.name)} ${theme.fg("muted", `${type}· ${details.status} · ${statsLine(details)}`)}`;
+	const label = theme.fg("customMessageLabel", theme.bold("agent"));
+	const type = !details.type || details.name === details.type || details.name.startsWith(`${details.type}-`) ? "" : ` ${details.type}`;
+	const status = details.status === "done" ? "" : ` · ${details.status}`;
+	const head = `${label} ${statusGlyph(details.status, theme)} ${theme.fg("customMessageText", details.name)}${theme.fg("muted", `${type}${status} · ${statsLine(details)}`)}`;
 	box.addChild(new Text(head, 0, 0));
 	if (details.error) box.addChild(new Text(theme.fg("error", details.error), 0, 0));
 	if (details.result) {
-		box.addChild(new Text("", 0, 0));
-		box.addChild(collapsibleText(details.result, { expanded, maxLines: 6, color: (line) => theme.fg("customMessageText", line), theme }));
+		box.addChild(new Spacer(1));
+		box.addChild(collapsibleText(details.result, { expanded, maxLines: REPORT_LINES, color: (line) => theme.fg("customMessageText", line), theme }));
 	}
 	return box;
 }

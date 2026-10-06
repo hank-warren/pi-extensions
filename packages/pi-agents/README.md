@@ -73,12 +73,14 @@ The way of working comes from Claude Code's subagents: delegate, keep working, w
  claude-sonnet-5 · 41k/272k · 1m03s
 ```
 
-**A background agent's report lands as a custom message** labeled `[agent]`, the same frame Pi gives `[skill]`:
+**A background agent's report lands as a custom message**, in the frame Pi gives injected text, rendered as Markdown. Until `ctrl+o` it shows up to eight lines and never cuts a paragraph or table in half:
 
 ```
- [agent] map-payment-flow · done · 9 tool calls · 22k context · 31s
- Refunds are issued from src/refund.ts:12 …
- ... (8 more lines, ctrl+o to expand)
+ agent ✓ map-payment-flow · 9 tool calls · 22k context · 31s
+
+ Refunds are issued from src/refund.ts:12.
+
+ ... (14 more lines, ctrl+o to expand)
 ```
 
 **Above the prompt, one line sums up the agents** while a batch runs and for a minute after the last one finishes. A batch is every agent started while another was still running.

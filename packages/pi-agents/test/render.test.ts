@@ -8,7 +8,7 @@ const scoutAgent = parseAgentFile("---\nname: scout\ndescription: Finds things.\
 const reviewerAgent = { ...composeAgent(undefined, {}), name: "reviewer", source: "user" as const };
 import { AgentManager, AgentRun } from "../src/manager.js";
 import { AgentPanel } from "../src/panel.js";
-import { type AgentDetails, renderAgentCall, renderAgentMessage, renderAgentResult } from "../src/render.js";
+import { type AgentDetails, clampAtBlock, renderAgentCall, renderAgentMessage, renderAgentResult } from "../src/render.js";
 import { applyAssistantEvent, startAssistant } from "../src/stream.js";
 import { AgentViewer, type ViewerKeys } from "../src/viewer.js";
 
@@ -66,20 +66,46 @@ test("the Agent row reads like Pi's own tool rows", () => {
 	const background = strip(renderAgentResult(details({ status: "running", background: true }), "", false, plain).render(80));
 	assert.deepEqual(background, ["running in background as scout · ↓ to manage"]);
 
-	const result = Array.from({ length: 14 }, (_, i) => `line ${i + 1}`).join("\n");
-	const done = strip(renderAgentResult(details({ result, budgetExhausted: true }), "", false, plain).render(80));
-	assert.equal(done[0], "line 1");
-	assert.match(done[10]!, /^\.\.\. \(4 more lines, /);
+	const done = strip(renderAgentResult(details({ result: REPORT, budgetExhausted: true }), "", false, plain).render(80));
+	assert.equal(done[0], "All five steps worked. Node 24.x is Active LTS.", "Markdown: no ** or backticks");
+	assert.equal(done[1], "");
+	assert.match(done[2]!, /^\.\.\. \(\d+ more lines, /, "the table is not sliced: it waits for ctrl+o");
+	assert.ok(!done.some((line) => line.includes("|")), "no raw table syntax");
 	assert.ok(done.includes("[budget exhausted]"));
 	assert.equal(done.at(-1), "claude-sonnet-5 · 5 tool calls · 41k context · took 1m03s");
+	const expanded = strip(renderAgentResult(details({ result: REPORT }), "", true, plain).render(80));
+	assert.ok(expanded.some((line) => line.startsWith("┌")), "expanded, the table is Pi's boxed table");
+	assert.ok(expanded.some((line) => line.includes("fetch_content")));
 });
 
-test("a background report lands in a Pi custom-message box labeled [agent]", () => {
-	const lines = strip(renderAgentMessage(details({ result: "found it" }), false, plain).render(80));
-	assert.ok(lines.includes(" [agent] scout · done · 5 tool calls · 41k context · 1m03s"));
+const REPORT = [
+	"All five steps worked. **Node 24.x** is `Active LTS`.",
+	"",
+	"| # | Tool | Worked? |",
+	"|---|------|---------|",
+	...Array.from({ length: 6 }, (_, i) => `| ${i + 1} | ${i === 1 ? "fetch_content" : "web_search"} | Yes |`),
+].join("\n");
+
+test("a background report lands in Pi's custom-message box as Markdown, headed by its state", () => {
+	const lines = strip(renderAgentMessage(details({ result: "Found it in `src/refund.ts`." }), false, plain).render(80));
+	assert.ok(lines.includes(" agent ✓ scout · 5 tool calls · 41k context · 1m03s"), lines.join("\n"));
+	assert.ok(lines.includes(" Found it in src/refund.ts."));
 	const named = strip(renderAgentMessage(details({ name: "auth-review", type: "reviewer" }), false, plain).render(80));
-	assert.ok(named.includes(" [agent] auth-review reviewer · done · 5 tool calls · 41k context · 1m03s"));
-	assert.ok(lines.includes(" found it"));
+	assert.ok(named.includes(" agent ✓ auth-review reviewer · 5 tool calls · 41k context · 1m03s"));
+	const failed = strip(renderAgentMessage(details({ status: "failed", error: "No API key for cpa" }), false, plain).render(80));
+	assert.ok(failed.includes(" agent ✗ scout · failed · 5 tool calls · 41k context · 1m03s"));
+	assert.ok(failed.includes(" No API key for cpa"));
+	const long = strip(renderAgentMessage(details({ result: REPORT }), false, plain).render(80));
+	assert.ok(long.some((line) => /^ \.\.\. \(\d+ more lines, /.test(line)));
+	assert.ok(!long.some((line) => line.includes("|") || line.includes("┌")));
+});
+
+test("a long report is cut between blocks, or inside the first block when it alone is too tall", () => {
+	const lines = ["a", "b", "", "c", "d", "e", "", "f", "g", ""];
+	assert.deepEqual(clampAtBlock(lines, 5), { shown: ["a", "b"], hidden: 7 });
+	assert.deepEqual(clampAtBlock(lines, 6), { shown: ["a", "b", "", "c", "d", "e"], hidden: 3 });
+	assert.deepEqual(clampAtBlock(lines, 9), { shown: lines.slice(0, 9), hidden: 0 }, "trailing blank lines are not counted");
+	assert.deepEqual(clampAtBlock(["x1", "x2", "x3", "x4", "", "y"], 3), { shown: ["x1", "x2", "x3"], hidden: 3 });
 });
 
 function viewerRun(overrides: Partial<ConstructorParameters<typeof AgentRun>[0]> = {}): AgentRun {
