@@ -6,11 +6,13 @@
 //   "SLOW ..." - keeps running until a steer arrives, then answers with it
 //   "FAIL ..." - ends with a provider error
 //   "EXIT ..." - exits mid-run
-//   "COMPACT"  - autocompact: stops its run, compacts, then continues the task
+//   "COMPACT"  - autocompact: stops its run, compacts, then asks the parent to continue the task
+//   "COMPACT-REFUSED" - the same, but refuses the parent's continuation prompt
 // Anything else answers "echo: <prompt>" after one tool call.
 let buffer = "";
 let pendingDialog;
 let slow;
+let refuseContinue = false;
 const out = (record) => process.stdout.write(`${JSON.stringify(record)}\n`);
 const usage = { input: 1000, output: 50, cacheRead: 0, cacheWrite: 0, totalTokens: 1050, cost: { total: 0.01 } };
 
@@ -53,12 +55,13 @@ function run(message) {
 	if (message.startsWith("FAIL")) return finish("", "error", "529 overloaded");
 	if (message.startsWith("EXIT")) process.exit(3);
 	if (message.startsWith("COMPACT")) {
+		refuseContinue = message === "COMPACT-REFUSED";
 		out({ type: "extension_ui_request", id: "s1", method: "setStatus", statusKey: "pi-agents-compact", statusText: "compacting" });
 		finish("", "aborted");
 		setTimeout(() => {
 			out({ type: "compaction_start", reason: "manual" });
-			out({ type: "extension_ui_request", id: "s2", method: "setStatus", statusKey: "pi-agents-compact" });
-			run("Compaction completed. Continue.");
+			out({ type: "compaction_end", reason: "manual", result: { summary: "Earlier work.", tokensBefore: 41000 } });
+			out({ type: "extension_ui_request", id: "s2", method: "setStatus", statusKey: "pi-agents-compact", statusText: "continue" });
 		}, 50);
 		return;
 	}
@@ -71,6 +74,10 @@ function handle(record) {
 			out({ type: "response", id: record.id, command: "get_state", success: true, data: { sessionFile: `/tmp/fake-${process.pid}.jsonl` } });
 			return;
 		case "prompt":
+			if (refuseContinue && record.message === "Compaction completed. Continue.") {
+				out({ type: "response", id: record.id, command: "prompt", success: false, error: "No API key for cpa" });
+				return;
+			}
 			out({ type: "response", id: record.id, command: "prompt", success: true, data: { disposition: "started" } });
 			setTimeout(() => run(record.message), 5);
 			return;

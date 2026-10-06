@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentDefinition } from "./agents.js";
-import { BUDGET_STATUS_KEY, COMPACT_STATUS_KEY } from "./child.js";
+import { BUDGET_STATUS_KEY, COMPACT_STATUS_KEY, CONTINUE_AFTER_COMPACTION } from "./child.js";
 import type { AgentsConfig } from "./config.js";
 import { contentText, summarizeToolCall, type ToolCallSummary } from "./format.js";
 import { applyAssistantEvent, type PartialAssistant, startAssistant } from "./stream.js";
@@ -51,7 +51,7 @@ export interface RunSnapshot {
 	maxTurns?: number;
 	/** The parent's instruction files the child also follows. */
 	contextFiles?: string[];
-	/** An inline agent's setup, which no saved file can restore. */
+	/** The setup it ran with, overrides included, so a resume cannot widen its tools. */
 	definition?: AgentDefinition;
 	status: RunStatus;
 	startedAt: number;
@@ -187,7 +187,7 @@ export class AgentRun {
 			autocompact: this.spec.autocompact,
 			maxTurns: this.spec.maxTurns,
 			contextFiles: this.spec.contextFiles,
-			...(this.spec.definition.source === "inline" ? { definition: this.spec.definition } : {}),
+			definition: this.spec.definition,
 			status: this.status,
 			startedAt: this.startedAt,
 			endedAt: this.endedAt,
@@ -228,10 +228,21 @@ export function buildChildArgs(input: {
 /** Pure: the child's environment. HERDR_PANE_ID is dropped so a child never drives the parent's pane state. */
 export function buildChildEnv(
 	base: NodeJS.ProcessEnv,
-	run: { id: string; name: string; type: string; maxTurns: number; autocompact?: number; contextFiles?: string[]; loadContextFiles: boolean },
+	run: {
+		id: string;
+		name: string;
+		type: string;
+		maxTurns: number;
+		autocompact?: number;
+		contextFiles?: string[];
+		loadContextFiles: boolean;
+		/** Allowlist, enforced on every call in the child, codemode's included. */
+		tools?: string[];
+		denyTools?: string[];
+	},
 ): NodeJS.ProcessEnv {
 	const env: NodeJS.ProcessEnv = { ...base };
-	for (const key of ["HERDR_PANE_ID", "PI_AGENTS_AUTOCOMPACT", "PI_AGENTS_CONTEXT_FILES", "PI_AGENTS_NO_CONTEXT_FILES"]) delete env[key];
+	for (const key of ["HERDR_PANE_ID", "PI_AGENTS_AUTOCOMPACT", "PI_AGENTS_CONTEXT_FILES", "PI_AGENTS_NO_CONTEXT_FILES", "PI_AGENTS_TOOLS", "PI_AGENTS_DENY_TOOLS"]) delete env[key];
 	return {
 		...env,
 		PI_AGENTS_CHILD: "1",
@@ -241,6 +252,8 @@ export function buildChildEnv(
 		...(run.autocompact ? { PI_AGENTS_AUTOCOMPACT: String(run.autocompact) } : {}),
 		...(run.contextFiles?.length ? { PI_AGENTS_CONTEXT_FILES: JSON.stringify(run.contextFiles) } : {}),
 		...(run.loadContextFiles ? {} : { PI_AGENTS_NO_CONTEXT_FILES: "1" }),
+		...(run.tools?.length ? { PI_AGENTS_TOOLS: JSON.stringify(run.tools) } : {}),
+		...(run.denyTools?.length ? { PI_AGENTS_DENY_TOOLS: JSON.stringify(run.denyTools) } : {}),
 		// The env contract pi-auto-permissions already reads for subagent children.
 		PI_SUBAGENT_CHILD: "1",
 		PI_SUBAGENT_RUN_ID: run.id,
@@ -364,12 +377,14 @@ export class AgentManager {
 		const definition = run.spec.definition;
 		const resume = Boolean(run.sessionFile);
 		if (resume && !run.log.length) run.log = loadLog(run.sessionFile!);
+		// --tools only chooses what is declared (MCP tools stay callable from scripts), so the child also enforces both lists per call.
+		const excludeTools = [...new Set([...config.excludeTools, ...(definition.disallowedTools ?? [])])];
 		const args = buildChildArgs({
 			model: run.spec.model,
 			thinking: run.spec.thinking,
 			appendPrompt: run.spec.appendPrompt,
 			tools: definition.tools,
-			excludeTools: [...new Set([...config.excludeTools, ...(definition.disallowedTools ?? [])])],
+			excludeTools,
 			contextFiles: definition.contextFiles,
 			name: `${run.name}: ${run.description}`,
 			sessionFile: resume ? run.sessionFile : undefined,
@@ -392,6 +407,8 @@ export class AgentManager {
 				autocompact: run.spec.autocompact,
 				contextFiles: run.spec.contextFiles,
 				loadContextFiles: definition.contextFiles,
+				tools: definition.tools,
+				denyTools: excludeTools,
 			}),
 		});
 		proc.onEvent = (event) => this.handleEvent(run, proc, event);
@@ -666,6 +683,27 @@ export class AgentManager {
 		}
 	}
 
+	/**
+	 * Resume a task the child stopped to compact. The parent sends the prompt
+	 * so that a refusal comes back as a response and fails the run, where an
+	 * extension's own sendUserMessage would fail silently and leave it hanging.
+	 */
+	private continueAfterCompaction(run: AgentRun, proc: RpcProcess): void {
+		run.compacting = false;
+		const seq = run.launchSeq;
+		const current = () => seq === run.launchSeq && run.status === "running" && run.proc === proc;
+		proc.request<{ disposition?: string }>({ type: "prompt", message: CONTINUE_AFTER_COMPACTION }).then(
+			(accepted) => {
+				if (accepted?.disposition === "handled" && current()) this.finish(run, "done");
+			},
+			(error: unknown) => {
+				if (!current()) return;
+				run.error = `autocompact could not resume the task: ${error instanceof Error ? error.message : String(error)}`;
+				this.finish(run, "failed");
+			},
+		);
+	}
+
 	private handleUi(run: AgentRun, proc: RpcProcess, request: UiRequest): void {
 		switch (request.method) {
 			case "select":
@@ -682,12 +720,11 @@ export class AgentManager {
 				return;
 			case "setStatus":
 				if (request.statusKey === COMPACT_STATUS_KEY) {
-					const text = request.statusText ?? "";
-					run.compacting = text === "compacting";
-					if (run.compacting) run.notice("autocompact: compacting context, then continuing");
-					if (text.startsWith("stalled") && run.busy) {
-						run.error = `autocompact could not resume the task (${text.slice("stalled".length).replace(/^:\s*/, "")})`;
-						this.finish(run, "failed");
+					if (request.statusText === "compacting") {
+						run.compacting = true;
+						run.notice("autocompact: compacting context, then continuing");
+					} else if (request.statusText === "continue" && run.compacting) {
+						this.continueAfterCompaction(run, proc);
 					}
 					this.changed();
 					return;

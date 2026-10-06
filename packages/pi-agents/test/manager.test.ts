@@ -250,10 +250,17 @@ test("a run stopped for autocompact is not finished: it compacts and continues t
 		manager.start(run, "COMPACT");
 		await manager.waitFor(run);
 		assert.equal(run.status, "done");
-		assert.equal(run.result, "echo: Compaction completed. Continue.");
+		assert.equal(run.result, "echo: Compaction completed. Continue.", "the parent's prompt continued the task");
 		assert.equal(finished.length, 1, "one result, after the continuation");
 		const notices = run.log.filter((entry) => entry.kind === "notice").map((entry) => (entry as { text: string }).text);
 		assert.ok(notices.includes("autocompact: compacting context, then continuing"));
+		assert.ok(run.log.some((entry) => entry.kind === "compaction"), "the compaction is in the transcript");
+
+		const refused = create("refused");
+		manager.start(refused, "COMPACT-REFUSED");
+		await manager.waitFor(refused);
+		assert.equal(refused.status, "failed", "a continuation the child refuses fails the run instead of leaving it hanging");
+		assert.match(refused.error ?? "", /autocompact could not resume the task: No API key for cpa/);
 	} finally {
 		await manager.dispose();
 	}
@@ -318,7 +325,7 @@ test("agents are composed per call or start from a saved one, run behind codemod
 		assert.equal(foreground.structuredContent?.type, "", "composed inline, so no saved type");
 		assert.match(foreground.content[0]!.text, /^echo: hi\n\n\[check-the-thing \(id \w+\) · done · 1 tool call · /);
 
-		const saved = await call({ agent: "reviewer", run_in_background: false, autocompact: 20 });
+		const saved = await call({ agent: "reviewer", run_in_background: false, autocompact: 20, tools: ["read"] });
 		assert.equal(saved.structuredContent?.type, "reviewer");
 
 		const background = await call({ name: "bg" });
@@ -334,7 +341,8 @@ test("agents are composed per call or start from a saved one, run behind codemod
 		assert.equal(inline.definition?.prompt, "Be brief.", "an inline agent's setup is kept for resume");
 		assert.deepEqual(inline.contextFiles, ["/ws/AGENTS.md"], "children follow the parent's instruction files");
 		const reviewer = runs.find((entry) => (entry.data as { name: string }).name === saved.structuredContent?.name)!.data as { definition?: AgentDefinition; autocompact?: number };
-		assert.equal(reviewer.definition, undefined, "a saved agent is restored from its file");
+		assert.deepEqual(reviewer.definition?.tools, ["read"], "a resume keeps the call's overrides, so it cannot widen the agent's tools");
+		assert.equal(reviewer.definition?.prompt, "You review diffs.");
 		assert.equal(reviewer.autocompact, 20, "a call overrides the saved agent");
 
 		// A follow-up to the finished agent reports back again (the viewer uses the same path).
@@ -468,7 +476,7 @@ test("a child adds the parent's instruction files, loads a directory's AGENTS.md
 		await on("agent_settled")({}, ctx);
 		assert.ok(compactOptions, "compacts through Pi, so compaction extensions apply");
 		(compactOptions as unknown as { onError(error: Error): void }).onError(new Error("Nothing to compact (session too small)"));
-		assert.deepEqual(mock.sentUserMessages.at(-1), { text: "Compaction completed. Continue.", options: undefined });
+		assert.deepEqual(statuses.at(-1), ["pi-agents-compact", "continue"]);
 		await on("turn_end")({ toolResults: [{}] }, ctx);
 		await on("before_provider_request")({ payload: {} }, ctx);
 		assert.equal(aborted, 1, "too little history to summarize yet: wait for the context to grow, without giving up");
@@ -479,9 +487,28 @@ test("a child adds the parent's instruction files, loads a directory's AGENTS.md
 		assert.equal(aborted, 2);
 		await on("agent_settled")({}, ctx);
 		compactOptions!.onComplete!();
-		assert.deepEqual(mock.sentUserMessages.at(-1), { text: "Compaction completed. Continue.", options: undefined });
-		assert.deepEqual(statuses.at(-1), ["pi-agents-compact", undefined]);
+		assert.deepEqual(statuses.at(-1), ["pi-agents-compact", "continue"], "the parent sends the continuation, so a refusal reaches it");
+		assert.equal(mock.sentUserMessages.length, 0, "never the extension's own sendUserMessage, which fails silently");
 	} finally {
 		for (const key of ["PI_AGENTS_CHILD", "PI_AGENTS_AUTOCOMPACT", "PI_AGENTS_CONTEXT_FILES"]) delete process.env[key];
+	}
+});
+
+test("a child enforces its tool allowlist on every call, including tools only scripts can reach", async () => {
+	Object.assign(process.env, { PI_AGENTS_CHILD: "1", PI_AGENTS_TOOLS: JSON.stringify(["read", "codemode", "docs_*"]), PI_AGENTS_DENY_TOOLS: JSON.stringify(["Agent"]) });
+	try {
+		const mock = createMockPi();
+		piAgents(mock.pi);
+		const call = (event: Record<string, unknown>) => mock.events.get("tool_call")![0]!(event, { abort: () => {} }) as Promise<{ block?: boolean; reason?: string } | undefined>;
+		assert.equal(await call({ toolName: "read" }), undefined);
+		assert.equal(await call({ toolName: "codemode" }), undefined);
+		assert.equal(await call({ toolName: "docs_search", parentToolCallId: "c1" }), undefined, "patterns match as in Pi's --tools");
+		const hidden = await call({ toolName: "directory_delete_user", parentToolCallId: "c1" });
+		assert.equal(hidden?.block, true, "a codemode-exposed tool, such as an MCP server's, that the allowlist does not name");
+		assert.match(hidden!.reason!, /not among this agent's tools \(read, codemode, docs_\*\)/);
+		assert.equal((await call({ toolName: "bash", parentToolCallId: "c1" }))?.block, true, "a script cannot reach past the allowlist");
+		assert.equal((await call({ toolName: "Agent" }))?.block, true);
+	} finally {
+		for (const key of ["PI_AGENTS_CHILD", "PI_AGENTS_TOOLS", "PI_AGENTS_DENY_TOOLS"]) delete process.env[key];
 	}
 });

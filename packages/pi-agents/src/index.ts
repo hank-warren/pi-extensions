@@ -162,6 +162,7 @@ export default function piAgents(pi: ExtensionAPI): void {
 			}
 		}
 		for (const snapshot of snapshots.values()) {
+			// The definition it ran with; a saved file can have changed or gone since.
 			const definition = snapshot.definition ?? agents.get(snapshot.type) ?? { name: snapshot.type, description: "", prompt: "", contextFiles: true, source: "inline" as const };
 			manager.restore(snapshot, definition);
 		}

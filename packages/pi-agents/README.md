@@ -139,7 +139,7 @@ Report findings as file:line, severity, and why. No style nits.
 | Field | Meaning |
 |---|---|
 | `name`, `description` | Required. The description is what the parent model uses to choose the agent. Files without a `name` are skipped as documentation. |
-| `tools` | Allowlist, as a comma string or YAML list. Omit it to give the agent every tool its extensions provide. |
+| `tools` | Allowlist, as a comma string or YAML list; `*` matches any characters. Omit it to give the agent every tool its extensions provide. The child refuses every other call, including calls a codemode script makes, so an MCP or codemode-only tool the list does not name is out of reach too. |
 | `disallowedTools` | Removed from whatever the agent would otherwise get. |
 | `model` | `provider/id`. Omit it, or write `inherit`, to use the parent's current model. An unknown model is an error, never a silent fallback. |
 | `thinking` (or `effort`) | `off` … `max`. Default: the parent's current level. |
@@ -154,7 +154,7 @@ Report findings as file:line, severity, and why. No style nits.
 
 **`autocompact` compacts it earlier**, at a percentage of its own model's window. Ask two reviewers for `autocompact: 10` and the `claude-opus-5-5` one compacts at 100k while the `gpt-6.1-sol` one compacts at 27.2k. Set it per call, per saved agent, or for every agent in the config.
 
-Compaction is Pi's own, so compaction extensions apply inside agents too: `pi-codex-compaction` still gives GPT models native compaction. Pi has no per-session threshold, so the child stops before its next model request, compacts once the run settles, and continues the task with `Compaction completed. Continue.` After a compaction it waits for the context to grow by half the threshold before compacting again, so a context that cannot shrink below the threshold does not compact every turn. Pi only summarizes history older than its `compaction.keepRecentTokens` (20k by default), so a threshold below that has nothing to compact at first; autocompact then tries again once the context has grown by half the threshold. If compaction fails for any other reason, Pi's own threshold takes over for the rest of that agent's session. The list shows `41k/100k autocompact` for such an agent and `41k/1M` for one without.
+Compaction is Pi's own, so compaction extensions apply inside agents too: `pi-codex-compaction` still gives GPT models native compaction. Pi has no per-session threshold, so the child stops before its next model request, compacts once the run settles, and the parent continues the task with `Compaction completed. Continue.` If the child refuses that prompt, the run fails with the reason instead of hanging. After a compaction it waits for the context to grow by half the threshold before compacting again, so a context that cannot shrink below the threshold does not compact every turn. Pi only summarizes history older than its `compaction.keepRecentTokens` (20k by default), so a threshold below that has nothing to compact at first; autocompact then tries again once the context has grown by half the threshold. If compaction fails for any other reason, Pi's own threshold takes over for the rest of that agent's session. The list shows `41k/100k autocompact` for such an agent and `41k/1M` for one without.
 
 **Turns are budgeted.** At 80% of `maxTurns` the agent is told to stop exploring and finish; at 100% every further tool call is refused and it must write its final report. If it keeps calling tools, the run is aborted, and the result says `turn budget exhausted`.
 

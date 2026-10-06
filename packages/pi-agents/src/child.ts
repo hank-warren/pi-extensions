@@ -6,7 +6,12 @@ import { formatTokens } from "./format.js";
 
 /** Status key the child uses to tell the parent its turn budget ran out. */
 export const BUDGET_STATUS_KEY = "pi-agents-budget";
-/** Status key for autocompact: `compacting` while the child compacts between runs, `stalled: …` if it cannot resume. */
+/**
+ * Status key for autocompact: `compacting` while the child compacts between
+ * runs, then `continue` for the parent to resume the task with an RPC prompt,
+ * whose response says whether it was accepted (an extension's own
+ * sendUserMessage fails silently).
+ */
 export const COMPACT_STATUS_KEY = "pi-agents-compact";
 /** What the child says to itself to pick the task back up after compacting. */
 export const CONTINUE_AFTER_COMPACTION = "Compaction completed. Continue.";
@@ -140,6 +145,22 @@ export function workedPaths(toolName: string, input: unknown, cwd: string): stri
 	return [...new Set(out)];
 }
 
+/** `*` matches any characters, as in Pi's `--tools`. */
+function toolPattern(entry: string): RegExp {
+	return new RegExp(`^${entry.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`);
+}
+
+/**
+ * Whether a tool may run under an agent's allowlist and denylist. Enforced on
+ * every call, codemode's nested ones included, because Pi's `--tools` only
+ * chooses what is declared: MCP and codemode-exposed tools stay callable from
+ * scripts. Pure, for tests.
+ */
+export function toolAllowed(name: string, allow: string[] | undefined, deny: string[]): boolean {
+	if (deny.some((entry) => toolPattern(entry).test(name))) return false;
+	return !allow || allow.some((entry) => toolPattern(entry).test(name));
+}
+
 function envInt(name: string): number | undefined {
 	const value = Number(process.env[name]);
 	return Number.isInteger(value) && value > 0 ? value : undefined;
@@ -168,9 +189,10 @@ export function registerChild(pi: ExtensionAPI): void {
 	const autocompact = Number.isFinite(percent) && percent > 0 && percent < 100 ? percent : undefined;
 	const instructions = process.env.PI_AGENTS_NO_CONTEXT_FILES !== "1";
 	const inherited = envList("PI_AGENTS_CONTEXT_FILES");
+	const allowTools = process.env.PI_AGENTS_TOOLS ? envList("PI_AGENTS_TOOLS") : undefined;
+	const denyTools = envList("PI_AGENTS_DENY_TOOLS");
 	const budget: BudgetState = { turns: 0, warned: false, exhausted: false, blockedCalls: 0 };
 	const compaction: AutocompactState = { armed: false, interrupted: false, compacting: false, floorPending: false, disabled: false };
-	let resuming = false;
 
 	/** Instruction files in the system prompt of the current run, by real path. */
 	const inPrompt = new Set<string>();
@@ -191,8 +213,7 @@ export function registerChild(pi: ExtensionAPI): void {
 
 	pi.on("before_agent_start", (event, ctx) => {
 		// A continuation after compacting is the same task: its turns keep counting.
-		if (!resuming) budgetAtPromptStart(budget);
-		resuming = false;
+		if (event.prompt !== CONTINUE_AFTER_COMPACTION) budgetAtPromptStart(budget);
 		ctx.ui.setStatus(BUDGET_STATUS_KEY, undefined);
 		arm(ctx);
 		if (!instructions) return;
@@ -243,7 +264,11 @@ export function registerChild(pi: ExtensionAPI): void {
 	// Tools stay declared (some providers reject a transcript with tool calls
 	// but no tools), but every call is refused once the budget is gone. A model
 	// that keeps calling anyway is aborted, so the run always ends.
-	pi.on("tool_call", (_event, ctx) => {
+	pi.on("tool_call", (event, ctx) => {
+		const name = (event as { toolName: string }).toolName;
+		if (!toolAllowed(name, allowTools, denyTools)) {
+			return { block: true, reason: `${name} is not among this agent's tools (${allowTools?.join(", ") ?? "all but excluded"}). Use one of those instead.` };
+		}
 		if (!budget.exhausted) return;
 		budget.blockedCalls += 1;
 		if (budget.blockedCalls > 3) ctx.abort();
@@ -278,14 +303,7 @@ export function registerChild(pi: ExtensionAPI): void {
 			} else {
 				compaction.floorPending = true;
 			}
-			try {
-				resuming = true;
-				pi.sendUserMessage(CONTINUE_AFTER_COMPACTION);
-				ctx.ui.setStatus(COMPACT_STATUS_KEY, undefined);
-			} catch (sendError) {
-				resuming = false;
-				ctx.ui.setStatus(COMPACT_STATUS_KEY, `stalled: ${sendError instanceof Error ? sendError.message : String(sendError)}`);
-			}
+			ctx.ui.setStatus(COMPACT_STATUS_KEY, "continue");
 		};
 		ctx.compact({ onComplete: () => resume(), onError: (error) => resume(error) });
 	});
