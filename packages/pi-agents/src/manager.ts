@@ -4,6 +4,7 @@ import type { AgentDefinition } from "./agents.js";
 import { BUDGET_STATUS_KEY, COMPACT_STATUS_KEY } from "./child.js";
 import type { AgentsConfig } from "./config.js";
 import { contentText, summarizeToolCall, type ToolCallSummary } from "./format.js";
+import { applyAssistantEvent, type PartialAssistant, startAssistant } from "./stream.js";
 import { RpcProcess, type UiRequest } from "./rpc.js";
 import { loadLog } from "./transcript.js";
 import type { WorktreeInfo } from "./worktree.js";
@@ -17,7 +18,11 @@ export type RunStatus = "queued" | "running" | "done" | "failed" | "stopped";
  */
 export type LogEntry =
 	| { kind: "message"; message: ChildMessage }
-	| { kind: "notice"; text: string };
+	| { kind: "notice"; text: string }
+	| { kind: "compaction"; summary: string; tokensBefore: number; timestamp: number };
+
+/** What a viewer hears from a run: the child's own RPC events, plus pi-agents notices. */
+export type RunEvent = Record<string, unknown> & { type?: unknown };
 
 /** A child message as it arrives over RPC; typed loosely because it is foreign data. */
 export type ChildMessage = Record<string, unknown> & { role?: string };
@@ -105,6 +110,11 @@ export class AgentRun {
 	partials = new Map<string, ToolPartial>();
 	/** Assistant text streaming right now, before its message ends. */
 	streaming = "";
+	/** The whole assistant message streaming right now: thinking, text and tool calls. */
+	partial: PartialAssistant | undefined;
+	/** Pi is compacting the child's context right now. */
+	compactingNow = false;
+	private readonly listeners = new Set<(event: RunEvent) => void>();
 	/** Title of a permission/dialog request waiting on the user, if any. */
 	approval: string | undefined;
 	proc: RpcProcess | undefined;
@@ -142,6 +152,23 @@ export class AgentRun {
 
 	notice(text: string): void {
 		this.push({ kind: "notice", text });
+		this.emit({ type: "pi-agents-notice", text });
+	}
+
+	/** Follow this run's events as they arrive, after the manager has applied them. */
+	onEvent(listener: (event: RunEvent) => void): () => void {
+		this.listeners.add(listener);
+		return () => this.listeners.delete(listener);
+	}
+
+	emit(event: RunEvent): void {
+		for (const listener of this.listeners) {
+			try {
+				listener(event);
+			} catch {
+				// A broken view must not break the run.
+			}
+		}
 	}
 
 	snapshot(): RunSnapshot {
@@ -477,6 +504,8 @@ export class AgentManager {
 		run.status = status;
 		run.endedAt = Date.now();
 		run.streaming = "";
+		run.partial = undefined;
+		run.compactingNow = false;
 		run.approval = undefined;
 		run.compacting = false;
 		run.runningTools.clear();
@@ -521,13 +550,24 @@ export class AgentManager {
 
 	private handleEvent(run: AgentRun, proc: RpcProcess, event: Record<string, unknown>): void {
 		if (run.proc !== proc) return;
+		this.applyEvent(run, event);
+		run.emit(event);
+	}
+
+	private applyEvent(run: AgentRun, event: Record<string, unknown>): void {
 		switch (event.type) {
+			case "message_start": {
+				const message = event.message as ChildMessage | undefined;
+				if (message?.role === "assistant") run.partial = startAssistant();
+				return;
+			}
 			case "message_update": {
-				const update = event.assistantMessageEvent as { type?: string; delta?: string } | undefined;
-				if (update?.type === "text_delta" && typeof update.delta === "string") {
-					run.streaming = (run.streaming + update.delta).slice(-4000);
-					this.changed();
-				}
+				const update = event.assistantMessageEvent as Record<string, unknown> | undefined;
+				if (!update) return;
+				run.partial ??= startAssistant();
+				applyAssistantEvent(run.partial, update);
+				if (update.type === "text_delta" && typeof update.delta === "string") run.streaming = (run.streaming + update.delta).slice(-4000);
+				this.changed();
 				return;
 			}
 			case "message_end": {
@@ -547,6 +587,7 @@ export class AgentManager {
 					run.lastErrorMessage = typeof message.errorMessage === "string" ? message.errorMessage : undefined;
 					if (text) run.lastAssistant = text;
 					run.streaming = "";
+					run.partial = undefined;
 				}
 				if (message.role === "toolResult") run.partials.delete(String(message.toolCallId ?? ""));
 				run.push({ kind: "message", message });
@@ -586,10 +627,25 @@ export class AgentManager {
 				run.runningTools.clear();
 				this.abortDialogs(run);
 				return;
+			case "agent_end":
+				run.partial = undefined;
+				run.streaming = "";
+				return;
 			case "compaction_start":
-				run.notice("compacting context");
+				run.compactingNow = true;
 				this.changed();
 				return;
+			case "compaction_end": {
+				run.compactingNow = false;
+				const result = event.result as { summary?: unknown; tokensBefore?: unknown } | undefined;
+				if (result && typeof result.summary === "string") {
+					run.push({ kind: "compaction", summary: result.summary, tokensBefore: Number(result.tokensBefore) || 0, timestamp: Date.now() });
+				} else if (!event.aborted && typeof event.errorMessage === "string") {
+					run.notice(`compaction failed: ${event.errorMessage}`);
+				}
+				this.changed();
+				return;
+			}
 			case "auto_retry_start":
 				run.notice(`retrying after ${String(event.errorMessage ?? "a provider error")}`);
 				this.changed();

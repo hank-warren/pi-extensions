@@ -9,7 +9,7 @@ import { AgentPanel } from "./panel.js";
 import { type AgentDetails, detailsOf, renderAgentMessage, statsLine } from "./render.js";
 import { registerTools, resultText, sendToAgent, type ToolHost, toolExposure } from "./tools.js";
 import { loadLog } from "./transcript.js";
-import { AgentViewer } from "./viewer.js";
+import { type AnyToolDefinition, AgentViewer, type ViewerSettings } from "./viewer.js";
 
 const RUN_ENTRY = "pi-agents-run";
 const RESULT_MESSAGE = "pi-agents-result";
@@ -52,6 +52,16 @@ export default function piAgents(pi: ExtensionAPI): void {
 	let config: AgentsConfig = { ...DEFAULT_CONFIG };
 	let agents = new Map<string, AgentDefinition>();
 	const notify = new Set<string>();
+	/**
+	 * How the main session resolves each tool's renderers, kept per tool name as
+	 * Pi resolves them, so an agent's transcript draws every tool the way the
+	 * main session does: the tool's own renderers, extension overrides, built-ins.
+	 */
+	const rendererChains = new Map<string, () => unknown>();
+	(pi as { registerToolRenderer?: (resolver: (toolName: string, next: () => unknown) => unknown) => void }).registerToolRenderer?.((toolName, next) => {
+		rendererChains.set(toolName, next);
+		return next();
+	});
 	/** This session's instruction files, which its agents follow too. Tool contexts cannot read them, so they are kept from each prompt. */
 	let contextFiles: string[] = [];
 
@@ -91,15 +101,25 @@ export default function piAgents(pi: ExtensionAPI): void {
 		if (!run.log.length && run.sessionFile) run.log = loadLog(run.sessionFile);
 		const current = manager;
 		// In the editor's place, like Pi's own selectors, rather than a floating box.
+		let settings: ViewerSettings | undefined;
+		try {
+			settings = (pi as { getSettings?: () => ViewerSettings }).getSettings?.();
+		} catch {
+			// Older Pi: its defaults.
+		}
 		await ui.custom<void>((tui, theme, keybindings, done) =>
 			new AgentViewer(
 				tui,
 				theme,
-				keybindings,
 				run,
 				current,
 				() => done(),
 				(text) => sendToAgent({ manager: current, notify }, run, text),
+				{
+					keys: keybindings,
+					renderers: (name) => rendererChains.get(name)?.() as AnyToolDefinition | undefined,
+					settings,
+				},
 			));
 	};
 	const panel = new AgentPanel({ subscribe: (listener) => manager.subscribe(listener), list: () => manager.list(), stop: (run) => manager.stop(run) }, openViewer);

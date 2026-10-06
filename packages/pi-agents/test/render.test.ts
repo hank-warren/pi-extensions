@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { initTheme, type Theme } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { composeAgent, parseAgentFile } from "../src/agents.js";
 
 const scoutAgent = parseAgentFile("---\nname: scout\ndescription: Finds things.\n---\n", "/x/scout.md").agent!;
@@ -8,6 +9,7 @@ const reviewerAgent = { ...composeAgent(undefined, {}), name: "reviewer", source
 import { AgentManager, AgentRun } from "../src/manager.js";
 import { AgentPanel } from "../src/panel.js";
 import { type AgentDetails, renderAgentCall, renderAgentMessage, renderAgentResult } from "../src/render.js";
+import { applyAssistantEvent, startAssistant } from "../src/stream.js";
 import { AgentViewer, type ViewerKeys } from "../src/viewer.js";
 
 // Pi's components read its global theme, as they do in a real session.
@@ -21,8 +23,8 @@ const plain: Theme = {
 } as unknown as Theme;
 const visible = (line: string) => line.replace(/\x1b\[[0-9;]*m/g, "").length;
 const keys: ViewerKeys = {
-	matches: (data, id) => (id === "app.tools.expand" ? data === "\x0f" : id === "tui.select.cancel" ? data === "\x1b" : false),
-	getKeys: (id) => (id === "app.tools.expand" ? ["ctrl+o"] : []),
+	matches: (data, id) => ({ "app.tools.expand": "\x0f", "app.thinking.toggle": "\x14", "tui.select.cancel": "\x1b" } as Record<string, string>)[id] === data,
+	getKeys: (id) => ({ "app.tools.expand": ["ctrl+o"], "app.thinking.toggle": ["ctrl+t"] } as Record<string, string[]>)[id] ?? [],
 };
 
 function details(overrides: Partial<AgentDetails> = {}): AgentDetails {
@@ -107,7 +109,7 @@ function idleManager(): AgentManager {
 
 const fakeTui = () => ({ terminal: { rows: 60, columns: 100 }, requestRender: () => {} });
 
-test("the viewer renders a child's session with Pi's own components and takes typed steering", async () => {
+test("the viewer renders a child's history with Pi's own components and takes typed steering", async () => {
 	const manager = idleManager();
 	const run = viewerRun();
 	run.status = "running";
@@ -116,14 +118,17 @@ test("the viewer renders a child's session with Pi's own components and takes ty
 		{ kind: "message", message: { role: "assistant", content: [{ type: "text", text: "Searching." }, { type: "toolCall", id: "c1", name: "bash", arguments: { command: "rg -n refund" } }], stopReason: "toolUse", timestamp: 1_000_000 } },
 		{ kind: "message", message: { role: "toolResult", toolCallId: "c1", toolName: "bash", isError: false, content: [{ type: "text", text: "src/refund.ts:12: export function refund()" }], timestamp: 1_042_000 } },
 		{ kind: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "c2", name: "read", arguments: { path: "src/refund.ts" } }], stopReason: "toolUse" } },
-		{ kind: "notice", text: "compacting context" },
+		{ kind: "notice", text: "turn budget nearly used" },
+		{ kind: "compaction", summary: "Earlier work summarized.", tokensBefore: 41_000, timestamp: 1_050_000 },
+		{ kind: "message", message: { role: "toolResult", toolCallId: "gone", toolName: "bash", content: [{ type: "text", text: "orphan output" }] } },
 	);
+	run.runningTools.add("c2");
 	run.partials.set("c2", { content: [{ type: "text", text: "partial file" }] });
 	const sent: string[] = [];
-	const viewer = new AgentViewer(fakeTui() as never, plain, keys, run, manager, () => {}, async (text) => {
+	const viewer = new AgentViewer(fakeTui() as never, plain, run, manager, () => {}, async (text) => {
 		sent.push(text);
 		return "steered";
-	});
+	}, { keys });
 	const screen = strip(viewer.render(100)).join("\n");
 	assert.match(screen, / scout map payment flow/);
 	assert.doesNotMatch(screen, /scout scout/, "the type is not repeated when it is the name");
@@ -133,8 +138,11 @@ test("the viewer renders a child's session with Pi's own components and takes ty
 	assert.match(screen, /src\/refund\.ts:12: export function refund\(\)/, "the tool's output");
 	assert.match(screen, /Took 42/, "when the call really ran, not when the viewer opened");
 	assert.match(screen, /read src\/refund\.ts/, "Pi's read renderer");
-	assert.match(screen, /compacting context/);
-	assert.match(screen, /enter steer · ↑↓ scroll · ctrl\+o expand · esc back/);
+	assert.match(screen, /turn budget nearly used/);
+	assert.match(screen, /compact/i, "Pi's compaction summary component");
+	assert.match(screen, /bash result: orphan output/, "a result whose call is gone is kept");
+	assert.match(screen, /Working\.\.\./, "Pi's working line while the agent runs");
+	assert.match(screen, /enter steer · ↑↓ scroll · ctrl\+o expand · ctrl\+t hide thinking · esc back/);
 	assert.doesNotMatch(screen, /ctrl\+x/, "ctrl+x is Pi's copy key; stopping lives in the list");
 
 	for (const key of "go".split("")) viewer.handleInput(key);
@@ -146,42 +154,83 @@ test("the viewer renders a child's session with Pi's own components and takes ty
 	await manager.dispose();
 });
 
+test("live, the viewer streams thinking, text and tool calls the way Pi's own session does", async () => {
+	const manager = idleManager();
+	const run = viewerRun();
+	run.status = "running";
+	const viewer = new AgentViewer(fakeTui() as never, plain, run, manager, () => {}, async () => "steered", { keys, settings: { hideThinkingBlock: false } });
+	const feed = (event: Record<string, unknown>) => {
+		// What the manager does before a viewer hears an event.
+		if (event.type === "message_start" && (event.message as { role: string }).role === "assistant") run.partial = startAssistant();
+		if (event.type === "message_update") applyAssistantEvent(run.partial!, event.assistantMessageEvent as Record<string, unknown>);
+		if (event.type === "message_end") run.partial = undefined;
+		run.emit(event);
+	};
+	const screen = () => strip(viewer.render(100)).join("\n");
+	feed({ type: "message_start", message: { role: "user", content: "Check the diff." } });
+	feed({ type: "message_start", message: { role: "assistant", content: [] } });
+	feed({ type: "message_update", assistantMessageEvent: { type: "thinking_start", contentIndex: 0 } });
+	feed({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "Need the diff first." } });
+	feed({ type: "message_update", assistantMessageEvent: { type: "toolcall_start", contentIndex: 1, id: "t1", toolName: "bash" } });
+	feed({ type: "message_update", assistantMessageEvent: { type: "toolcall_delta", contentIndex: 1, delta: '{"command":"git di' } });
+	assert.match(screen(), /Check the diff\./);
+	assert.match(screen(), /Need the diff first\./, "thinking shows, as the user's setting says");
+	assert.match(screen(), /\$ git di/, "a tool call shows while its arguments still stream");
+	feed({ type: "message_update", assistantMessageEvent: { type: "toolcall_delta", contentIndex: 1, delta: 'ff --stat"}' } });
+	const call = { type: "toolCall", id: "t1", name: "bash", arguments: { command: "git diff --stat" } };
+	feed({ type: "message_end", message: { role: "assistant", content: [{ type: "thinking", thinking: "Need the diff first." }, call], stopReason: "toolUse" } });
+	feed({ type: "tool_execution_start", toolCallId: "t1", toolName: "bash", args: call.arguments });
+	feed({ type: "tool_execution_start", toolCallId: "t1/1", parentToolCallId: "t1", toolName: "read", args: { path: "x" } });
+	feed({ type: "tool_execution_update", toolCallId: "t1", partialResult: { content: [{ type: "text", text: " a.ts | 2 +-" }] } });
+	assert.match(screen(), /\$ git diff --stat/);
+	assert.match(screen(), /a\.ts \| 2 \+-/, "partial output streams into the row");
+	assert.doesNotMatch(screen(), /read x/, "a script's nested calls are drawn by the script's own row");
+	feed({ type: "tool_execution_end", toolCallId: "t1", result: { content: [{ type: "text", text: " a.ts | 2 +-\n 1 file changed" }] }, isError: false });
+	assert.match(screen(), /1 file changed/);
+
+	viewer.handleInput("\x14");
+	assert.doesNotMatch(screen(), /Need the diff first\./, "Pi's thinking toggle hides it");
+	assert.match(screen(), /Thinking\.\.\./);
+	assert.match(screen(), /ctrl\+t show thinking/);
+	viewer.dispose();
+	await manager.dispose();
+});
+
+test("tools are drawn with the renderers the main session resolves for them", async () => {
+	const manager = idleManager();
+	const run = viewerRun();
+	run.log.push(
+		{ kind: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "s1", name: "codemode", arguments: { code: "return 1" } }], stopReason: "toolUse" } },
+		{ kind: "message", message: { role: "toolResult", toolCallId: "s1", toolName: "codemode", content: [{ type: "text", text: "1" }] } },
+	);
+	const codemode = {
+		renderCall: () => new Text("codemode script (main session's renderer)", 0, 0),
+		renderResult: () => new Text("✓ read a.ts 3ms", 0, 0),
+	};
+	const viewer = new AgentViewer(fakeTui() as never, plain, run, manager, () => {}, async () => "steered", {
+		keys,
+		renderers: (name) => (name === "codemode" ? (codemode as never) : undefined),
+		settings: { hideThinkingBlock: true },
+	});
+	const screen = strip(viewer.render(100)).join("\n");
+	assert.match(screen, /codemode script \(main session's renderer\)/);
+	assert.match(screen, /✓ read a\.ts 3ms/);
+	viewer.dispose();
+	await manager.dispose();
+});
+
 test("no viewer line is wider than the terminal, whatever the child sends", async () => {
 	const manager = idleManager();
 	const run = viewerRun({ description: "two\nlines" });
 	run.status = "running";
 	run.approval = `Allow ${"x".repeat(300)}?`;
-	const viewer = new AgentViewer(fakeTui() as never, plain, keys, run, manager, () => {}, async () => "steered");
+	const viewer = new AgentViewer(fakeTui() as never, plain, run, manager, () => {}, async () => "steered", { keys });
 	for (const width of [100, 40]) {
 		for (const line of viewer.render(width)) {
 			assert.ok(visible(line) <= width, `${visible(line)} > ${width}: ${line.slice(0, 60)}`);
 			assert.ok(!line.includes("\n"), "a line break inside a line corrupts Pi's diff renderer");
 		}
 	}
-	viewer.dispose();
-	await manager.dispose();
-});
-
-test("the viewer follows the log as it is trimmed or replaced, and keeps results whose call is gone", async () => {
-	const manager = idleManager();
-	const run = viewerRun();
-	const say = (text: string) => ({ kind: "message" as const, message: { role: "user", content: text } });
-	run.log.push(say("first task"), say("second task"));
-	const viewer = new AgentViewer(fakeTui() as never, plain, keys, run, manager, () => {}, async () => "steered");
-	assert.match(strip(viewer.render(100)).join("\n"), /first task/);
-
-	run.log.splice(0, 1);
-	run.log.push(say("third task"));
-	(viewer as unknown as { sync(): void }).sync();
-	const trimmed = strip(viewer.render(100)).join("\n");
-	assert.doesNotMatch(trimmed, /first task/, "entries trimmed from the log leave the screen");
-	assert.match(trimmed, /second task[\s\S]*third task/);
-
-	run.log = [{ kind: "message", message: { role: "toolResult", toolCallId: "gone", toolName: "bash", content: [{ type: "text", text: "orphan output" }] } }];
-	(viewer as unknown as { sync(): void }).sync();
-	const replaced = strip(viewer.render(100)).join("\n");
-	assert.doesNotMatch(replaced, /second task/);
-	assert.match(replaced, /bash result: orphan output/);
 	viewer.dispose();
 	await manager.dispose();
 });
