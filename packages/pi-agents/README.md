@@ -64,13 +64,13 @@ The way of working comes from Claude Code's subagents: delegate, keep working, w
 **Without codemode, the Agent call is an ordinary Pi tool row.** It uses the same tinted box, the same `toolTitle` call line and the same `... (N more lines, ctrl+o to expand)` collapse as `bash` or `read`. While a foreground agent works, the box lists its latest tool calls in Pi's own notation (`$ rg -n foo`, `read src/a.ts:10-40`, `grep /x/ in src`). When it finishes, the box shows the report and a `took 1m03s` footer. Started from codemode, the script's own row shows the call, and the agent list below shows its progress.
 
 ```
- agent map payment flow · claude-sonnet-5
+ agent map payment flow · claude-sonnet-5-5
  ... (6 earlier tool calls, ctrl+o to expand)
  read src/pay.ts:1-40
  grep /refund/ in src
  $ rg -n "issueRefund" src
 
- claude-sonnet-5 · 41k/272k · 1m03s
+ claude-sonnet-5-5 · 41k/1M · 1m03s
 ```
 
 **A background agent's report lands as a custom message**, in the frame Pi gives injected text, rendered as Markdown. Until `ctrl+o` it shows up to eight lines and never cuts a paragraph or table in half:
@@ -96,7 +96,7 @@ The way of working comes from Claude Code's subagents: delegate, keep working, w
                  $ git diff origin/main...HEAD
   ? pusher       push release branch   needs you · gpt-5.6-luna · 3k/272k · 40s
                  waiting for your approval: git push origin release
-  ✓ scout        map payment flow      claude-sonnet-5 · 22k/1M · 31s
+  ✓ scout        map payment flow      claude-sonnet-5-5 · 22k/1M · 31s
   ↑↓ select · enter open · x stop · esc back
 ──────────────────────────────────────────────────────────────────────────
 ```
@@ -110,13 +110,19 @@ The way of working comes from Claude Code's subagents: delegate, keep working, w
 | `Esc` | Close the drawer |
 | Anything else | Closes the drawer and goes to the editor, so you can just start typing |
 
-**Opening an agent shows its session as Pi would.** The view takes the editor's place, like `/tree` or `/resume`. Inside it, user messages, assistant markdown and tool boxes are drawn with Pi's own components and built-in tool renderers, so `$ bash` output, `read` previews and `edit` diffs look the same as in the main session. Assistant text streams in live.
+**Opening an agent shows its session as Pi would.** The view takes the editor's place, like `/tree` or `/resume`, and follows the agent live, the way Pi's interactive mode follows its own session:
+
+- User messages, assistant Markdown, thinking, tool boxes and compaction summaries are drawn with Pi's own components.
+- Thinking and text stream in. A tool call appears while its arguments are still streaming, and its output updates in place, with Pi's `Working...` line underneath.
+- Each tool is drawn with the renderer the main session uses for it, so a codemode row shows the calls its script made, and an extension's tool looks the same as it does in your session. That renderer is known once the main session has shown the tool at least once since its last reload; until then Pi's built-in renderer (`$ bash` output, `read` previews, `edit` diffs) or its generic one is used.
+- Thinking is shown or hidden as your `hideThinkingBlock` setting says, and your output padding, image and code-block settings apply.
 
 | Key | Action |
 |---|---|
 | Type, then `Enter` | Steer a running agent (delivered after its current tool calls), or follow up on a finished one |
 | `↑` `↓` `PgUp` `PgDn` | Scroll |
 | Pi's expand key (`Ctrl+O`) | Expand or collapse every tool box |
+| Pi's thinking key (`Ctrl+T`) | Show or hide thinking in this view, without changing your setting |
 | `Esc` | Back to the drawer, on this agent: `x` stops it, `Enter` reopens it, `↑` past the top or typing returns to the prompt |
 
 `/agents` lists every agent in the session, including ones restored after a restart, and opens one. `/agents types` lists the saved agents and any errors in their files.
