@@ -19,6 +19,7 @@ export default async function (pi: ExtensionAPI) {
       config,
       gpt56ContextWindow: settings.gpt56ContextWindow,
       perTurnEffort: settings.perTurnEffort,
+      midConversationUpdates: settings.midConversationUpdates,
       getApiKey: () => getDiscoveryApiKey(config.providerName),
     });
     const runtime = new ProviderRuntime({ pi, config, catalog });

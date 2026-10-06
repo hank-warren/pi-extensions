@@ -21,6 +21,10 @@ export interface PiModelProfile {
   contextWindow?: number;
   /** Pi's native per-turn effort support (Anthropic mid-conversation `output_config`). */
   supportsMidConvoEffort?: boolean;
+  /** Pi's native mid-conversation `role: "system"` messages (Anthropic). */
+  supportsMidConvoSystemMessages?: boolean;
+  /** Pi's native `tool_addition`/`tool_removal` blocks (Anthropic); needs mid-conversation system messages too. */
+  supportsMidConvoToolChanges?: boolean;
 }
 
 export interface PiModelProfiles {
@@ -49,12 +53,18 @@ function profilesFromIndex(index: ProfileIndex): PiModelProfiles {
 export const NO_PI_PROFILES: PiModelProfiles = profilesFromIndex(new Map());
 
 function profileFromModel(model: Model<Api>): PiModelProfile {
-  const compat = model.compat as { supportsMidConvoEffort?: boolean } | undefined;
+  const compat = model.compat as {
+    supportsMidConvoEffort?: boolean;
+    supportsMidConvoSystemMessages?: boolean;
+    supportsMidConvoToolChanges?: boolean;
+  } | undefined;
   return {
     reasoning: model.reasoning,
     ...(model.contextWindow > 0 ? { contextWindow: model.contextWindow } : {}),
     ...(model.thinkingLevelMap ? { thinkingLevelMap: { ...model.thinkingLevelMap } } : {}),
     ...(compat?.supportsMidConvoEffort === true ? { supportsMidConvoEffort: true } : {}),
+    ...(compat?.supportsMidConvoSystemMessages === true ? { supportsMidConvoSystemMessages: true } : {}),
+    ...(compat?.supportsMidConvoToolChanges === true ? { supportsMidConvoToolChanges: true } : {}),
   };
 }
 
