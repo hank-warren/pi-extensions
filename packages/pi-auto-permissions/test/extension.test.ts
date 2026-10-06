@@ -34,6 +34,7 @@ interface DeniedEvent {
 	verdict: "revise" | "block";
 	reason: string;
 	decisionSource: string;
+	reviseFirst?: true;
 }
 
 interface DenialLine {
@@ -43,6 +44,7 @@ interface DenialLine {
 	verdict: string;
 	reason: string;
 	decisionSource: string;
+	reviseFirst?: true;
 }
 
 /** One dispatch through the guardian transport seam. */
@@ -536,7 +538,9 @@ test("5 · a revise verdict blocks with the reviewer's reason and a guardian dec
 			assert.equal(harness.denied[0].decisionSource, "guardian");
 			assert.equal(harness.denied[0].verdict, "revise");
 			assert.equal(harness.denied[0].reason, "push to a branch, not main");
+			assert.equal(harness.denied[0].reviseFirst, undefined, "a guardian's own revise is not revise-first");
 			assert.equal(harness.denials()[0].decisionSource, "guardian");
+			assert.equal(harness.denials()[0].reviseFirst, undefined);
 			assert.deepEqual(harness.displays.map((display) => display.state), ["waiting", "revise"]);
 		},
 	);
@@ -1760,6 +1764,8 @@ test("35 · a subagent with a UI is told to revise first; the same command again
 				assert.equal(harness.customCalls, 0, "the first ask does not interrupt the human");
 				assert.equal(harness.denied[0].verdict, "revise");
 				assert.equal(harness.denied[0].decisionSource, "guardian");
+				assert.equal(harness.denied[0].reviseFirst, true, "marked apart from a guardian revise");
+				assert.equal(harness.denials()[0].reviseFirst, true, "in the denial log too");
 
 				const different = await harness.toolCall("git push --force origin release", "call-2");
 				assert.ok(different?.block);
@@ -1787,6 +1793,9 @@ test("36 · revise-first applies only to subagent sessions with a UI", async () 
 				const result = await harness.toolCall("git push --force origin main");
 				assert.ok(result?.block);
 				assert.match(result.reason, /This session has no interactive user to ask\./u);
+				const prompt = harness.calls[0]!.request.systemPrompt;
+				assert.match(prompt, /cannot reach a human: this subagent has no interactive user/u, "the guardian is told no human will weigh in");
+				assert.doesNotMatch(prompt, /human later approves/u);
 			},
 		));
 
@@ -1902,6 +1911,7 @@ test("40 · in a subagent, a failed review is revise-first too, with review_fail
 				assert.equal(harness.customCalls, 0, "a reviewer outage does not interrupt the human on the first try");
 				assert.equal(harness.denied[0]?.decisionSource, "review_failure");
 				assert.equal(harness.denied[0]?.verdict, "revise");
+				assert.equal(harness.denied[0]?.reviseFirst, true);
 
 				await harness.turnEnd();
 				harness.answers.push("Block");

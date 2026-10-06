@@ -9,6 +9,8 @@
   - A subagent session (`PI_SUBAGENT_CHILD=1`, set by `@hank-warren/pi-agents`) is told it is a subagent: a short section appended to its system prompt says that commands needing approval pause the supervising session, so it should prefer in-scope and read-only commands and revise when asked to.
   - In a subagent child with a UI, an `ask_user` verdict or a failed review first blocks the command with a revise-first reason instead of prompting. Issuing the same command again unchanged in a later turn escalates it to the human as an ordinary approval prompt. Duplicates within the same turn, such as sibling calls or a codemode `Promise.all`, are refused too, because the model has not seen the first refusal yet. Children without a UI keep the "no interactive user" block.
   - In RPC mode the approval prompt goes through `ctx.ui.select`. Before this, every approval forwarded over RPC was silently denied, because `custom()` returns nothing there.
+  - The guardian's subagent section says what an `ask_user` verdict does for that child: revise first and then a human when its prompts surface in a parent, a hard block when it has no UI.
+  - A revise-first refusal is recorded in the denial log and the `auto-permissions:denied` event with `"reviseFirst": true`, keeping the `decisionSource` of the verdict behind it, and the recent denials view labels it "revise first".
 
 ## 0.18.0
 

@@ -49,6 +49,8 @@ interface ReviewOutcome {
   reason: string;
   /** What the agent is told; absent means the command runs. */
   block?: string;
+  /** A subagent's revise-first refusal, marked so the denial log tells it from a guardian revise. */
+  reviseFirst?: boolean;
 }
 
 const PROJECT_CONFIG_DIR_NAME = (PiCodingAgent as { CONFIG_DIR_NAME?: string }).CONFIG_DIR_NAME ?? ".pi";
@@ -264,6 +266,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     verdict: DenialVerdict,
     reason: string,
     decisionSource: DenialSource,
+    reviseFirst = false,
   ): void {
     const { ctx, config, gate, command, target } = scope;
     try {
@@ -275,6 +278,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
         verdict,
         reason,
         decisionSource,
+        ...(reviseFirst ? { reviseFirst: true } : {}),
       });
     } catch {
       // Event fan-out is observability, never part of the decision.
@@ -290,6 +294,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
         verdict,
         reason,
         decisionSource,
+        reviseFirst,
       }));
     } catch {
       // The denial log is best-effort observability.
@@ -299,7 +304,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   /** The one place a decision is recorded, rendered and returned. */
   function settle(scope: ReviewScope, outcome: ReviewOutcome): BlockResult | undefined {
     if (outcome.verdict && outcome.source) {
-      recordDenial(scope, outcome.verdict, outcome.reason, outcome.source);
+      recordDenial(scope, outcome.verdict, outcome.reason, outcome.source, outcome.reviseFirst === true);
     }
     if (outcome.display) {
       display.show(scope, outcome.display, outcome.detail ?? outcome.reason, true);
@@ -548,8 +553,16 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
    * refused too; an unchanged retry in a later turn returns undefined, and the
    * caller asks the human.
    */
-  function reviseFirstBlock(scope: ReviewScope, reason: string, source: "guardian" | "review_failure"): BlockResult | undefined {
+  function reviseFirstBlock(
+    scope: ReviewScope,
+    reason: string,
+    source: "guardian" | "review_failure",
+    lifecycleSignal: AbortSignal,
+  ): BlockResult | undefined {
     if (!subagentSession || !scope.ctx.hasUI) return undefined;
+    // As askUser does: a refusal the model will never see must not count as
+    // its revise-first turn, or its retry would go straight to the human.
+    if (reviewer.isStale(lifecycleSignal) || reviewCancelled(callSignalOf(scope))) return reviewCancelledResult();
     const key = `${scope.gate.label}\0${scope.command}`;
     const refusedIn = reviseFirst.get(key);
     if (refusedIn !== undefined && refusedIn !== turnGeneration) return undefined;
@@ -560,6 +573,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
       source,
       reason,
       block: subagentReviseFirstReason(scope.gate.label, reason),
+      reviseFirst: true,
     });
   }
 
@@ -571,7 +585,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   ): Promise<BlockResult | undefined> | BlockResult | undefined {
     if (outcome.kind === "failed") {
       const reason = `Automatic review failed: ${outcome.reason}`;
-      return reviseFirstBlock(scope, reason, "review_failure") ?? askUser(scope, reason, lifecycleSignal, "review_failure");
+      return reviseFirstBlock(scope, reason, "review_failure", lifecycleSignal) ?? askUser(scope, reason, lifecycleSignal, "review_failure");
     }
     const { verdict } = outcome;
     if (verdict.decision === "approve") {
@@ -586,7 +600,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
         block: `Auto Permissions requested revision: ${verdict.reason}\nRevise the command and try again.`,
       });
     }
-    return reviseFirstBlock(scope, verdict.reason, "guardian") ?? askUser(scope, verdict.reason, lifecycleSignal, "guardian");
+    return reviseFirstBlock(scope, verdict.reason, "guardian", lifecycleSignal) ?? askUser(scope, verdict.reason, lifecycleSignal, "guardian");
   }
 
   /**

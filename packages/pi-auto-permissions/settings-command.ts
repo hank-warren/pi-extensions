@@ -136,7 +136,7 @@ export function registerSettingsCommand(
             ts: record.ts,
             gateLabel: record.gate.label,
             command: record.command,
-            verdict: record.verdict,
+            verdict: record.reviseFirst ? "revise first" : record.verdict,
             reason: record.reason,
           }));
         } catch {

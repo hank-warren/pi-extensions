@@ -243,7 +243,7 @@ The guardian must return one of three decisions:
 
 - `approve`: execute the command
 - `revise`: block it and tell the main agent what to correct
-- `ask_user`: open an approval prompt (rendered with [`@hank-warren/pi-permission-selector`](../pi-permission-selector)'s `OptionSelector`): numbered options with `1`–`9` hotkeys, Tab to attach a note that is delivered to the agent as a steering user message, Esc to cancel — which blocks the command
+- `ask_user`: open an approval prompt (rendered with [`@hank-warren/pi-permission-selector`](../pi-permission-selector)'s `OptionSelector`): numbered options with `1`–`9` hotkeys, Tab to attach a note that is delivered to the agent as a steering user message, Esc to cancel — which blocks the command. In RPC mode, as in a pi-agents child whose prompts the parent shows, the prompt is Pi's plain select dialog instead: Allow or Block, without Tab notes
 
 ## Conversation context and caching
 
@@ -451,6 +451,8 @@ An `ask_user` verdict in a subagent, or a failed review (timeout, unavailable re
 
 - **Child with a UI** (an RPC child whose prompts surface in the parent, as with pi-agents): the command is blocked with a revise-first reason. Issuing the *same* command again unchanged in a later turn escalates it to the human as an ordinary approval prompt. Duplicates within the same turn (sibling calls, or a codemode `Promise.all`) are refused as well, because the model has not seen the first refusal yet. Any other command gets its own revise-first turn.
 - **Child without a UI**: the command is blocked with a reason instructing the child to route around the gated operation or report the blocker.
+
+The guardian's subagent section says which of these applies, so a child without a UI is never told a human may approve later. A revise-first refusal is recorded in the denial log and the `auto-permissions:denied` event with `"reviseFirst": true`, keeping the `decisionSource` of the verdict behind it, so it stays distinguishable from a guardian's own revise.
 
 Reviewer usage records from subagent sessions carry `"subagent": true` in the usage sidecar.
 

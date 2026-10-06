@@ -24,7 +24,7 @@ import {
   OVERRIDE_FEEDBACK_SYSTEM_PROMPT,
   parsePermissionVerdict,
   SCRIPT_EVIDENCE_SYSTEM_PROMPT,
-  SUBAGENT_CONTEXT_SYSTEM_PROMPT,
+  subagentContextSystemPrompt,
   type PermissionVerdict,
   type ReviewEvidenceRecord,
 } from "./review.js";
@@ -317,7 +317,7 @@ export function createGuardianReviewer(
     const subagentContext = detectSubagentContext(ctx.cwd);
     const basePolicyPrompt = [
       config.systemPrompt,
-      ...(subagentContext ? [SUBAGENT_CONTEXT_SYSTEM_PROMPT] : []),
+      ...(subagentContext ? [subagentContextSystemPrompt(ctx.hasUI)] : []),
     ].join("\n\n");
     // Appended outside config.systemPrompt so sessions using a customized
     // systemPromptFile still learn how to weigh override records. The injected
