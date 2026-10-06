@@ -6,17 +6,25 @@ import { type ChildProcess, spawn } from "node:child_process";
  * for Pi's RPC stream.
  */
 export function createLineSplitter(onLine: (line: string) => void): (chunk: string) => void {
+	// Only each new chunk is scanned, so a large record arriving in many chunks stays linear.
 	let buffer = "";
+	const emit = (line: string) => {
+		if (line.endsWith("\r")) line = line.slice(0, -1);
+		if (line) onLine(line);
+	};
 	return (chunk) => {
-		buffer += chunk;
-		let index = buffer.indexOf("\n");
-		while (index >= 0) {
-			let line = buffer.slice(0, index);
-			buffer = buffer.slice(index + 1);
-			if (line.endsWith("\r")) line = line.slice(0, -1);
-			if (line) onLine(line);
-			index = buffer.indexOf("\n");
+		let index = chunk.indexOf("\n");
+		if (index < 0) {
+			buffer += chunk;
+			return;
 		}
+		emit(buffer + chunk.slice(0, index));
+		let start = index + 1;
+		while ((index = chunk.indexOf("\n", start)) >= 0) {
+			emit(chunk.slice(start, index));
+			start = index + 1;
+		}
+		buffer = chunk.slice(start);
 	};
 }
 

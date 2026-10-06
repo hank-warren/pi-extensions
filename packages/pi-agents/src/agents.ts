@@ -34,15 +34,10 @@ export interface AgentDefinition {
 /** The type name an inline agent reports; the UI omits it. */
 export const INLINE_TYPE = "agent";
 
+/** A comma string or YAML list. An explicit empty one (`[]`, `""`) is an empty list: for `tools`, no tools. */
 function toList(value: unknown): string[] | undefined {
-	if (typeof value === "string") {
-		const items = value.split(",").map((item) => item.trim()).filter(Boolean);
-		return items.length ? items : undefined;
-	}
-	if (Array.isArray(value)) {
-		const items = value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean);
-		return items.length ? items : undefined;
-	}
+	if (typeof value === "string") return value.split(",").map((item) => item.trim()).filter(Boolean);
+	if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean);
 	return undefined;
 }
 
@@ -178,7 +173,8 @@ export function composeAgent(
 		name: base?.name ?? INLINE_TYPE,
 		description: base?.description ?? "",
 		prompt,
-		tools: inline.tools?.length ? inline.tools : base?.tools,
+		// An empty list is an answer, not an omission: no tools.
+		tools: inline.tools !== undefined ? inline.tools : base?.tools,
 		disallowedTools: base?.disallowedTools,
 		model: base?.model,
 		thinking: base?.thinking,

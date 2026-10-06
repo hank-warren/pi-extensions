@@ -12,6 +12,7 @@ import { forwardedExtensionArgs } from "../src/index.js";
 import { buildChildArgs, buildChildEnv } from "../src/manager.js";
 import { buildChildPrompt } from "../src/prompts.js";
 import { createLineSplitter } from "../src/rpc.js";
+import { applyAssistantEvent, snapshot, startAssistant } from "../src/stream.js";
 import { loadLog } from "../src/transcript.js";
 import { worktreeDirName } from "../src/worktree.js";
 
@@ -179,6 +180,13 @@ test("child args and env carry the agent's model, prompt, tools and the subagent
 	assert.equal(env.PI_AGENTS_AUTOCOMPACT, "10");
 	assert.deepEqual(JSON.parse(env.PI_AGENTS_CONTEXT_FILES!), ["/w/AGENTS.md"]);
 	assert.equal(env.PI_AGENTS_NO_CONTEXT_FILES, undefined);
+	assert.ok(buildChildArgs({ model: "m", appendPrompt: "", tools: [], excludeTools: [], contextFiles: true, name: "n" }).includes("--no-tools"), "an empty allowlist is no tools, not every tool");
+	assert.ok(!buildChildArgs({ model: "m", appendPrompt: "", excludeTools: [], contextFiles: true, name: "n" }).some((arg) => arg === "--no-tools" || arg === "--tools"));
+	assert.equal(buildChildEnv({}, { id: "x", name: "n", type: "t", maxTurns: 6, loadContextFiles: true, tools: [] }).PI_AGENTS_TOOLS, "[]");
+	const narrowed = { ...parseAgentFile("---\nname: helper\ndescription: d\ntools: read, bash\n---\n", "/x.md").agent! };
+	assert.deepEqual(composeAgent(narrowed, { tools: [] }).tools, [], "a call's empty list overrides a saved agent's tools");
+	assert.deepEqual(composeAgent(narrowed, {}).tools, ["read", "bash"]);
+	assert.deepEqual(parseAgentFile("---\nname: none\ndescription: d\ntools: []\n---\n", "/y.md").agent!.tools, [], "a saved agent with tools: [] gets none");
 	const limited = buildChildEnv({}, { id: "x", name: "n", type: "t", maxTurns: 6, loadContextFiles: true, tools: ["read"], denyTools: ["Agent"] });
 	assert.deepEqual(JSON.parse(limited.PI_AGENTS_TOOLS!), ["read"]);
 	assert.deepEqual(JSON.parse(limited.PI_AGENTS_DENY_TOOLS!), ["Agent"]);
@@ -223,6 +231,39 @@ test("the line splitter breaks on LF only, so U+2028 inside JSON survives", () =
 	feed('{"a":"x\u2028y"}\r\n{"b"');
 	feed(":1}\n\n");
 	assert.deepEqual(lines.map((line) => JSON.parse(line)), [{ a: "x\u2028y" }, { b: 1 }]);
+});
+
+test("the line splitter stays linear when a large record arrives in many chunks", () => {
+	const lines: string[] = [];
+	const feed = createLineSplitter((line) => lines.push(line));
+	const record = JSON.stringify({ type: "message_end", text: "y".repeat(4 * 1024 * 1024) });
+	const started = performance.now();
+	for (let i = 0; i < record.length; i += 1024) feed(record.slice(i, i + 1024));
+	feed("\n{\"n\":1}\n{\"n\":2}\n");
+	const ms = performance.now() - started;
+	assert.equal(lines.length, 3);
+	assert.equal(lines[0], record);
+	assert.deepEqual(lines.slice(1).map((line) => JSON.parse(line)), [{ n: 1 }, { n: 2 }]);
+	assert.ok(ms < 500, `4 MB record in 1 KB chunks took ${Math.round(ms)} ms`);
+});
+
+test("streamed tool arguments are parsed when a snapshot is taken, not on every delta", () => {
+	const message = startAssistant();
+	const args = JSON.stringify({ path: "src/big.ts", content: "z".repeat(50 * 1024) });
+	const started = performance.now();
+	applyAssistantEvent(message, { type: "toolcall_start", contentIndex: 0, id: "w1", toolName: "write" });
+	for (let i = 0; i < args.length; i += 12) applyAssistantEvent(message, { type: "toolcall_delta", contentIndex: 0, delta: args.slice(i, i + 12) });
+	const applyMs = performance.now() - started;
+	assert.deepEqual(message.content[0]!.arguments, {}, "nothing parsed while only the parent holds it");
+	assert.ok(applyMs < 200, `applying 4,300 deltas took ${Math.round(applyMs)} ms`);
+	const call = snapshot(message).content[0]!;
+	assert.equal((call.arguments as { path: string }).path, "src/big.ts");
+	assert.equal((call.arguments as { content: string }).content.length, 50 * 1024);
+	const again = performance.now();
+	for (let i = 0; i < 1000; i++) snapshot(message);
+	assert.ok(performance.now() - again < 100, "an unchanged snapshot does not parse again");
+	applyAssistantEvent(message, { type: "toolcall_end", contentIndex: 0, toolCall: { type: "toolCall", id: "w1", name: "write", arguments: { path: "final.ts" } } });
+	assert.deepEqual(snapshot(message).content[0]!.arguments, { path: "final.ts" }, "the final call replaces the preview");
 });
 
 test("worktree directory names flatten branch slashes", () => {

@@ -35,7 +35,7 @@ const agentParams = Type.Object({
 	name: Type.Optional(Type.String({ description: "Short addressable name for SendMessage/TaskStop. Default: derived from the description." })),
 	model: Type.Optional(Type.String({ description: "provider/id. Default: the saved agent's model, else this session's." })),
 	thinking: Type.Optional(thinkingSchema),
-	tools: Type.Optional(Type.Array(Type.String(), { description: "Allowlist of tool names, e.g. [\"read\", \"bash\", \"codemode\"] for read-only work. Default: every tool the user's extensions provide." })),
+	tools: Type.Optional(Type.Array(Type.String(), { description: "Allowlist of tool names, e.g. [\"read\", \"bash\", \"codemode\"] for read-only work; [] gives it no tools. Enforced on every call, including calls its codemode scripts make. Default: every tool the user's extensions provide." })),
 	autocompact: Type.Optional(Type.Number({ description: "Compact the agent's context at this percentage of its model's context window, e.g. 10. Default: its full window." })),
 	max_turns: Type.Optional(Type.Integer({ minimum: 1, description: "Turn budget for the task. Default 80." })),
 	run_in_background: Type.Optional(Type.Boolean({ description: "Default true. False blocks until the agent finishes and returns its result." })),
@@ -109,10 +109,9 @@ export function sendToAgent(
 	text: string,
 	wait = false,
 ): Promise<"steered" | "queued" | "started"> {
-	if (run.status !== "running") {
-		if (wait) host.notify.delete(run.id);
-		else host.notify.add(run.id);
-	}
+	// A caller that waits gets the result as its tool result; announcing it too would report it twice.
+	if (wait) host.notify.delete(run.id);
+	else if (run.status !== "running") host.notify.add(run.id);
 	return host.manager.message(run, text);
 }
 

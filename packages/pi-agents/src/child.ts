@@ -6,6 +6,27 @@ import { formatTokens } from "./format.js";
 
 /** Status key the child uses to tell the parent its turn budget ran out. */
 export const BUDGET_STATUS_KEY = "pi-agents-budget";
+/** Status key a child sets on its first prompt, so the parent knows pi-agents loaded in it and enforces its limits. */
+export const CHILD_STATUS_KEY = "pi-agents-child";
+
+/**
+ * The variables a parent sets for its child. The child drops them once every
+ * extension has loaded, so the commands it runs, a nested `pi` or a test
+ * suite, do not start in child mode. `PI_SUBAGENT_*` stay: Auto Permissions
+ * reads them on every review.
+ */
+export const CHILD_ENV_KEYS = [
+	"PI_AGENTS_CHILD",
+	"PI_AGENTS_NAME",
+	"PI_AGENTS_TYPE",
+	"PI_AGENTS_MAX_TURNS",
+	"PI_AGENTS_AUTOCOMPACT",
+	"PI_AGENTS_CONTEXT_FILES",
+	"PI_AGENTS_NO_CONTEXT_FILES",
+	"PI_AGENTS_TOOLS",
+	"PI_AGENTS_DENY_TOOLS",
+] as const;
+
 /**
  * Status key for autocompact: `compacting` while the child compacts between
  * runs, then `continue` for the parent to resume the task with an RPC prompt,
@@ -189,8 +210,14 @@ export function registerChild(pi: ExtensionAPI): void {
 	const autocompact = Number.isFinite(percent) && percent > 0 && percent < 100 ? percent : undefined;
 	const instructions = process.env.PI_AGENTS_NO_CONTEXT_FILES !== "1";
 	const inherited = envList("PI_AGENTS_CONTEXT_FILES");
-	const allowTools = process.env.PI_AGENTS_TOOLS ? envList("PI_AGENTS_TOOLS") : undefined;
+	const allowTools = process.env.PI_AGENTS_TOOLS !== undefined ? envList("PI_AGENTS_TOOLS") : undefined;
 	const denyTools = envList("PI_AGENTS_DENY_TOOLS");
+	let announced = false;
+
+	// Every extension has loaded by now, so none still needs them.
+	pi.on("session_start", () => {
+		for (const key of CHILD_ENV_KEYS) delete process.env[key];
+	});
 	const budget: BudgetState = { turns: 0, warned: false, exhausted: false, blockedCalls: 0 };
 	const compaction: AutocompactState = { armed: false, interrupted: false, compacting: false, floorPending: false, disabled: false };
 
@@ -214,6 +241,10 @@ export function registerChild(pi: ExtensionAPI): void {
 	pi.on("before_agent_start", (event, ctx) => {
 		// A continuation after compacting is the same task: its turns keep counting.
 		if (event.prompt !== CONTINUE_AFTER_COMPACTION) budgetAtPromptStart(budget);
+		if (!announced) {
+			announced = true;
+			ctx.ui.setStatus(CHILD_STATUS_KEY, "ready");
+		}
 		ctx.ui.setStatus(BUDGET_STATUS_KEY, undefined);
 		arm(ctx);
 		if (!instructions) return;
@@ -267,7 +298,10 @@ export function registerChild(pi: ExtensionAPI): void {
 	pi.on("tool_call", (event, ctx) => {
 		const name = (event as { toolName: string }).toolName;
 		if (!toolAllowed(name, allowTools, denyTools)) {
-			return { block: true, reason: `${name} is not among this agent's tools (${allowTools?.join(", ") ?? "all but excluded"}). Use one of those instead.` };
+			const reason = allowTools?.length === 0
+				? `${name} is unavailable: this agent has no tools. Answer from what you were given.`
+				: `${name} is not among this agent's tools (${allowTools?.join(", ") ?? "all but excluded"}). Use one of those instead.`;
+			return { block: true, reason };
 		}
 		if (!budget.exhausted) return;
 		budget.blockedCalls += 1;

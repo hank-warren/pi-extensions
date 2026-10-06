@@ -274,7 +274,7 @@ test("in a child process the extension registers no tools, so a child can never 
 		assert.deepEqual(mock.tools, []);
 		assert.deepEqual(
 			[...mock.events.keys()].sort(),
-			["agent_settled", "before_agent_start", "before_provider_request", "session_compact", "tool_call", "tool_result", "turn_end"],
+			["agent_settled", "before_agent_start", "before_provider_request", "session_compact", "session_start", "tool_call", "tool_result", "turn_end"],
 			"no agent_start hook: Pi's retries must not reset the budget",
 		);
 	} finally {
@@ -335,8 +335,12 @@ test("agents are composed per call or start from a saved one, run behind codemod
 		assert.equal(sent.message.customType, "pi-agents-result");
 		assert.match(sent.message.content, /<agent-result name="bg" id="\w+" status="done">/);
 		assert.deepEqual(sent.options, { triggerTurn: true, deliverAs: "followUp" });
-		const runs = mock.entries.filter((entry) => entry.customType === "pi-agents-run");
-		assert.equal(runs.length, 3, "every run is persisted for resume");
+		const records = mock.entries.filter((entry) => entry.customType === "pi-agents-run");
+		const statuses = (id: string) => records.filter((entry) => (entry.data as { id: string }).id === id).map((entry) => (entry.data as { status: string }).status);
+		const ids = [...new Set(records.map((entry) => (entry.data as { id: string }).id))];
+		assert.equal(ids.length, 3, "every run is persisted for resume");
+		for (const id of ids) assert.deepEqual(statuses(id), ["running", "done"], "recorded when it starts, so a parent that exits mid-run can resume it, and when it ends");
+		const runs = records.filter((entry) => (entry.data as { status: string }).status === "done");
 		const inline = runs.find((entry) => (entry.data as { name: string }).name === "check-the-thing")!.data as { definition?: AgentDefinition; contextFiles?: string[] };
 		assert.equal(inline.definition?.prompt, "Be brief.", "an inline agent's setup is kept for resume");
 		assert.deepEqual(inline.contextFiles, ["/ws/AGENTS.md"], "children follow the parent's instruction files");
@@ -510,5 +514,131 @@ test("a child enforces its tool allowlist on every call, including tools only sc
 		assert.equal((await call({ toolName: "Agent" }))?.block, true);
 	} finally {
 		for (const key of ["PI_AGENTS_CHILD", "PI_AGENTS_TOOLS", "PI_AGENTS_DENY_TOOLS"]) delete process.env[key];
+	}
+});
+
+/** The extension wired to fake children, as a session sees it. */
+async function extensionWithFakeChildren() {
+	const dir = mkdtempSync(join(tmpdir(), "pi-agents-ext-"));
+	writeFileSync(join(dir, "config.json"), JSON.stringify({ piCommand: [process.execPath, FAKE_PI] }));
+	process.env.PI_AGENTS_CONFIG = join(dir, "config.json");
+	const mock = createMockPi({ activeTools: ["read", "bash", "Agent", "SendMessage"] });
+	const model = { provider: "test", id: "model", contextWindow: 1_000_000 };
+	const context = createMockContext({
+		cwd: dir,
+		mode: "rpc",
+		hasUI: true,
+		model,
+		models: [model],
+		sessionManager: { getSessionId: () => "s", getSessionFile: () => undefined, getBranch: () => [], getEntries: () => [] },
+	});
+	piAgents(mock.pi);
+	await mock.events.get("session_start")![0]!({ reason: "startup" }, context.ctx);
+	type Tool = { execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }>; structuredContent?: Record<string, unknown> }> };
+	const tool = (name: string) => mock.tools.filter((entry) => entry.name === name).at(-1) as unknown as Tool;
+	const agent = (params: Record<string, unknown>) => tool("Agent").execute("call", { description: "test task", ...params }, undefined, undefined, context.ctx);
+	const send = (params: Record<string, unknown>) => tool("SendMessage").execute("send", params, undefined, undefined, context.ctx);
+	const records = (name: string) => mock.entries
+		.filter((entry) => entry.customType === "pi-agents-run" && (entry.data as { name: string }).name === name)
+		.map((entry) => entry.data as { status: string; error?: string });
+	const reports = () => mock.sentMessages as Array<{ message: { content: string }; options: Record<string, unknown> }>;
+	const until = async (done: () => boolean) => {
+		for (let i = 0; i < 150 && !done(); i++) await new Promise((resolve) => setTimeout(resolve, 20));
+	};
+	const shutdown = () => mock.events.get("session_shutdown")![0]!({ reason: "quit" }, context.ctx);
+	return { agent, send, records, reports, until, shutdown };
+}
+
+test("an agent that aborts itself on an exhausted turn budget fails, and its report wakes the parent", async () => {
+	const ext = await extensionWithFakeChildren();
+	try {
+		await ext.agent({ name: "spent", prompt: "BUDGET" });
+		await ext.until(() => ext.reports().length > 0);
+		const report = ext.reports()[0]!;
+		assert.match(report.message.content, /<agent-result name="spent" id="\w+" status="failed">/, "not reported as a stop someone asked for");
+		assert.match(report.message.content, /turn budget exhausted: it kept calling tools/);
+		assert.deepEqual(report.options, { triggerTurn: true, deliverAs: "followUp" }, "the parent is woken to hear it");
+	} finally {
+		await ext.shutdown();
+		delete process.env.PI_AGENTS_CONFIG;
+	}
+});
+
+test("an agent still running when the session ends is recorded, so a restart lists and resumes it", async () => {
+	const ext = await extensionWithFakeChildren();
+	try {
+		await ext.agent({ name: "midway", prompt: "SLOW keep going" });
+		assert.deepEqual(ext.records("midway").map((record) => record.status), ["running"], "recorded when it starts");
+		await ext.shutdown();
+		assert.deepEqual(ext.records("midway").map((record) => record.status), ["running", "stopped"], "and again when the session ends under it");
+	} finally {
+		delete process.env.PI_AGENTS_CONFIG;
+	}
+});
+
+test("SendMessage with wait returns a running agent's result once, without also announcing it", async () => {
+	const ext = await extensionWithFakeChildren();
+	try {
+		const started = await ext.agent({ name: "busy", prompt: "SLOW work" });
+		// Let the fake child start its slow run, or the steer arrives before it waits for one.
+		await new Promise((resolve) => setTimeout(resolve, 500));
+		const result = await ext.send({ to: started.structuredContent?.name ?? "busy", message: "wrap up", wait: true });
+		assert.match(result.content[0]!.text, /steered: wrap up/);
+		await new Promise((resolve) => setTimeout(resolve, 200));
+		assert.equal(ext.reports().length, 0, "the waiting caller has it; a second report would wake the parent again");
+	} finally {
+		await ext.shutdown();
+		delete process.env.PI_AGENTS_CONFIG;
+	}
+});
+
+test("a child process without pi-agents fails its run instead of running without its limits", async () => {
+	const ext = await extensionWithFakeChildren();
+	try {
+		await assert.rejects(ext.agent({ name: "bare", prompt: "UNLOADED", run_in_background: false }), /pi-agents did not load in the agent's process/);
+		assert.equal(ext.records("bare").at(-1)?.status, "failed");
+	} finally {
+		await ext.shutdown();
+		delete process.env.PI_AGENTS_CONFIG;
+	}
+});
+
+test("a child keeps its own variables from the commands it runs, but not the subagent contract", async () => {
+	const keys = { PI_AGENTS_CHILD: "1", PI_AGENTS_TOOLS: "[]", PI_AGENTS_MAX_TURNS: "5", PI_SUBAGENT_CHILD: "1", PI_SUBAGENT_RUN_ID: "r1" };
+	Object.assign(process.env, keys);
+	try {
+		const mock = createMockPi();
+		piAgents(mock.pi);
+		const statuses: Array<[string, string | undefined]> = [];
+		const ctx = { ui: { setStatus: (key: string, text: string | undefined) => statuses.push([key, text]) }, getContextUsage: () => undefined, model: undefined };
+		await mock.events.get("session_start")![0]!({ reason: "startup" }, ctx);
+		for (const key of ["PI_AGENTS_CHILD", "PI_AGENTS_TOOLS", "PI_AGENTS_MAX_TURNS"]) assert.equal(process.env[key], undefined, `${key} would put a nested pi or test run in child mode`);
+		assert.equal(process.env.PI_SUBAGENT_CHILD, "1", "Auto Permissions reads it on every review");
+		const before = mock.events.get("before_agent_start")![0]!;
+		await before({ prompt: "go", systemPromptOptions: {} }, ctx);
+		await before({ prompt: "again", systemPromptOptions: {} }, ctx);
+		assert.deepEqual(statuses.filter(([key]) => key === "pi-agents-child"), [["pi-agents-child", "ready"]], "announced once, before its first run");
+		const blocked = await mock.events.get("tool_call")![0]!({ toolName: "read" }, ctx) as { block?: boolean; reason?: string };
+		assert.equal(blocked?.block, true, "an empty allowlist is no tools, read-only ones included");
+		assert.match(blocked.reason!, /this agent has no tools/);
+	} finally {
+		for (const key of Object.keys(keys)) delete process.env[key];
+	}
+});
+
+test("ten agents streaming large writes at once cost the parent little CPU", async () => {
+	const { manager, create } = managerWith({ maxConcurrent: 10 });
+	try {
+		const runs = Array.from({ length: 10 }, (_, i) => create(`writer-${i}`));
+		const before = process.cpuUsage();
+		for (const run of runs) manager.start(run, "STREAM 50");
+		await Promise.all(runs.map((run) => manager.waitFor(run)));
+		const used = process.cpuUsage(before);
+		const ms = (used.user + used.system) / 1000;
+		for (const run of runs) assert.equal(run.result, "streamed 50 KB");
+		// Re-parsing each write's arguments on every delta cost about 4.3 s per agent here.
+		assert.ok(ms < 4000, `parent CPU for 10 × 50 KB streamed writes: ${Math.round(ms)} ms`);
+	} finally {
+		await manager.dispose();
 	}
 });

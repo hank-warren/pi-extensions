@@ -8,11 +8,16 @@
 //   "EXIT ..." - exits mid-run
 //   "COMPACT"  - autocompact: stops its run, compacts, then asks the parent to continue the task
 //   "COMPACT-REFUSED" - the same, but refuses the parent's continuation prompt
+//   "BUDGET"   - exhausts its turn budget and aborts itself, as a child that keeps calling tools does
+//   "UNLOADED" - runs without announcing pi-agents, as a piCommand that does not load it would
+//   "STREAM <kb>" - streams a <kb> KB write's arguments in 12-character deltas, then answers
 // Anything else answers "echo: <prompt>" after one tool call.
+// Like a real child, it announces pi-agents before its first run.
 let buffer = "";
 let pendingDialog;
 let slow;
 let refuseContinue = false;
+let announced = false;
 const out = (record) => process.stdout.write(`${JSON.stringify(record)}\n`);
 const usage = { input: 1000, output: 50, cacheRead: 0, cacheWrite: 0, totalTokens: 1050, cost: { total: 0.01 } };
 
@@ -24,7 +29,25 @@ function finish(text, stopReason = "stop", errorMessage) {
 }
 
 function run(message) {
+	if (!announced && !message.startsWith("UNLOADED")) {
+		announced = true;
+		out({ type: "extension_ui_request", id: "ready", method: "setStatus", statusKey: "pi-agents-child", statusText: "ready" });
+	}
 	out({ type: "agent_start" });
+	if (message.startsWith("BUDGET")) {
+		out({ type: "extension_ui_request", id: "b1", method: "setStatus", statusKey: "pi-agents-budget", statusText: "exhausted" });
+		finish("half a report", "aborted");
+		return;
+	}
+	if (message.startsWith("STREAM")) {
+		const kb = Number(message.split(" ")[1] ?? 50);
+		const args = JSON.stringify({ path: "src/big.ts", content: "x".repeat(kb * 1024).replace(/x{60}/g, (line) => `${line}\n`) });
+		out({ type: "message_start", message: { role: "assistant", content: [] } });
+		out({ type: "message_update", assistantMessageEvent: { type: "toolcall_start", contentIndex: 0, id: "w1", toolName: "write" } });
+		for (let i = 0; i < args.length; i += 12) out({ type: "message_update", assistantMessageEvent: { type: "toolcall_delta", contentIndex: 0, delta: args.slice(i, i + 12) } });
+		finish(`streamed ${kb} KB`);
+		return;
+	}
 	out({ type: "message_end", message: { role: "user", content: message } });
 	out({ type: "tool_execution_start", toolCallId: "t1", toolName: "bash", args: { command: "ls -la" } });
 	out({ type: "tool_execution_end", toolCallId: "t1", toolName: "bash", result: { content: [{ type: "text", text: "file-a\nfile-b" }] }, isError: false });

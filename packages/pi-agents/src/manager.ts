@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentDefinition } from "./agents.js";
-import { BUDGET_STATUS_KEY, COMPACT_STATUS_KEY, CONTINUE_AFTER_COMPACTION } from "./child.js";
+import { BUDGET_STATUS_KEY, CHILD_ENV_KEYS, CHILD_STATUS_KEY, COMPACT_STATUS_KEY, CONTINUE_AFTER_COMPACTION } from "./child.js";
 import type { AgentsConfig } from "./config.js";
 import { contentText, summarizeToolCall, type ToolCallSummary } from "./format.js";
 import { applyAssistantEvent, type PartialAssistant, startAssistant } from "./stream.js";
@@ -102,6 +102,8 @@ export class AgentRun {
 	result: string | undefined;
 	error: string | undefined;
 	budgetExhausted = false;
+	/** The current process announced that pi-agents loaded in it. */
+	childReady = false;
 	/** The child is compacting between runs of the same task (autocompact). */
 	compacting = false;
 	sessionFile: string | undefined;
@@ -218,7 +220,8 @@ export function buildChildArgs(input: {
 	args.push("--model", input.model);
 	if (input.thinking) args.push("--thinking", input.thinking);
 	args.push("--append-system-prompt", input.appendPrompt);
-	if (input.tools?.length) args.push("--tools", input.tools.join(","));
+	// An empty allowlist is no tools at all; Pi's --tools takes no empty list.
+	if (input.tools) args.push(...(input.tools.length ? ["--tools", input.tools.join(",")] : ["--no-tools"]));
 	if (input.excludeTools.length) args.push("--exclude-tools", input.excludeTools.join(","));
 	if (!input.contextFiles) args.push("--no-context-files");
 	args.push("--name", input.name);
@@ -242,7 +245,7 @@ export function buildChildEnv(
 	},
 ): NodeJS.ProcessEnv {
 	const env: NodeJS.ProcessEnv = { ...base };
-	for (const key of ["HERDR_PANE_ID", "PI_AGENTS_AUTOCOMPACT", "PI_AGENTS_CONTEXT_FILES", "PI_AGENTS_NO_CONTEXT_FILES", "PI_AGENTS_TOOLS", "PI_AGENTS_DENY_TOOLS"]) delete env[key];
+	for (const key of ["HERDR_PANE_ID", ...CHILD_ENV_KEYS]) delete env[key];
 	return {
 		...env,
 		PI_AGENTS_CHILD: "1",
@@ -252,7 +255,7 @@ export function buildChildEnv(
 		...(run.autocompact ? { PI_AGENTS_AUTOCOMPACT: String(run.autocompact) } : {}),
 		...(run.contextFiles?.length ? { PI_AGENTS_CONTEXT_FILES: JSON.stringify(run.contextFiles) } : {}),
 		...(run.loadContextFiles ? {} : { PI_AGENTS_NO_CONTEXT_FILES: "1" }),
-		...(run.tools?.length ? { PI_AGENTS_TOOLS: JSON.stringify(run.tools) } : {}),
+		...(run.tools ? { PI_AGENTS_TOOLS: JSON.stringify(run.tools) } : {}),
 		...(run.denyTools?.length ? { PI_AGENTS_DENY_TOOLS: JSON.stringify(run.denyTools) } : {}),
 		// The env contract pi-auto-permissions already reads for subagent children.
 		PI_SUBAGENT_CHILD: "1",
@@ -266,6 +269,8 @@ export interface ManagerDeps {
 	ctx(): ExtensionContext | undefined;
 	spawnCommand(): string[];
 	sessionDir(): string | undefined;
+	/** A run started or resumed: record it, so a parent that exits mid-run can still list and resume it. */
+	onStarted?(run: AgentRun): void;
 	onFinished(run: AgentRun): void;
 }
 
@@ -416,6 +421,7 @@ export class AgentManager {
 		proc.onExit = () => this.handleExit(run, proc);
 		proc.start();
 		run.proc = proc;
+		run.childReady = false;
 		return proc;
 	}
 
@@ -432,6 +438,11 @@ export class AgentManager {
 		run.lastStopReason = undefined;
 		run.lastErrorMessage = undefined;
 		this.changed();
+		try {
+			this.deps.onStarted?.(run);
+		} catch {
+			// Recording is best effort; the run goes ahead.
+		}
 		try {
 			const previous = run.proc;
 			if (previous && !run.alive) {
@@ -479,6 +490,7 @@ export class AgentManager {
 
 	async stop(run: AgentRun): Promise<void> {
 		if (run.status === "queued") {
+			run.stopRequested = true;
 			this.queue = this.queue.filter((item) => item.run !== run);
 			this.finish(run, "stopped");
 			return;
@@ -498,9 +510,11 @@ export class AgentManager {
 		return new Promise((resolve) => run.waiters.push(resolve));
 	}
 
-	async dispose(): Promise<void> {
+	/** Stop everything. Returns the runs it stopped mid-task, for the caller to record. */
+	async dispose(): Promise<AgentRun[]> {
 		this.disposed = true;
 		this.queue = [];
+		const interrupted: AgentRun[] = [];
 		await Promise.all([...this.runs.values()].map(async (run) => {
 			if (run.idleTimer) clearTimeout(run.idleTimer);
 			run.launchSeq += 1;
@@ -509,11 +523,14 @@ export class AgentManager {
 				run.stopRequested = true;
 				run.status = "stopped";
 				run.endedAt = Date.now();
+				run.result = run.lastAssistant || run.result;
+				interrupted.push(run);
 				for (const waiter of run.waiters.splice(0)) waiter();
 			}
 			await run.proc?.stop(500);
 		}));
 		this.listeners.clear();
+		return interrupted;
 	}
 
 	private finish(run: AgentRun, status: Exclude<RunStatus, "queued" | "running">): void {
@@ -573,6 +590,17 @@ export class AgentManager {
 
 	private applyEvent(run: AgentRun, event: Record<string, unknown>): void {
 		switch (event.type) {
+			case "agent_start":
+				// The child announces itself before its first run starts. Without
+				// it, pi-agents is not loaded there (a piCommand without it) and
+				// the allowlist, turn budget and autocompact are not enforced.
+				if (!run.childReady && run.busy) {
+					run.error = "pi-agents did not load in the agent's process, so its tool allowlist, turn budget and autocompact cannot be enforced. If piCommand is set, make it load pi-agents.";
+					const proc = run.proc;
+					this.finish(run, "failed");
+					void proc?.stop();
+				}
+				return;
 			case "message_start": {
 				const message = event.message as ChildMessage | undefined;
 				if (message?.role === "assistant") run.partial = startAssistant();
@@ -674,7 +702,15 @@ export class AgentManager {
 					run.error = run.lastErrorMessage ?? "provider error";
 					this.finish(run, "failed");
 				} else if (run.lastStopReason === "aborted") {
-					this.finish(run, "stopped");
+					// Only a stop someone asked for is "stopped"; the child aborting itself is a failure the caller must hear about.
+					if (run.stopRequested) {
+						this.finish(run, "stopped");
+					} else {
+						run.error = run.budgetExhausted
+							? "turn budget exhausted: it kept calling tools after it was asked for its final report, so its run was aborted"
+							: "its run was aborted";
+						this.finish(run, "failed");
+					}
 				} else {
 					this.finish(run, "done");
 				}
@@ -727,6 +763,10 @@ export class AgentManager {
 						this.continueAfterCompaction(run, proc);
 					}
 					this.changed();
+					return;
+				}
+				if (request.statusKey === CHILD_STATUS_KEY) {
+					run.childReady = request.statusText === "ready";
 					return;
 				}
 				if (request.statusKey === BUDGET_STATUS_KEY) {

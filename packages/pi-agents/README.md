@@ -147,7 +147,7 @@ Report findings as file:line, severity, and why. No style nits.
 | Field | Meaning |
 |---|---|
 | `name`, `description` | Required. The description is what the parent model uses to choose the agent. Files without a `name` are skipped as documentation. |
-| `tools` | Allowlist, as a comma string or YAML list; `*` matches any characters. Omit it to give the agent every tool its extensions provide. The child refuses every other call, including calls a codemode script makes, so an MCP or codemode-only tool the list does not name is out of reach too. |
+| `tools` | Allowlist, as a comma string or YAML list; `*` matches any characters. Omit it to give the agent every tool its extensions provide; an empty list (`[]`) gives it none. The child refuses every other call, including calls a codemode script makes, so an MCP or codemode-only tool the list does not name is out of reach too. |
 | `disallowedTools` | Removed from whatever the agent would otherwise get. |
 | `model` | `provider/id`. Omit it, or write `inherit`, to use the parent's current model. An unknown model is an error, never a silent fallback. |
 | `thinking` (or `effort`) | `off` … `max`. Default: the parent's current level. |
@@ -164,7 +164,7 @@ Report findings as file:line, severity, and why. No style nits.
 
 Compaction is Pi's own, so compaction extensions apply inside agents too: `pi-codex-compaction` still gives GPT models native compaction. Pi has no per-session threshold, so the child stops before its next model request, compacts once the run settles, and the parent continues the task with `Compaction completed. Continue.` If the child refuses that prompt, the run fails with the reason instead of hanging. After a compaction it waits for the context to grow by half the threshold before compacting again, so a context that cannot shrink below the threshold does not compact every turn. Pi only summarizes history older than its `compaction.keepRecentTokens` (20k by default), so a threshold below that has nothing to compact at first; autocompact then tries again once the context has grown by half the threshold. If compaction fails for any other reason, Pi's own threshold takes over for the rest of that agent's session. The list shows `41k/100k autocompact` for such an agent and `41k/1M` for one without.
 
-**Turns are budgeted.** At 80% of `maxTurns` the agent is told to stop exploring and finish; at 100% every further tool call is refused and it must write its final report. If it keeps calling tools, the run is aborted, and the result says `turn budget exhausted`.
+**Turns are budgeted.** At 80% of `maxTurns` the agent is told to stop exploring and finish; at 100% every further tool call is refused and it must write its final report. If it keeps calling tools, the run is aborted and fails with `turn budget exhausted`, and the main session is told, like any other failure.
 
 ## Where agents work
 
@@ -190,7 +190,7 @@ A child knows it is a subagent:
 - It has no `Agent`, `SendMessage` or `TaskStop` tools, in codemode or otherwise, so it cannot recurse.
 - It never gets `ask_user_question` or the goal tools.
 
-Children are started with `PI_SUBAGENT_CHILD=1`, `PI_SUBAGENT_RUN_ID` and `PI_SUBAGENT_DEPTH=1`. [`@hank-warren/pi-auto-permissions`](../pi-auto-permissions) reads these and makes a child revise a command before a human is interrupted. `HERDR_PANE_ID` is removed from a child's environment, so a child never drives the parent pane's state.
+Children are started with `PI_SUBAGENT_CHILD=1`, `PI_SUBAGENT_RUN_ID` and `PI_SUBAGENT_DEPTH=1`. [`@hank-warren/pi-auto-permissions`](../pi-auto-permissions) reads these and makes a child revise a command before a human is interrupted. `HERDR_PANE_ID` is removed from a child's environment, so a child never drives the parent pane's state. The child drops its own `PI_AGENTS_*` variables once its extensions have loaded, so a `pi` or a test suite it runs does not start in child mode; the `PI_SUBAGENT_*` ones stay for Auto Permissions.
 
 ## Configuration
 
@@ -216,8 +216,8 @@ Settings live in `~/.pi/agent/pi-agents/config.json` (override the path with `PI
 | `worktreeDir` | Where worktrees go, for `worktree` requests and for agents that make their own. |
 | `idleTtlSeconds` | How long a finished child's process is kept for follow-ups. |
 | `excludeTools` | Added to the built-in exclusions: subagent tools, `ask_user_question`, and the goal tools. |
-| `piCommand` | Overrides how a child is started. |
+| `piCommand` | Overrides how a child is started. It must load pi-agents in the child, as an installed package does; a child without it fails its run rather than run without its tool allowlist, turn budget and autocompact. |
 
 ## Sessions
 
-Child sessions are written to `<parent session dir>/<parent session>/agents/`. A finished agent is recorded in the parent session, so after a restart `/agents` still lists it, its transcript loads from the child's session file, and `SendMessage` resumes it from there.
+Child sessions are written to `<parent session dir>/<parent session>/agents/`. Each agent is recorded in the parent session when it starts and when it ends, and one still running when the session ends is recorded as stopped. So after a restart `/agents` still lists it, its transcript loads from the child's session file, and `SendMessage` resumes it from there, with the tools it had.

@@ -128,6 +128,8 @@ export class AgentViewer implements Component, Focusable {
 	private readonly markdown: ReturnType<typeof markdownTheme>;
 	private readonly settings: ViewerSettings;
 	private streaming: AssistantMessageComponent | undefined;
+	/** Deltas arrived since the streaming message was last drawn; applied once per frame. */
+	private streamDirty = false;
 	private hideThinking: boolean;
 	private scroll = 0;
 	private expanded = false;
@@ -333,6 +335,7 @@ export class AgentViewer implements Component, Focusable {
 	}
 
 	private updateStreaming(): void {
+		this.streamDirty = false;
 		if (!this.streaming || !this.run.partial) return;
 		const message = snapshot(this.run.partial);
 		this.streaming.updateContent(message as never, true);
@@ -344,6 +347,7 @@ export class AgentViewer implements Component, Focusable {
 	}
 
 	private finishStreaming(message: ChildMessage): void {
+		this.streamDirty = false;
 		if (!this.streaming) {
 			this.addHistoric(message);
 			return;
@@ -383,7 +387,8 @@ export class AgentViewer implements Component, Focusable {
 				}
 				return;
 			case "message_update":
-				this.updateStreaming();
+				// Pi renders at most once per frame; a delta only marks the message for it.
+				this.streamDirty = true;
 				return;
 			case "message_end":
 				if (message?.role === "assistant") this.finishStreaming(message);
@@ -518,6 +523,7 @@ export class AgentViewer implements Component, Focusable {
 	}
 
 	render(width: number): string[] {
+		if (this.streamDirty) this.updateStreaming();
 		return this.draw(width).map((line) => truncateToWidth(line, width));
 	}
 
