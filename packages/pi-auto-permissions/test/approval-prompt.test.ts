@@ -12,12 +12,13 @@ function build(
   onSelect: (value: string) => void = () => {},
   appearance?: string,
   inTranscript = true,
+  note = "force push rewrites history",
 ) {
   const content: ApprovalPromptContent = {
     header: "Git push — Auto Permissions needs approval",
     command,
     noteLabel: "Guardian",
-    note: "force push rewrites history",
+    note,
     inTranscript,
   };
   const selector = new OptionSelector({
@@ -91,6 +92,22 @@ describe("ApprovalPrompt", () => {
     const prompt = build(longCommand, 40);
     prompt.render(80);
     assert.equal(prompt.handleMouse(wheel(3)), undefined);
+  });
+
+  it("keeps the viewer's command rows on screen when the note is long", () => {
+    const rows = 24;
+    const longNote = Array.from({ length: 40 }, () => "risky").join(" ").repeat(6);
+    const prompt = build(longCommand, rows, () => {}, undefined, false, longNote);
+    prompt.handleInput(CTRL_O);
+    const lines = strip(prompt.render(80));
+    // Pi's dock gives the dialog at most this much, clipping from the top.
+    const visible = lines.slice(-(rows - 6));
+    assert.ok(has(visible, "echo line 1"), "command rows survive the clip");
+    assert.ok(visible.some((line) => /lines 1-\d+ of 100/u.test(line)));
+    assert.equal(visible.filter((line) => line.startsWith("▌ ")).length, 2, "the note is cut to two rows");
+    assert.ok(visible.find((line) => line.startsWith("▌ ") && line.endsWith("…")));
+    prompt.handleInput(CTRL_O);
+    assert.ok(strip(prompt.render(80)).filter((line) => line.startsWith("▌ ")).length > 2, "collapsed shows the whole note");
   });
 
   it("ctrl+o opens the full command in a scrolling viewer that keeps the options", () => {

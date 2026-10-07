@@ -31,6 +31,8 @@ const MIN_PREVIEW_ROWS = 3;
 /** Rows left for the rest of Pi's input dock when the full command is open. */
 const RESERVED_ROWS = 6;
 const MIN_VIEWER_ROWS = 3;
+/** The note's height while the viewer is open, so a long note cannot crowd the command out. */
+const VIEWER_NOTE_ROWS = 2;
 
 // Fixed rather than the theme's `warning`, which some themes make green or dim:
 // the approval note must read as a caution in every theme.
@@ -119,7 +121,14 @@ export class ApprovalPrompt {
     const { theme, content } = this.opts;
     const yellow = noteYellow(theme);
     const text = `${theme.bold(`${content.noteLabel}:`)} ${content.note}`;
-    return wrapBlock(text, Math.max(1, width - 2)).map((line) => `${yellow("▌ ")}${yellow(line)}`);
+    const inner = Math.max(1, width - 2);
+    let lines = wrapBlock(text, inner);
+    if (this.expanded && lines.length > VIEWER_NOTE_ROWS) {
+      lines = lines.slice(0, VIEWER_NOTE_ROWS);
+      // Reflow the last kept row so the ellipsis always fits.
+      lines[VIEWER_NOTE_ROWS - 1] = truncateToWidth(`${lines[VIEWER_NOTE_ROWS - 1]} …`, inner, "…");
+    }
+    return lines.map((line) => `${yellow("▌ ")}${yellow(line)}`);
   }
 
   private preview(command: string[], width: number): string[] {
