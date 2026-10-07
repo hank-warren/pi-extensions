@@ -78,6 +78,9 @@ function denyReason(gate: Gate): string {
  * (an RPC child whose prompts surface in the parent) still costs the human an
  * interruption per prompt, so it is told to revise before it escalates.
  */
+/** The system prompt section that carries SUBAGENT_PERMISSIONS_PROMPT on Pi versions with a structured prompt. */
+export const SUBAGENT_PROMPT_SECTION = "auto_permissions_subagent";
+
 export const SUBAGENT_PERMISSIONS_PROMPT = `## Auto Permissions (subagent)
 You are running as a subagent. Bash commands that Auto Permissions cannot approve on its own need a human, and asking one pauses the supervising session until they answer. Prefer commands that stay inside your task and working directory, and read-only alternatives where they answer the question. When Auto Permissions asks you to revise a command, change the approach instead of retrying it; re-run a command unchanged only when it is genuinely required and a human should decide.`;
 
@@ -825,6 +828,15 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
       if (!loadAutoPermissionsConfig().enabled) return;
     } catch {
       // An invalid config fails closed on the first bash call; the guidance still applies.
+    }
+    // On Pi 1.x a returned systemPrompt forces the whole prompt for the run,
+    // dropping what later extensions change in its options (pi-agents adds
+    // the parent's instruction files there), so the guidance goes into a
+    // named section instead. Older Pi takes the prompt as a string.
+    const sections = (event as { systemPromptOptions?: { sections?: Record<string, string> } }).systemPromptOptions?.sections;
+    if (sections) {
+      sections[SUBAGENT_PROMPT_SECTION] = SUBAGENT_PERMISSIONS_PROMPT;
+      return;
     }
     return { systemPrompt: `${event.systemPrompt}\n\n${SUBAGENT_PERMISSIONS_PROMPT}` };
   });

@@ -18,7 +18,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { initTheme } from "@earendil-works/pi-coding-agent";
+import { createExtensionRuntime, ExtensionRunner, initTheme, SessionManager } from "@earendil-works/pi-coding-agent";
 import autoPermissionsExtension from "../index.ts";
 import { builtinTool, createCustomSelectorHarness, createMockContext, createMockPi } from "../../../test/support/mock-pi.ts";
 
@@ -1737,6 +1737,39 @@ test("34b · a call several levels down is released when its script ends, even w
 	);
 });
 
+type Handlers = Map<string, Array<(...args: never[]) => unknown>>;
+
+/**
+ * The system prompt a run starts with after these extensions' before_agent_start
+ * handlers, in this order, on the installed Pi's own ExtensionRunner: Pi 0.84
+ * chains prompt strings, Pi 1.x builds the prompt from its options afterwards.
+ * A last handler reads the result as Pi would send it.
+ */
+async function promptAfter(extensions: Handlers[], cwd: string): Promise<string> {
+	let prompt = "";
+	const probe: Handlers = new Map([["before_agent_start", [(event: { systemPrompt: string }) => void (prompt = event.systemPrompt)]]]);
+	const loaded = [...extensions, probe].map((handlers, index) => ({
+		path: `extension-${index}`,
+		resolvedPath: `extension-${index}`,
+		handlers,
+		tools: new Map(),
+		messageRenderers: new Map(),
+		commands: new Map(),
+		flags: new Map(),
+		shortcuts: new Map(),
+	}));
+	const runner = new ExtensionRunner(loaded as never, createExtensionRuntime(), cwd, SessionManager.inMemory(cwd), undefined as never);
+	const errors: unknown[] = [];
+	runner.onError((error) => errors.push(error));
+	const emit = (runner as unknown as { emitBeforeAgentStart(...args: unknown[]): Promise<unknown> }).emitBeforeAgentStart.bind(runner);
+	const options = { cwd, contextFiles: [] };
+	// Pi 0.84 takes (prompt, images, systemPrompt, options); Pi 1.x (prompt, images, options).
+	if (runner.emitBeforeAgentStart.length >= 4) await emit("task", undefined, "BASE PROMPT", options);
+	else await emit("task", undefined, options);
+	assert.deepEqual(errors, []);
+	return prompt;
+}
+
 async function asSubagentChild(run: () => Promise<void>): Promise<void> {
 	process.env.PI_SUBAGENT_CHILD = "1";
 	try {
@@ -1835,12 +1868,43 @@ test("37 · a subagent session gets the permission guidance in its system prompt
 		withExtension({ rules: [GUARDED_RULE] }, async (harness) => {
 			await harness.sessionStart();
 			const result = await promptFor(harness);
-			assert.ok(result?.systemPrompt?.startsWith("BASE\n\n## Auto Permissions (subagent)"));
+			assert.ok(result?.systemPrompt?.startsWith("BASE\n\n## Auto Permissions (subagent)"), "older Pi: appended to the prompt string");
+
+			// Pi 1.x builds the prompt from its options; a returned systemPrompt would force the whole text.
+			const handler = harness.mock.events.get("before_agent_start")![0] as EventHandler;
+			const options = { contextFiles: [], sections: {} as Record<string, string> };
+			const structured = await handler({ type: "before_agent_start", prompt: "task", systemPrompt: "BASE", systemPromptOptions: options }, harness.ctx);
+			assert.equal(structured, undefined, "never forces the prompt, so later extensions' changes to its options still apply");
+			assert.match(options.sections.auto_permissions_subagent ?? "", /^## Auto Permissions \(subagent\)/u);
 		}));
 	await withExtension({ rules: [GUARDED_RULE] }, async (harness) => {
 		await harness.sessionStart();
 		assert.equal(await promptFor(harness), undefined);
 	});
+});
+
+test("37b · with another extension adding instruction files through the prompt options, both reach a subagent's prompt in either order", async () => {
+	await asSubagentChild(() =>
+		withExtension({ rules: [GUARDED_RULE] }, async (harness) => {
+			await harness.sessionStart();
+			const autoPermissions = harness.mock.events as unknown as Handlers;
+			// Adds an instruction file only through the structured prompt's options where Pi has them (to
+			// the text on older Pi), as any extension may: a prompt forced before it would drop the file.
+			const parentFile = { path: "/workspace/AGENTS.md", content: "PARENT WORKSPACE RULES" };
+			const addsFiles: Handlers = new Map([["before_agent_start", [(event: { systemPrompt: string; systemPromptOptions?: { contextFiles?: unknown[]; sections?: object } }) => {
+				const options = event.systemPromptOptions;
+				if (options?.contextFiles && options.sections) {
+					options.contextFiles.push(parentFile);
+					return undefined;
+				}
+				return { systemPrompt: `${event.systemPrompt}\n\n${parentFile.content}` };
+			}]]]);
+			for (const [label, order] of [["auto-permissions first", [autoPermissions, addsFiles]], ["auto-permissions last", [addsFiles, autoPermissions]]] as const) {
+				const prompt = await promptAfter([...order], process.cwd());
+				assert.match(prompt, /PARENT WORKSPACE RULES/u, `${label}: the other extension's instruction file is in the prompt`);
+				assert.match(prompt, /## Auto Permissions \(subagent\)/u, `${label}: and so is the subagent guidance`);
+			}
+		}));
 });
 
 test("38 · in RPC mode the approval prompt goes through ui.select, so a subagent's parent can render it", async () => {

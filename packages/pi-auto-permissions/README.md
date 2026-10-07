@@ -445,7 +445,7 @@ Group names come from your configured rules. A trusted group bypasses guarded re
 
 When a session is a subagent child (`PI_SUBAGENT_CHILD=1`, set by `@hank-warren/pi-agents` and [pi-subagents](https://github.com/nicobailon/pi-subagents)), the guardian receives additional execution facts with each review — run id, nesting depth, whether the cwd is a linked git worktree, and the checked-out branch — plus a prompt section telling it to judge risk by effect scope and reversibility relative to the subagent's own workspace instead of by command name. Mutations confined to the subagent's isolated worktree, its own feature branch, or resources it created are approvable when they serve the delegated task; `ask_user` is reserved for effects that escape that scope (shared or default branches, host-level configuration, production systems, credentials, data leaving the machine).
 
-The child itself is told it is a subagent: a short section appended to its system prompt says that commands needing approval pause the supervising session, so it should prefer in-scope and read-only commands and revise when asked to.
+The child itself is told it is a subagent: a short section appended to its system prompt says that commands needing approval pause the supervising session, so it should prefer in-scope and read-only commands and revise when asked to. On Pi 1.x the section is a named prompt section (`auto_permissions_subagent`), so it never replaces the prompt that Pi and other extensions build, such as the parent's instruction files pi-agents adds to a child.
 
 An `ask_user` verdict in a subagent, or a failed review (timeout, unavailable reviewer, unparsable verdict), never interrupts the human on the first try:
 
