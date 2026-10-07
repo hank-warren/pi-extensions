@@ -1,5 +1,17 @@
 # @hank-warren/pi-auto-permissions
 
+## 0.19.0
+
+### Minor Changes
+
+- Make subagents revise a command before the human is interrupted, and make approval prompts work over RPC.
+
+  - A subagent session (`PI_SUBAGENT_CHILD=1`, set by `@hank-warren/pi-agents`) is told it is a subagent: a short section appended to its system prompt says that commands needing approval pause the supervising session, so it should prefer in-scope and read-only commands and revise when asked to. On Pi 1.x the section is a named prompt section (`auto_permissions_subagent`), so it never replaces the prompt that Pi and other extensions build, such as the parent's instruction files pi-agents adds to a child.
+  - In a subagent child with a UI, an `ask_user` verdict or a failed review first blocks the command with a revise-first reason instead of prompting. Issuing the same command again unchanged in a later turn escalates it to the human as an ordinary approval prompt, once: a later identical attempt is revised first again. Duplicates within the same turn, such as sibling calls or a codemode `Promise.all`, are refused too, because the model has not seen the first refusal yet. Children without a UI keep the "no interactive user" block.
+  - In RPC mode the approval prompt goes through `ctx.ui.select`. Before this, every approval forwarded over RPC was silently denied, because `custom()` returns nothing there. This applies to any RPC session, not only subagents: a client that never answers the prompt now leaves the command waiting until the turn is cancelled, where it used to be denied at once.
+  - The guardian's subagent section says what an `ask_user` verdict does for that child: revise first and then a human when its prompts surface in a parent, a hard block when it has no UI.
+  - A revise-first refusal is recorded in the denial log and the `auto-permissions:denied` event with `"reviseFirst": true`, keeping the `decisionSource` of the verdict behind it, and the recent denials view labels it "revise first".
+
 ## 0.18.0
 
 ### Minor Changes

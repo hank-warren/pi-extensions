@@ -12,7 +12,7 @@ import {
 	FULL_REBUILD_KEEP_TOOL_RECORDS,
 	parsePermissionVerdict,
 	SCRIPT_EVIDENCE_SYSTEM_PROMPT,
-	SUBAGENT_CONTEXT_SYSTEM_PROMPT,
+	subagentContextSystemPrompt,
 } from "../review.ts";
 
 function throwsWith(fn: () => unknown, needle: string): void {
@@ -337,12 +337,22 @@ describe("subagent execution context", () => {
 	});
 
 	test("guidance judges by effect scope, not command names", () => {
-		assert.match(SUBAGENT_CONTEXT_SYSTEM_PROMPT, /effect scope and reversibility/);
-		assert.match(SUBAGENT_CONTEXT_SYSTEM_PROMPT, /approvable only for branches the evidence shows the subagent created/);
-		assert.match(SUBAGENT_CONTEXT_SYSTEM_PROMPT, /does not by itself establish ownership/);
-		assert.match(SUBAGENT_CONTEXT_SYSTEM_PROMPT, /sudo/);
-		assert.match(SUBAGENT_CONTEXT_SYSTEM_PROMPT, /shared host daemons/);
-		assert.match(SUBAGENT_CONTEXT_SYSTEM_PROMPT, /shared or default branches/);
+		assert.match(subagentContextSystemPrompt(true), /effect scope and reversibility/);
+		assert.match(subagentContextSystemPrompt(true), /approvable only for branches the evidence shows the subagent created/);
+		assert.match(subagentContextSystemPrompt(true), /does not by itself establish ownership/);
+		assert.match(subagentContextSystemPrompt(true), /sudo/);
+		assert.match(subagentContextSystemPrompt(true), /shared host daemons/);
+		assert.match(subagentContextSystemPrompt(true), /shared or default branches/);
+	});
+
+	test("what ask_user does depends on whether the subagent's prompts can reach a human", () => {
+		const withUI = subagentContextSystemPrompt(true);
+		const withoutUI = subagentContextSystemPrompt(false);
+		assert.match(withUI, /first told to revise the command, and the step stays blocked unless a human later approves/);
+		assert.match(withoutUI, /cannot reach a human: this subagent has no interactive user, so the command is blocked outright/);
+		assert.doesNotMatch(withoutUI, /human later approves/, "a child without a UI is never promised a human");
+		assert.doesNotMatch(withoutUI, /\{ASK_USER\}/);
+		assert.equal(withUI.replace(/An "ask_user" decision[^.]*\./, ""), withoutUI.replace(/An "ask_user" decision[^.]*\./, ""), "only that sentence differs");
 	});
 });
 
@@ -592,10 +602,10 @@ describe("evidence pruning", () => {
 		// The research brief's high-severity finding: inside the subagent, the
 		// orchestrator's instruction *is* the user message, so without this a
 		// delegated task looks fully authorized whatever its risk.
-		assert.match(SUBAGENT_CONTEXT_SYSTEM_PROMPT, /authored by the supervising agent, not typed by a human/);
-		assert.match(SUBAGENT_CONTEXT_SYSTEM_PROMPT, /Delegation authorizes medium-risk work scoped to the subagent's own workspace/);
-		assert.match(SUBAGENT_CONTEXT_SYSTEM_PROMPT, /high- or critical-risk operation only when the delegated task names the exact operation and target/);
-		assert.match(SUBAGENT_CONTEXT_SYSTEM_PROMPT, /irreversible destruction outside the subagent's scope as never authorized by delegation alone/);
+		assert.match(subagentContextSystemPrompt(true), /authored by the supervising agent, not typed by a human/);
+		assert.match(subagentContextSystemPrompt(true), /Delegation authorizes medium-risk work scoped to the subagent's own workspace/);
+		assert.match(subagentContextSystemPrompt(true), /high- or critical-risk operation only when the delegated task names the exact operation and target/);
+		assert.match(subagentContextSystemPrompt(true), /irreversible destruction outside the subagent's scope as never authorized by delegation alone/);
 	});
 
 	test("prompt explains implied follow-ons, secret round-trips, truncation, and overrides", async () => {

@@ -174,13 +174,24 @@ Examples:
 Return strict JSON only with this shape:
 {"decision":"approve"|"revise"|"ask_user","reason":"one concise sentence"}`;
 
+/** What an "ask_user" verdict does in a subagent, which depends on whether its prompts can reach a human. */
+const SUBAGENT_ASK_USER = {
+  withUI: `An "ask_user" decision does not reach a human directly: the subagent is first told to revise the command, and the step stays blocked unless a human later approves the same command.`,
+  withoutUI: `An "ask_user" decision cannot reach a human: this subagent has no interactive user, so the command is blocked outright and the subagent must route around it or report the blocker.`,
+};
+
 /**
  * Appended to the reviewer system prompt only when the session is a subagent
  * child (detectSubagentContext). Facts arrive in the request's "execution"
- * object; this section tells the reviewer how to weigh them.
+ * object; this section tells the reviewer how to weigh them. Whether the child
+ * has a UI is fixed for its session, so the prompt stays cacheable.
  */
-export const SUBAGENT_CONTEXT_SYSTEM_PROMPT = `SUBAGENT EXECUTION CONTEXT
-This session is an autonomous subagent executing a task delegated by a supervising agent session. There is no interactive user: an "ask_user" decision does not open a prompt, it aborts this step with a block. The latest proposed action carries an "execution" object with runtime facts (isolated worktree, checked-out branch, nesting depth).
+export function subagentContextSystemPrompt(hasUI: boolean): string {
+  return SUBAGENT_CONTEXT_TEMPLATE.replace("{ASK_USER}", hasUI ? SUBAGENT_ASK_USER.withUI : SUBAGENT_ASK_USER.withoutUI);
+}
+
+const SUBAGENT_CONTEXT_TEMPLATE = `SUBAGENT EXECUTION CONTEXT
+This session is an autonomous subagent executing a task delegated by a supervising agent session. {ASK_USER} The latest proposed action carries an "execution" object with runtime facts (isolated worktree, checked-out branch, nesting depth).
 The delegated task arrives as this session's USER evidence, but it was authored by the supervising agent, not typed by a human. Delegation authorizes medium-risk work scoped to the subagent's own workspace. It does not blanket-authorize higher risk: approve a high- or critical-risk operation only when the delegated task names the exact operation and target — the same explicit-intent standard a human user's message is held to — and treat irreversible destruction outside the subagent's scope as never authorized by delegation alone, whatever the task's general wording.
 Judge risk by effect scope and reversibility relative to the subagent's own workspace, not by command name:
 - Mutations confined to the subagent's isolated worktree, or to resources the evidence shows the subagent created (scratch files, branches it created or first pushed, containers, images, test databases), are at most medium risk; approve them when they serve the delegated task.
