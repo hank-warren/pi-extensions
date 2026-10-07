@@ -362,10 +362,20 @@ export class AgentManager {
 		return run;
 	}
 
-	create(spec: RunSpec): AgentRun {
+	/**
+	 * A new run. With `sessionFile` (a forked conversation) its first launch
+	 * resumes that session instead of starting an empty one.
+	 */
+	create(spec: RunSpec, sessionFile?: string): AgentRun {
 		const run = new AgentRun(spec);
+		run.sessionFile = sessionFile;
 		this.runs.set(run.id, run);
 		return run;
+	}
+
+	/** Where children keep their sessions; undefined when this session is not saved. */
+	sessionDir(): string | undefined {
+		return this.deps.sessionDir();
 	}
 
 	private runningCount(): number {

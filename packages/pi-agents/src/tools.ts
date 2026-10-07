@@ -3,9 +3,10 @@ import { resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
-import { type AgentDefinition, composeAgent, parsePercent, THINKING_LEVELS, type ThinkingLevel } from "./agents.js";
+import { type AgentDefinition, composeAgent, CONTEXT_MODES, parsePercent, THINKING_LEVELS, type ThinkingLevel } from "./agents.js";
 import type { AgentsConfig } from "./config.js";
-import { capText, contentText, formatDuration, oneLine } from "./format.js";
+import { type Entry, writeForkSession } from "./fork.js";
+import { capText, contentText, formatDuration, formatTokens, oneLine } from "./format.js";
 import type { AgentManager, AgentRun } from "./manager.js";
 import { expandHome } from "./paths.js";
 import { AGENT_GUIDELINES, agentToolDescription, buildChildPrompt } from "./prompts.js";
@@ -40,6 +41,7 @@ const agentParams = Type.Object({
 	autocompact: Type.Optional(Type.Number({ description: "Compact the agent's context at this percentage of its model's context window, e.g. 10. Default: its full window." })),
 	max_turns: Type.Optional(Type.Integer({ minimum: 1, description: "Turn budget for the task. Default 80." })),
 	run_in_background: Type.Optional(Type.Boolean({ description: "Default true. False blocks until the agent finishes and returns its result." })),
+	context: Type.Optional(Type.Union(CONTEXT_MODES.map((mode) => Type.Literal(mode)), { description: "fresh (default): the agent sees only its prompt. fork: it starts from a copy of this conversation so far." })),
 	cwd: Type.Optional(Type.String({ description: "Run in this directory (e.g. one repository of a multi-repo workspace); its AGENTS.md is loaded." })),
 	worktree: Type.Optional(Type.Object({
 		repo: Type.String({ description: "Repository path, absolute or relative to the session directory." }),
@@ -232,7 +234,8 @@ export function registerTools(pi: ExtensionAPI, host: ToolHost, exposure: "codem
 			if (params.cwd && params.worktree) throw new Error("Pass cwd or worktree, not both");
 			const autocompact = params.autocompact === undefined ? undefined : parsePercent(params.autocompact);
 			if (params.autocompact !== undefined && autocompact === undefined) throw new Error("autocompact is a percentage of the context window between 0 and 100, e.g. 10");
-			const definition = composeAgent(saved, { instructions: params.instructions, tools: params.tools, autocompact, maxTurns: params.max_turns });
+			const definition = composeAgent(saved, { instructions: params.instructions, tools: params.tools, autocompact, maxTurns: params.max_turns, context: params.context });
+			const forked = definition.context === "fork";
 			const model = resolveModel(ctx, params.model ?? definition.model);
 			const thinking = params.thinking ?? definition.thinking ?? (pi.getThinkingLevel() as ThinkingLevel);
 			let cwd = params.cwd ? resolveCwd(ctx.cwd, params.cwd) : ctx.cwd;
@@ -246,6 +249,20 @@ export function registerTools(pi: ExtensionAPI, host: ToolHost, exposure: "codem
 			const contextWindow = ctx.modelRegistry.find(model.slice(0, slash), model.slice(slash + 1))?.contextWindow;
 			const maxTurns = definition.maxTurns ?? config.maxTurns;
 			const background = params.run_in_background ?? definition.background ?? true;
+			let fork: ReturnType<typeof writeForkSession> | undefined;
+			if (forked) {
+				const tokens = ctx.getContextUsage()?.tokens;
+				if (tokens && contextWindow && tokens > contextWindow * 0.9) {
+					throw new Error(`This conversation (~${formatTokens(tokens)} tokens) does not fit ${model}'s ${formatTokens(contextWindow)} context window with room to work; pick a larger model or start a fresh agent.`);
+				}
+				fork = writeForkSession({
+					contextEntries: ctx.sessionManager.buildContextEntries() as unknown as Entry[],
+					cwd,
+					sessionDir: host.manager.sessionDir(),
+					parentSession: ctx.sessionManager.getSessionFile(),
+					version: ctx.sessionManager.getHeader()?.version,
+				});
+			}
 			const run = host.manager.create({
 				name,
 				definition,
@@ -258,15 +275,15 @@ export function registerTools(pi: ExtensionAPI, host: ToolHost, exposure: "codem
 				contextFiles: definition.contextFiles ? host.contextFiles() : undefined,
 				contextWindow,
 				maxTurns,
-				appendPrompt: buildChildPrompt({ name, definition, cwd, maxTurns, autocompact: effectiveAutocompact, contextWindow, worktree, worktreeDir: config.worktreeDir }),
+				appendPrompt: buildChildPrompt({ name, definition, cwd, maxTurns, autocompact: effectiveAutocompact, contextWindow, worktree, worktreeDir: config.worktreeDir, forked }),
 				worktree,
-			});
+			}, fork?.file);
 			if (background) host.notify.add(run.id);
 			host.manager.start(run, params.prompt);
 
 			if (background) {
 				return {
-					content: [{ type: "text", text: `Started ${name} (id ${run.id}, ${definition.source === "inline" ? "" : `${definition.name}, `}${model})${noticeIn(run, ctx.cwd)} in the background. Its result arrives as a message when it finishes; do not poll. Steer it with SendMessage({ to: "${name}" }).` }],
+					content: [{ type: "text", text: `Started ${name} (id ${run.id}, ${definition.source === "inline" ? "" : `${definition.name}, `}${model})${noticeIn(run, ctx.cwd)}${fork ? `, forked from this conversation (${fork.messages} entries)` : ""} in the background. Its result arrives as a message when it finishes; do not poll. Steer it with SendMessage({ to: "${name}" }).` }],
 					details: detailsOf(run),
 					structuredContent: structured(run),
 				};
