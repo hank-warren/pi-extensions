@@ -239,7 +239,6 @@ export function registerTools(pi: ExtensionAPI, host: ToolHost, exposure: "codem
 			const model = resolveModel(ctx, params.model ?? definition.model);
 			const thinking = params.thinking ?? definition.thinking ?? (pi.getThinkingLevel() as ThinkingLevel);
 			let cwd = params.cwd ? resolveCwd(ctx.cwd, params.cwd) : ctx.cwd;
-			const name = host.manager.uniqueName(params.name?.trim().replace(/\s+/g, "-") || nameFromDescription(params.description));
 			const effectiveAutocompact = definition.autocompact ?? config.autocompact;
 			const slash = model.indexOf("/");
 			const contextWindow = ctx.modelRegistry.find(model.slice(0, slash), model.slice(slash + 1))?.contextWindow;
@@ -277,6 +276,8 @@ export function registerTools(pi: ExtensionAPI, host: ToolHost, exposure: "codem
 				if (signal?.aborted) throw error;
 				setupError = error instanceof Error ? error.message : String(error);
 			}
+			// After setup's awaits and with no await before create(), so parallel calls cannot take the same name.
+			const name = host.manager.uniqueName(params.name?.trim().replace(/\s+/g, "-") || nameFromDescription(params.description));
 			const run = host.manager.create({
 				name,
 				definition,

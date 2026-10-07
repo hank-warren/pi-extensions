@@ -363,8 +363,12 @@ test("setup that fails with valid arguments is a failed agent, not a rejected ca
 
 		// Listed and recorded like any failed agent, but there is nothing to resume.
 		const records = mock.entries.filter((entry) => entry.customType === "pi-agents-run").map((entry) => entry.data as { name: string; status: string });
-		assert.deepEqual(records.filter((record) => record.name !== "healthy").map((record) => `${record.name}:${record.status}`), ["broken:failed", "fork:failed"]);
+		assert.deepEqual(records.filter((record) => record.name === "broken" || record.name === "fork").map((record) => `${record.name}:${record.status}`), ["broken:failed", "fork:failed"]);
 		await assert.rejects(tool("SendMessage").execute("send", { to: "broken", message: "again" }, undefined, undefined, context.ctx), /no session file to resume from/);
+
+		// Names are taken after setup's awaits, so parallel calls with the same name stay addressable.
+		const twins = await Promise.all([1, 2].map(() => call({ name: "twin", run_in_background: false, worktree: { repo: join(dir, "no-such-repo"), branch: "feat/x" } })));
+		assert.deepEqual(twins.map((result) => result.structuredContent?.name).sort(), ["twin", "twin-2"]);
 
 		// Invalid arguments still reject: the script has a bug.
 		await assert.rejects(call({ cwd: dir, worktree: { repo: dir, branch: "x" } }), /Pass cwd or worktree, not both/);
