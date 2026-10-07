@@ -117,7 +117,7 @@ describe("reviewStatusLines", () => {
     const withDetail = reviewStatusLines("approved", "command review", REVIEWER, 0, "approved by user", PLAIN_PALETTE);
     assert.deepEqual(withDetail, [
       "auto permissions · command review · ✓ approved",
-      "approved by user",
+      "▌ approved by user",
     ]);
     const withoutDetail = reviewStatusLines("blocked", "command review", REVIEWER, 0, undefined, PLAIN_PALETTE);
     assert.equal(withoutDetail.length, 1);
@@ -135,7 +135,7 @@ describe("reviewStatusLines", () => {
     const lines = reviewStatusLines("waiting", "command review", REVIEWER, 1, "checking", palette);
     assert.deepEqual(lines, [
       `[h]auto permissions[/h] [m]· command review ·[/m] [w]${WAITING_FRAMES[1]} waiting for ${REVIEWER}[/w]`,
-      "[m]checking[/m]",
+      "[w]▌[/w] [m]checking[/m]",
     ]);
   });
 });

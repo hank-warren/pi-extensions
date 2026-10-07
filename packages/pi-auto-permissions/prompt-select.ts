@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { OptionSelector } from "@hank-warren/pi-permission-selector/selector.ts";
+import { ApprovalPrompt, type ApprovalPromptContent, approvalPromptText } from "./approval-prompt.js";
 
 /**
  * Tell Herdr this pane is waiting on a human, so a supervising agent can see
@@ -11,9 +12,9 @@ export function setHerdrBlocked(pi: ExtensionAPI, active: boolean, label?: strin
 }
 
 /**
- * Render an approval prompt with the shared `OptionSelector` through
- * `ctx.ui.custom()` (non-overlay, so it swaps into the editor area exactly
- * where `ctx.ui.select` used to render).
+ * Render an approval prompt — an `ApprovalPrompt` wrapping the shared
+ * `OptionSelector` — through `ctx.ui.custom()` (non-overlay, so it swaps into
+ * the editor area exactly where `ctx.ui.select` used to render).
  *
  * Cancellation parity with `ctx.ui.select` — all of these resolve
  * `undefined`, which every caller must treat as deny/cancel, never allow:
@@ -33,11 +34,11 @@ export function setHerdrBlocked(pi: ExtensionAPI, active: boolean, label?: strin
 export function promptSelect(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
-  title: string,
+  content: ApprovalPromptContent,
   values: string[],
   signal: AbortSignal,
 ): Promise<string | undefined> {
-  if (ctx.mode === "rpc") return ctx.ui.select(title, values, { signal });
+  if (ctx.mode === "rpc") return ctx.ui.select(approvalPromptText(content), values, { signal });
   return ctx.ui.custom<string | undefined>((tui, theme, _keybindings, done) => {
     let finished = false;
     const onAbort = () => finish(undefined);
@@ -48,7 +49,6 @@ export function promptSelect(
       done(result);
     };
     const selector = new OptionSelector({
-      title: `${theme.fg("warning", theme.bold("●"))} ${title}`,
       options: values.map((value) => ({ value, label: value })),
       allowComment: true,
       theme,
@@ -69,6 +69,11 @@ export function promptSelect(
     // `done` before the factory resolves is safe: pi marks the dialog closed
     // and never mounts the component.
     if (signal.aborted) onAbort();
-    return selector;
+    return new ApprovalPrompt({
+      content,
+      selector,
+      theme,
+      terminalRows: () => tui.terminal.rows,
+    });
   });
 }

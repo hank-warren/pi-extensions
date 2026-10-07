@@ -84,8 +84,9 @@ export interface ReviewLinePalette {
 }
 
 /**
- * Render the widget content: one status line, plus a dim detail line only
- * when a guardian reason is present. The command is intentionally omitted —
+ * Render the widget content: one status line, plus a detail line behind a
+ * `▌` bar in the outcome's tone (the approval dialog's note style) only when
+ * a reason is present. The command is intentionally omitted —
  * it is already visible in the bash tool box above.
  */
 export function reviewStatusLines(
@@ -101,7 +102,7 @@ export function reviewStatusLines(
   const lines = [
     `${palette.header("auto permissions")} ${palette.muted(`· ${gateLabel} ·`)} ${status}`,
   ];
-  if (detail) lines.push(palette.muted(detail));
+  if (detail) lines.push(`${palette[frame.tone]("▌")} ${palette.muted(detail)}`);
   return lines;
 }
 

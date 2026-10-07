@@ -130,7 +130,7 @@ function decodeDisplay(value: unknown): Display {
 						: head.includes("✗ blocked")
 							? "blocked"
 							: `unrecognized(${head})`;
-	return { state, detail: lines[1] };
+	return { state, detail: lines[1]?.replace(/^▌ /u, "") };
 }
 
 function escapeForRegExp(value: string): string {
@@ -590,7 +590,8 @@ test("7 · an ask_user verdict prompts: Allow runs the command and records an ov
 				afterAllow[0].overrides.map((override) => [override.command, override.choice]),
 				[["git push --force origin main", "allow"]],
 			);
-			assert.deepEqual(harness.displays.map((display) => display.state), ["waiting", "ask_user", "approved"]);
+			// The approval dialog stands in for the widget row while it is open.
+			assert.deepEqual(harness.displays.map((display) => display.state), ["waiting", "cleared", "approved"]);
 
 			harness.answers.push("Block");
 			const blocked = await harness.toolCall("git push --force origin release", "call-2");
@@ -659,7 +660,7 @@ test("10 · a reviewer that throws asks the user", async () => {
 			assert.equal(harness.denied[0].decisionSource, "review_failure");
 			assert.match(harness.denied[0].reason, /^Automatic review failed: reviewer offline/u);
 			assert.equal(harness.denials()[0].decisionSource, "review_failure");
-			assert.deepEqual(harness.displays.map((display) => display.state), ["waiting", "ask_user", "blocked"]);
+			assert.deepEqual(harness.displays.map((display) => display.state), ["waiting", "cleared", "blocked"]);
 		},
 	);
 });

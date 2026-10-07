@@ -76,7 +76,8 @@ export function createReviewDisplay(deps: { isSessionActive: () => boolean }): R
     if (ctx.mode !== "tui") return;
     const rows = [...active.values()];
     const shown = rows.length === 1 ? rows[0] : rows.length === 0 ? settled : undefined;
-    if (rows.length === 0 && !settled) {
+    // A lone review waiting on the human is shown by the approval dialog itself.
+    if ((rows.length === 0 && !settled) || shown?.state === "ask_user") {
       ctx.ui.setWidget(WIDGET_KEY, undefined);
       return;
     }
