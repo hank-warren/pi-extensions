@@ -239,34 +239,45 @@ export function registerTools(pi: ExtensionAPI, host: ToolHost, exposure: "codem
 			const model = resolveModel(ctx, params.model ?? definition.model);
 			const thinking = params.thinking ?? definition.thinking ?? (pi.getThinkingLevel() as ThinkingLevel);
 			let cwd = params.cwd ? resolveCwd(ctx.cwd, params.cwd) : ctx.cwd;
-			const worktree = params.worktree
-				? await ensureWorktree(exec, params.worktree, { cwd: ctx.cwd, worktreeDir: config.worktreeDir, signal })
-				: undefined;
-			if (worktree) cwd = worktree.path;
-			const name = host.manager.uniqueName(params.name?.trim().replace(/\s+/g, "-") || nameFromDescription(params.description));
 			const effectiveAutocompact = definition.autocompact ?? config.autocompact;
 			const slash = model.indexOf("/");
 			const contextWindow = ctx.modelRegistry.find(model.slice(0, slash), model.slice(slash + 1))?.contextWindow;
 			const maxTurns = definition.maxTurns ?? config.maxTurns;
 			const background = params.run_in_background ?? definition.background ?? true;
+			// Setup can fail with valid arguments (git, the session's state). That is a failed
+			// agent, not a rejected call, so a script's Promise.all keeps the agents beside it.
+			let worktree: Awaited<ReturnType<typeof ensureWorktree>> | undefined;
 			let fork: ReturnType<typeof writeForkSession> | undefined;
-			if (forked) {
-				const tokens = ctx.getContextUsage()?.tokens;
-				if (tokens && contextWindow && tokens > contextWindow * 0.9) {
-					throw new Error(`This conversation (~${formatTokens(tokens)} tokens) does not fit ${model}'s ${formatTokens(contextWindow)} context window with room to work; pick a larger model or start a fresh agent.`);
+			let setupError: string | undefined;
+			try {
+				if (params.worktree) {
+					worktree = await ensureWorktree(exec, params.worktree, { cwd: ctx.cwd, worktreeDir: config.worktreeDir, signal });
+					cwd = worktree.path;
 				}
-				const branch = ctx.sessionManager.getBranch() as unknown as Entry[];
-				const problem = forkModelProblem(branch, ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined, model);
-				if (problem) throw new Error(problem);
-				fork = writeForkSession({
-					branch,
-					cwd,
-					sessionDir: host.manager.sessionDir(),
-					parentSession: ctx.sessionManager.getSessionFile(),
-					version: ctx.sessionManager.getHeader()?.version,
-				});
-				if (fork.tempDir) host.manager.ownTempDir(fork.tempDir);
+				if (forked) {
+					const tokens = ctx.getContextUsage()?.tokens;
+					if (tokens && contextWindow && tokens > contextWindow * 0.9) {
+						throw new Error(`This conversation (~${formatTokens(tokens)} tokens) does not fit ${model}'s ${formatTokens(contextWindow)} context window with room to work; pick a larger model or start a fresh agent.`);
+					}
+					const branch = ctx.sessionManager.getBranch() as unknown as Entry[];
+					const problem = forkModelProblem(branch, ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined, model);
+					if (problem) throw new Error(problem);
+					fork = writeForkSession({
+						branch,
+						cwd,
+						sessionDir: host.manager.sessionDir(),
+						parentSession: ctx.sessionManager.getSessionFile(),
+						version: ctx.sessionManager.getHeader()?.version,
+					});
+					if (fork.tempDir) host.manager.ownTempDir(fork.tempDir);
+				}
+			} catch (error) {
+				// Interrupted, not failed: the caller is gone.
+				if (signal?.aborted) throw error;
+				setupError = error instanceof Error ? error.message : String(error);
 			}
+			// After setup's awaits and with no await before create(), so parallel calls cannot take the same name.
+			const name = host.manager.uniqueName(params.name?.trim().replace(/\s+/g, "-") || nameFromDescription(params.description));
 			const run = host.manager.create({
 				name,
 				definition,
@@ -282,6 +293,10 @@ export function registerTools(pi: ExtensionAPI, host: ToolHost, exposure: "codem
 				appendPrompt: buildChildPrompt({ name, definition, cwd, maxTurns, autocompact: effectiveAutocompact, contextWindow, worktree, worktreeDir: config.worktreeDir, forked }),
 				worktree,
 			}, fork?.file);
+			if (setupError !== undefined) {
+				host.manager.failSetup(run, setupError);
+				return { content: [{ type: "text", text: resultText(run) }], details: detailsOf(run), structuredContent: structured(run) };
+			}
 			if (background) host.notify.add(run.id);
 			host.manager.start(run, params.prompt);
 

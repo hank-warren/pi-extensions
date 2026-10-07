@@ -323,6 +323,61 @@ test("in a child process the extension registers no tools, so a child can never 
 	}
 });
 
+test("setup that fails with valid arguments is a failed agent, not a rejected call, so the agents beside it carry on", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-agents-setup-"));
+	writeFileSync(join(dir, "config.json"), JSON.stringify({ piCommand: [process.execPath, FAKE_PI] }));
+	process.env.PI_AGENTS_CONFIG = join(dir, "config.json");
+	const mock = createMockPi({ activeTools: ["read", "bash", "codemode", "Agent"] });
+	const model = { provider: "test", id: "model", contextWindow: 1_000_000 };
+	const context = createMockContext({
+		cwd: dir,
+		mode: "rpc",
+		hasUI: true,
+		model,
+		models: [model],
+		sessionManager: { getSessionId: () => "s", getSessionFile: () => undefined, getBranch: () => [], getEntries: () => [], getHeader: () => undefined },
+	});
+	piAgents(mock.pi);
+	try {
+		await mock.events.get("session_start")![0]!({ reason: "startup" }, context.ctx);
+		type Result = { content: Array<{ text: string }>; structuredContent?: Record<string, unknown> };
+		const tool = (name: string) => mock.tools.filter((item) => item.name === name).at(-1) as unknown as { execute: (...args: unknown[]) => Promise<Result> };
+		const call = (params: Record<string, unknown>) => tool("Agent").execute("call", { description: "setup check", prompt: "hi", ...params }, undefined, undefined, context.ctx);
+
+		// One lane's worktree cannot be made; the lane beside it still finishes.
+		const [broken, healthy] = await Promise.all([
+			call({ name: "broken", run_in_background: false, worktree: { repo: join(dir, "no-such-repo"), branch: "feat/x" } }),
+			call({ name: "healthy", run_in_background: false }),
+		]);
+		assert.equal(broken.structuredContent?.status, "failed");
+		assert.match(String(broken.structuredContent?.error), /worktree\.repo does not exist/);
+		assert.match(broken.content[0]!.text, /broken \(id \w+\) · failed[^\n]*\n error: worktree\.repo does not exist/);
+		assert.equal(healthy.structuredContent?.status, "done");
+
+		// A fork with nothing to copy fails the same way, in the background too, and announces nothing.
+		const fork = await call({ name: "fork", context: "fork" });
+		assert.equal(fork.structuredContent?.status, "failed");
+		assert.match(String(fork.structuredContent?.error), /no conversation to fork/);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		assert.equal(mock.sentMessages.length, 0, "the call already reported it");
+
+		// Listed and recorded like any failed agent, but there is nothing to resume.
+		const records = mock.entries.filter((entry) => entry.customType === "pi-agents-run").map((entry) => entry.data as { name: string; status: string });
+		assert.deepEqual(records.filter((record) => record.name === "broken" || record.name === "fork").map((record) => `${record.name}:${record.status}`), ["broken:failed", "fork:failed"]);
+		await assert.rejects(tool("SendMessage").execute("send", { to: "broken", message: "again" }, undefined, undefined, context.ctx), /no session file to resume from/);
+
+		// Names are taken after setup's awaits, so parallel calls with the same name stay addressable.
+		const twins = await Promise.all([1, 2].map(() => call({ name: "twin", run_in_background: false, worktree: { repo: join(dir, "no-such-repo"), branch: "feat/x" } })));
+		assert.deepEqual(twins.map((result) => result.structuredContent?.name).sort(), ["twin", "twin-2"]);
+
+		// Invalid arguments still reject: the script has a bug.
+		await assert.rejects(call({ cwd: dir, worktree: { repo: dir, branch: "x" } }), /Pass cwd or worktree, not both/);
+	} finally {
+		await mock.events.get("session_shutdown")![0]!({}, context.ctx);
+		delete process.env.PI_AGENTS_CONFIG;
+	}
+});
+
 test("agents are composed per call or start from a saved one, run behind codemode, and announce background results", async () => {
 	const dir = mkdtempSync(join(tmpdir(), "pi-agents-tool-"));
 	writeFileSync(join(dir, "config.json"), JSON.stringify({ piCommand: [process.execPath, FAKE_PI] }));

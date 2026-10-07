@@ -56,7 +56,7 @@ Agents run in the background by default: the call returns at once, the result ar
 
 export const AGENT_GUIDELINES = [
 	"Delegate with Agent when a side task would flood this context (broad searches, log digging, fresh-context review) or when independent lanes can run in parallel. Do small, targeted work yourself.",
-	"Start agents from a codemode script: one `await tools.Agent({...})` per agent, or `Promise.all` over several with run_in_background: false when you need their results together; return only the synthesis. A failed agent resolves with status \"failed\" and its error rather than rejecting, so check each result's status.",
+	"Start agents from a codemode script: one `await tools.Agent({...})` per agent, or `Promise.all` over several with run_in_background: false when you need their results together; return only the synthesis. A failed agent resolves with status \"failed\" and its error rather than rejecting, including one whose worktree or fork could not be set up, so check each result's status; only invalid arguments reject.",
 	"Compose each agent for its task: pick model and thinking for the work (a strong model for review, a fast one for lookups), restrict tools for read-only work, and put the role in instructions. Use agent: \"<name>\" for a saved agent.",
 	"Prefer a fresh agent with a self-contained prompt; fork (context: \"fork\") only when the task depends on context that would be long or lossy to restate. A forked child's prompt still states its task and what to return.",
 	"autocompact compacts an agent at that percentage of its model's context window (10 on a 1M-token model compacts at 100k); omit it to give the agent its full window.",
