@@ -28,6 +28,12 @@ export interface DenialRecord {
   verdict: DenialVerdict;
   reason: string;
   decisionSource: DenialSource;
+  /**
+   * A subagent's revise-first refusal: `decisionSource` would have gone to the
+   * human (an ask_user verdict or a failed review), and the subagent was told
+   * to revise first. Absent on every other denial.
+   */
+  reviseFirst?: true;
 }
 
 export function buildDenialRecord(input: {
@@ -39,6 +45,7 @@ export function buildDenialRecord(input: {
   verdict: DenialVerdict;
   reason: string;
   decisionSource: DenialSource;
+  reviseFirst?: boolean;
 }): DenialRecord {
   return {
     v: 1,
@@ -52,6 +59,7 @@ export function buildDenialRecord(input: {
     verdict: input.verdict,
     reason: input.reason,
     decisionSource: input.decisionSource,
+    ...(input.reviseFirst ? { reviseFirst: true as const } : {}),
   };
 }
 
