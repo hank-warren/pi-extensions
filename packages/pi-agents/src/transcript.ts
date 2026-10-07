@@ -19,14 +19,14 @@ export function loadLog(sessionFile: string, limit = 600): LogEntry[] {
 	const log: LogEntry[] = [];
 	for (const line of raw.split("\n")) {
 		if (!line.trim()) continue;
-		let entry: { type?: string; customType?: unknown; data?: { messages?: unknown }; message?: ChildMessage; summary?: unknown; tokensBefore?: unknown; timestamp?: unknown };
+		let entry: { type?: string; customType?: unknown; data?: { entries?: unknown }; message?: ChildMessage; summary?: unknown; tokensBefore?: unknown; timestamp?: unknown };
 		try {
 			entry = JSON.parse(line);
 		} catch {
 			continue;
 		}
 		if (entry.type === "custom" && entry.customType === FORK_ENTRY) {
-			const copied = Number(entry.data?.messages) || 0;
+			const copied = Number(entry.data?.entries) || 0;
 			log.length = 0;
 			log.push({ kind: "notice", text: `forked from the supervising session${copied ? ` (${copied} entries of its conversation)` : ""}` });
 		} else if (entry.type === "message" && entry.message && typeof entry.message.role === "string") {

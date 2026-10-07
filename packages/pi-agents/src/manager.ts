@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { rmSync } from "node:fs";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentDefinition } from "./agents.js";
 import { BUDGET_STATUS_KEY, CHILD_ENV_KEYS, CHILD_STATUS_KEY, COMPACT_STATUS_KEY, CONTINUE_AFTER_COMPACTION } from "./child.js";
@@ -298,6 +299,7 @@ export class AgentManager {
 	private listeners = new Set<() => void>();
 	private uiChain: Promise<void> = Promise.resolve();
 	private disposed = false;
+	private tempDirs = new Set<string>();
 
 	constructor(private readonly deps: ManagerDeps) {}
 
@@ -376,6 +378,15 @@ export class AgentManager {
 	/** Where children keep their sessions; undefined when this session is not saved. */
 	sessionDir(): string | undefined {
 		return this.deps.sessionDir();
+	}
+
+	/**
+	 * A temporary directory holding a child's session (a fork from an unsaved
+	 * session): kept while follow-ups can resume the child, removed on dispose
+	 * once every child has exited.
+	 */
+	ownTempDir(dir: string): void {
+		this.tempDirs.add(dir);
 	}
 
 	private runningCount(): number {
@@ -571,6 +582,8 @@ export class AgentManager {
 			}
 			await run.proc?.stop(500);
 		}));
+		for (const dir of this.tempDirs) rmSync(dir, { recursive: true, force: true });
+		this.tempDirs.clear();
 		this.listeners.clear();
 		return interrupted;
 	}

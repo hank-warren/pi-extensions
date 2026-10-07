@@ -5,7 +5,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import { type AgentDefinition, composeAgent, CONTEXT_MODES, parsePercent, THINKING_LEVELS, type ThinkingLevel } from "./agents.js";
 import type { AgentsConfig } from "./config.js";
-import { type Entry, writeForkSession } from "./fork.js";
+import { type Entry, forkModelProblem, writeForkSession } from "./fork.js";
 import { capText, contentText, formatDuration, formatTokens, oneLine } from "./format.js";
 import type { AgentManager, AgentRun } from "./manager.js";
 import { expandHome } from "./paths.js";
@@ -255,13 +255,17 @@ export function registerTools(pi: ExtensionAPI, host: ToolHost, exposure: "codem
 				if (tokens && contextWindow && tokens > contextWindow * 0.9) {
 					throw new Error(`This conversation (~${formatTokens(tokens)} tokens) does not fit ${model}'s ${formatTokens(contextWindow)} context window with room to work; pick a larger model or start a fresh agent.`);
 				}
+				const branch = ctx.sessionManager.getBranch() as unknown as Entry[];
+				const problem = forkModelProblem(branch, ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined, model);
+				if (problem) throw new Error(problem);
 				fork = writeForkSession({
-					contextEntries: ctx.sessionManager.buildContextEntries() as unknown as Entry[],
+					branch,
 					cwd,
 					sessionDir: host.manager.sessionDir(),
 					parentSession: ctx.sessionManager.getSessionFile(),
 					version: ctx.sessionManager.getHeader()?.version,
 				});
+				if (fork.tempDir) host.manager.ownTempDir(fork.tempDir);
 			}
 			const run = host.manager.create({
 				name,
@@ -283,7 +287,7 @@ export function registerTools(pi: ExtensionAPI, host: ToolHost, exposure: "codem
 
 			if (background) {
 				return {
-					content: [{ type: "text", text: `Started ${name} (id ${run.id}, ${definition.source === "inline" ? "" : `${definition.name}, `}${model})${noticeIn(run, ctx.cwd)}${fork ? `, forked from this conversation (${fork.messages} entries)` : ""} in the background. Its result arrives as a message when it finishes; do not poll. Steer it with SendMessage({ to: "${name}" }).` }],
+					content: [{ type: "text", text: `Started ${name} (id ${run.id}, ${definition.source === "inline" ? "" : `${definition.name}, `}${model})${noticeIn(run, ctx.cwd)}${fork ? `, forked from this conversation (${fork.entries} entries)` : ""} in the background. Its result arrives as a message when it finishes; do not poll. Steer it with SendMessage({ to: "${name}" }).` }],
 					details: detailsOf(run),
 					structuredContent: structured(run),
 				};

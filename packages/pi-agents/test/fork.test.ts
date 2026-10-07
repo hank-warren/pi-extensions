@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { composeAgent, parseAgentFile } from "../src/agents.js";
-import { type Entry, FORK_ENTRY, FORK_NOTE, forkHistory, writeForkSession } from "../src/fork.js";
+import { DEFAULT_CONFIG } from "../src/config.js";
+import { type Entry, FORK_ENTRY, FORK_NOTE, forkHistory, forkModelProblem, writeForkSession } from "../src/fork.js";
+import { AgentManager } from "../src/manager.js";
 import { buildChildPrompt } from "../src/prompts.js";
 import { loadLog } from "../src/transcript.js";
 import { ensureWorktree, type Exec, parseRemoteHead } from "../src/worktree.js";
@@ -33,8 +35,9 @@ test("a fork resumes to exactly the parent's model context, with the call that s
 	parent.appendMessage(toolResult("c2", "bash", "done") as never);
 
 	const dir = mkdtempSync(join(tmpdir(), "pi-agents-fork-"));
-	const fork = writeForkSession({ contextEntries: parent.buildContextEntries() as unknown as Entry[], cwd: "/child", sessionDir: join(dir, "agents"), parentSession: "/parent.jsonl", now: 9 });
+	const fork = writeForkSession({ branch: parent.getBranch() as unknown as Entry[], cwd: "/child", sessionDir: join(dir, "agents"), parentSession: "/parent.jsonl", now: 9 });
 	assert.equal(fork.closed, 1);
+	assert.equal(fork.tempDir, undefined);
 	assert.equal(statSync(fork.file).mode & 0o777, 0o600);
 
 	const child = SessionManager.open(fork.file);
@@ -42,33 +45,84 @@ test("a fork resumes to exactly the parent's model context, with the call that s
 	assert.deepEqual(child.buildSessionContext().messages, [...parent.buildSessionContext().messages, closing]);
 	assert.equal(child.getHeader()?.parentSession, "/parent.jsonl");
 	assert.equal(child.getHeader()?.cwd, "/child");
+	// History before the kept range is not copied; the compaction stays after the entries it keeps.
+	const texts = child.getEntries().map((entry) => entry.type === "message" ? JSON.stringify((entry.message as { content: unknown }).content) : entry.type);
+	assert.equal(texts.some((text) => text.includes("old question")), false);
+	assert.ok(texts.indexOf("compaction") > texts.findIndex((text) => text.includes("kept question")));
 	// Extension state stays behind; only the marker is a custom entry.
 	assert.deepEqual(child.getEntries().filter((entry) => entry.type === "custom").map((entry) => (entry as { customType: string }).customType), [FORK_ENTRY]);
 	assert.equal(child.getEntries().some((entry) => entry.type === "model_change"), false);
 
 	// The child's own transcript starts at the fork.
 	const log = loadLog(fork.file);
-	assert.deepEqual(log, [{ kind: "notice", text: `forked from the supervising session (${fork.messages} entries of its conversation)` }]);
+	assert.deepEqual(log, [{ kind: "notice", text: `forked from the supervising session (${fork.entries} entries of its conversation)` }]);
 	writeFileSync(fork.file, `${readFileSync(fork.file, "utf8")}${JSON.stringify({ type: "message", message: user("the forked task") })}\n`);
 	assert.deepEqual(loadLog(fork.file).slice(1), [{ kind: "message", message: user("the forked task") }]);
 });
 
-test("a fork applies context edits, keeps branch summaries, and closes nothing when no call is pending", () => {
-	const entry = (id: string, fields: Record<string, unknown>): Entry => ({ id, parentId: null, timestamp: "t", type: "message", ...fields });
+test("a compaction an extension reads in place keeps the same entries after it, and pins the fork to this session's model", () => {
+	const parent = SessionManager.inMemory("/work");
+	const kept = parent.appendMessage(user("kept question") as never);
+	parent.appendMessage(assistant([{ type: "text", text: "kept answer" }]) as never);
+	// Like pi-codex-compaction: a model-bound checkpoint the extension rebuilds requests from, plus the entries after it.
+	parent.appendCompaction("checkpoint marker", kept, 5000, { kind: "openai-codex-native-compaction", modelKey: "p:x:m", replacementHistory: [] }, true);
+	parent.appendCustomEntry("plan-mode", { active: true });
+	parent.appendMessage(user("after the checkpoint") as never);
+	parent.appendMessage(assistant([call("c1", "codemode")]) as never);
+	const branch = parent.getBranch() as unknown as Entry[];
+
+	const after = (entries: Entry[]) => {
+		const index = entries.findIndex((entry) => entry.type === "compaction");
+		return entries.slice(index + 1).filter((entry) => entry.type !== "custom").map((entry) => entry.id);
+	};
+	const { entries } = forkHistory(branch);
+	const compaction = entries.find((entry) => entry.type === "compaction")!;
+	assert.deepEqual(compaction.details, (branch.find((entry) => entry.type === "compaction")!).details);
+	assert.deepEqual(after(entries).slice(0, -1), after(branch));
+	assert.equal(entries.at(-1)!.type, "message");
+
+	assert.equal(forkModelProblem(branch, "p/m", "p/m"), undefined);
+	assert.match(forkModelProblem(branch, "p/m", "q/other") ?? "", /compacted by an extension.*fork it on this session's model \(p\/m\)/);
+	// Pi's own compactions are plain-text summaries any model reads.
+	const plain = SessionManager.inMemory("/work");
+	const id = plain.appendMessage(user("q") as never);
+	plain.appendCompaction("summary", id, 10);
+	assert.equal(forkModelProblem(plain.getBranch() as unknown as Entry[], "p/m", "q/other"), undefined);
+});
+
+test("a fork copies context edits and branch summaries as they are, and keeps the kept range when its first entry is left behind", () => {
+	const entry = (id: string, fields: Record<string, unknown>): Entry => ({ id, parentId: "x", timestamp: "t", type: "message", ...fields });
 	const { entries, closed } = forkHistory([
+		entry("old", { message: user("summarized") }),
+		entry("k", { type: "custom", customType: "state" }),
 		entry("a", { message: user("keep") }),
-		entry("b", { message: assistant([{ type: "text", text: "secret tool dump" }]) }),
-		entry("c", { message: user("drop me") }),
+		entry("cmp", { type: "compaction", summary: "s", firstKeptEntryId: "k", tokensBefore: 1 }),
 		entry("s", { type: "branch_summary", fromId: "a", summary: "tried another way" }),
-		entry("e1", { type: "context_edit", targetId: "b", replacement: { content: "pruned" } }),
-		entry("e2", { type: "context_edit", targetId: "c", replacement: null }),
+		entry("e", { type: "context_edit", targetId: "a", replacement: null }),
 		entry("l", { type: "label", targetId: "a", label: "x" }),
+		entry("u", { type: "usage", kind: "cache_warm" }),
 	]);
 	assert.equal(closed, 0);
-	assert.deepEqual(entries.map((item) => item.id), ["a", "b", "s"]);
-	assert.deepEqual(entries.map((item) => item.parentId), [null, "a", "b"]);
-	assert.deepEqual((entries[1]!.message as { content: unknown }).content, [{ type: "text", text: "pruned" }]);
-	assert.throws(() => writeForkSession({ contextEntries: [], cwd: "/w", sessionDir: mkdtempSync(join(tmpdir(), "pi-agents-fork-")) }), /no conversation to fork/);
+	assert.deepEqual(entries.map((item) => item.id), ["a", "cmp", "s", "e"]);
+	assert.deepEqual(entries.map((item) => item.parentId), [null, "a", "cmp", "s"]);
+	assert.equal(entries[1]!.firstKeptEntryId, "a");
+	assert.throws(() => writeForkSession({ branch: [], cwd: "/w", sessionDir: mkdtempSync(join(tmpdir(), "pi-agents-fork-")) }), /no conversation to fork/);
+});
+
+test("a fork from an unsaved session lives in a temporary directory the manager removes on dispose", async () => {
+	const fork = writeForkSession({ branch: [{ type: "message", id: "a", parentId: null, timestamp: "t", message: user("hi") }], cwd: "/w" });
+	assert.ok(fork.tempDir && fork.file.startsWith(fork.tempDir));
+	const manager = new AgentManager({
+		config: () => DEFAULT_CONFIG,
+		ctx: () => undefined,
+		spawnCommand: () => [process.execPath, "-e", ""],
+		sessionDir: () => undefined,
+		onFinished: () => {},
+	});
+	manager.ownTempDir(fork.tempDir);
+	assert.ok(existsSync(fork.file));
+	await manager.dispose();
+	assert.equal(existsSync(fork.tempDir), false);
 });
 
 test("fork is a call parameter or a saved agent's default, and a forked child is told what its history is", () => {
