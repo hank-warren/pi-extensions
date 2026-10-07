@@ -1,8 +1,8 @@
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { formatTokens } from "./format.js";
+import { expandHome, realPath as real } from "./paths.js";
 
 /** Status key the child uses to tell the parent its turn budget ran out. */
 export const BUDGET_STATUS_KEY = "pi-agents-budget";
@@ -117,19 +117,6 @@ function instructionFile(dir: string): string | undefined {
 		}
 	}
 	return undefined;
-}
-
-function real(path: string): string {
-	try {
-		return realpathSync(path);
-	} catch {
-		return resolve(path);
-	}
-}
-
-function expandHome(path: string): string {
-	if (path === "~") return homedir();
-	return path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
 }
 
 const PATH_TOOLS = new Set(["read", "edit", "write", "grep", "find", "ls"]);
@@ -286,7 +273,7 @@ export function registerChild(pi: ExtensionAPI, state: ChildState): void {
 		ctx.ui.setStatus(BUDGET_STATUS_KEY, undefined);
 		arm(ctx);
 		if (!instructions) return;
-		const options = (event as { systemPromptOptions?: { contextFiles?: ContextFile[] } }).systemPromptOptions;
+		const options = (event as { systemPromptOptions?: { contextFiles?: ContextFile[]; sections?: object; forceSystemPrompt?: string } }).systemPromptOptions;
 		const fallback = (ctx as { getSystemPromptOptions?: () => { contextFiles?: ContextFile[] } }).getSystemPromptOptions?.().contextFiles;
 		const own: ContextFile[] = options?.contextFiles ?? fallback ?? [];
 		const ownReal = new Set(own.map((file) => real(file.path)));
@@ -308,7 +295,11 @@ export function registerChild(pi: ExtensionAPI, state: ChildState): void {
 		for (const file of extra) inPrompt.add(real(file.path));
 		for (const key of inPrompt) seen.add(key);
 		if (!extra.length) return;
-		if (options?.contextFiles) {
+		// Pi 1.x builds the prompt from its options after this hook (they carry
+		// `sections`), unless an earlier extension returned a whole prompt, which
+		// forces that text. Older Pi takes the prompt as a string. In both of those
+		// cases the files are added to the prompt text instead.
+		if (options?.contextFiles && options.sections && options.forceSystemPrompt === undefined) {
 			// After the files the parent shares, before the child's own directory chain.
 			const parentReal = new Set(inherited.map(real));
 			let at = 0;

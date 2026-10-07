@@ -36,14 +36,14 @@ Children are spawned with the parent's own Pi binary and Node, plus any `-e` ext
 
 When the session has `codemode`, the three tools are registered with Pi's `codemode` exposure: they are not declared to the model as tools of their own, and the model starts agents from scripts. Without codemode they are ordinary tools.
 
-`Agent` declares an output schema, so a script gets a structured value back: `{ id, name, type, status, result, toolUses, contextTokens, durationMs, sessionFile, worktreePath, branch }`. Fan-out is a plain script:
+`Agent` declares an output schema, so a script gets a structured value back: `{ id, name, type, status, result, error, toolUses, contextTokens, durationMs, budgetExhausted, sessionFile, worktreePath, branch }`. An agent that fails resolves with `status: "failed"` and its `error` rather than rejecting, so one failure does not end a script and stop the agents beside it; a call still rejects for invalid arguments, such as an unknown model. Fan-out is a plain script:
 
 ```js
 const lanes = [
   { model: "cpa/claude-opus-5-5", name: "opus-review" },
   { model: "cpa/gpt-6.1-sol", name: "sol-review" },
 ];
-const reviews = await Promise.allSettled(lanes.map((lane) => tools.Agent({
+const reviews = await Promise.all(lanes.map((lane) => tools.Agent({
   ...lane,
   description: "review PR 55",
   instructions: "You review diffs for correctness bugs. Report file:line, severity, why, and the smallest fix.",
@@ -52,7 +52,7 @@ const reviews = await Promise.allSettled(lanes.map((lane) => tools.Agent({
   autocompact: 10,
   run_in_background: false,
 })));
-return reviews.map((r, i) => `## ${lanes[i].name}\n${r.status === "fulfilled" ? r.value.result : `failed: ${r.reason}`}`).join("\n\n");
+return reviews.map((r) => `## ${r.name}\n${r.status === "failed" ? `failed: ${r.error}` : r.result}`).join("\n\n");
 ```
 
 Only the script's output reaches the parent's context. Pressing Esc, or a script that ends early, stops the agents it started. Children have codemode too, but no agent tools: an agent never starts another.
@@ -220,4 +220,4 @@ Settings live in `~/.pi/agent/pi-agents/config.json` (override the path with `PI
 
 ## Sessions
 
-Child sessions are written to `<parent session dir>/<parent session>/agents/`. Each agent is recorded in the parent session when it starts, again once its session file is known, and when it ends; one still running when the session ends is recorded as stopped, and one the parent loses in a crash is listed as stopped after a restart. So after a restart `/agents` still lists it, its transcript loads from the child's session file, and `SendMessage` resumes it from there, with the tools it had.
+Child sessions are written to `<parent session dir>/<parent session>/agents/`. Each agent is recorded in the parent session when it starts, again once its session file is known, and when it ends; one still running when the session ends is recorded as stopped, and one the parent loses in a crash is listed as stopped after a restart. The session ends for Pi's `/reload`, `/new`, a session switch or fork, and quitting: each of these stops every running agent and records it as stopped in the session it ran in, and back in that session `SendMessage` resumes it. So after a restart `/agents` still lists it, its transcript loads from the child's session file, and `SendMessage` resumes it from there, with the tools it had.

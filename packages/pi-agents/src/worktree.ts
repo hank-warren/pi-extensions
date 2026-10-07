@@ -1,6 +1,6 @@
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { expandHome } from "./config.js";
+import { expandHome, realPath as real } from "./paths.js";
 
 export interface WorktreeRequest {
 	/** Repository path, absolute or relative to the session's working directory. */
@@ -41,14 +41,6 @@ export type Exec = (command: string, args: string[], options?: { cwd?: string; t
 /** `feat/foo-bar` -> `feat-foo-bar`: the flat `~/repos/worktrees/<descriptor>` layout. */
 export function worktreeDirName(branch: string): string {
 	return branch.replace(/[\\/]+/g, "-").replace(/[^\w.-]/g, "-").replace(/^-+|-+$/g, "");
-}
-
-function real(path: string): string {
-	try {
-		return realpathSync(path);
-	} catch {
-		return resolve(path);
-	}
 }
 
 /**

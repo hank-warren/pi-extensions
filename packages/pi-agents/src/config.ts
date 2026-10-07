@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { parsePercent } from "./agents.js";
+import { expandHome } from "./paths.js";
 
 /**
  * Tools a child never gets, whatever its definition says: interactive tools
@@ -51,11 +51,6 @@ export const DEFAULT_CONFIG: AgentsConfig = {
 
 export function configPath(): string {
 	return process.env.PI_AGENTS_CONFIG ?? join(getAgentDir(), "pi-agents", "config.json");
-}
-
-export function expandHome(path: string): string {
-	if (path === "~") return homedir();
-	return path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
 }
 
 function positiveInt(value: unknown): number | undefined {

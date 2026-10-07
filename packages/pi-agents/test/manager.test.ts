@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { createExtensionRuntime, ExtensionRunner, SessionManager } from "@earendil-works/pi-coding-agent";
 import { createMockContext, createMockPi } from "../../../test/support/mock-pi.js";
 import { type AgentDefinition, composeAgent } from "../src/agents.js";
 import { CHILD_STATE_SLOT } from "../src/child.js";
@@ -516,7 +517,7 @@ test("a child adds the parent's instruction files, loads a directory's AGENTS.md
 
 		// Pi loaded the worktree's chain; the parent's workspace file is added after the shared one.
 		const contextFiles = [{ path: join(root, "AGENTS.md"), content: "shared rules" }, { path: join(repo, "AGENTS.md"), content: "repo rules" }];
-		await on("before_agent_start")({ systemPrompt: "", systemPromptOptions: { contextFiles } }, ctx);
+		await on("before_agent_start")({ systemPrompt: "", systemPromptOptions: { contextFiles, sections: {} } }, ctx);
 		assert.deepEqual(contextFiles.map((file) => file.content), ["shared rules", "workspace rules", "repo rules"]);
 
 		// Working in another repository brings its instructions along, once.
@@ -562,6 +563,61 @@ test("a child adds the parent's instruction files, loads a directory's AGENTS.md
 		assert.equal(mock.sentUserMessages.length, 0, "never the extension's own sendUserMessage, which fails silently");
 	} finally {
 		for (const key of ["PI_AGENTS_CHILD", "PI_AGENTS_AUTOCOMPACT", "PI_AGENTS_CONTEXT_FILES"]) delete process.env[key];
+		forgetChild();
+	}
+});
+
+type Handlers = Map<string, Array<(...args: never[]) => unknown>>;
+
+/**
+ * The system prompt a run starts with after these extensions' before_agent_start
+ * handlers, in this order, on the installed Pi's own ExtensionRunner: Pi 0.84
+ * chains prompt strings, Pi 1.x builds the prompt from its options afterwards.
+ * A last handler reads the result as Pi would send it.
+ */
+async function promptAfter(extensions: Handlers[], cwd: string, contextFiles: Array<{ path: string; content: string }>): Promise<string> {
+	let prompt = "";
+	const probe: Handlers = new Map([["before_agent_start", [(event: { systemPrompt: string }) => void (prompt = event.systemPrompt)]]]);
+	const loaded = [...extensions, probe].map((handlers, index) => ({
+		path: `extension-${index}`,
+		resolvedPath: `extension-${index}`,
+		handlers,
+		tools: new Map(),
+		messageRenderers: new Map(),
+		commands: new Map(),
+		flags: new Map(),
+		shortcuts: new Map(),
+	}));
+	const runner = new ExtensionRunner(loaded as never, createExtensionRuntime(), cwd, SessionManager.inMemory(cwd), undefined as never);
+	const errors: unknown[] = [];
+	runner.onError((error) => errors.push(error));
+	const emit = (runner as unknown as { emitBeforeAgentStart(...args: unknown[]): Promise<unknown> }).emitBeforeAgentStart.bind(runner);
+	const options = { cwd, contextFiles };
+	// Pi 0.84 takes (prompt, images, systemPrompt, options); Pi 1.x (prompt, images, options).
+	if (runner.emitBeforeAgentStart.length >= 4) await emit("task", undefined, "BASE PROMPT", options);
+	else await emit("task", undefined, options);
+	assert.deepEqual(errors, []);
+	return prompt;
+}
+
+test("a child's inherited instruction files reach its prompt, even after another extension forces the whole prompt", async () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-agents-prompt-"));
+	writeFileSync(join(root, "AGENTS.md"), "PARENT WORKSPACE RULES");
+	Object.assign(process.env, { PI_AGENTS_CHILD: "1", PI_AGENTS_CONTEXT_FILES: JSON.stringify([join(root, "AGENTS.md")]) });
+	try {
+		const mock = createMockPi();
+		piAgents(mock.pi);
+		const child = mock.events as unknown as Handlers;
+		// Returns a whole prompt, as Auto Permissions 0.19.0 and plan mode did: on Pi 1.x that forces it.
+		const forcing: Handlers = new Map([["before_agent_start", [(event: { systemPrompt: string }) => ({ systemPrompt: `${event.systemPrompt}\n\nOTHER EXTENSION SECTION` })]]]);
+		const own = [{ path: join(root, "repo", "AGENTS.md"), content: "CHILD REPO RULES" }];
+		for (const [label, order] of [["forcing first", [forcing, child]], ["pi-agents first", [child, forcing]]] as const) {
+			const prompt = await promptAfter([...order], root, own.map((file) => ({ ...file })));
+			assert.match(prompt, /PARENT WORKSPACE RULES/, `${label}: the parent's instruction file is in the prompt`);
+			assert.match(prompt, /OTHER EXTENSION SECTION/, `${label}: and so is the other extension's addition`);
+		}
+	} finally {
+		for (const key of ["PI_AGENTS_CHILD", "PI_AGENTS_CONTEXT_FILES"]) delete process.env[key];
 		forgetChild();
 	}
 });
@@ -670,6 +726,28 @@ test("a run is recorded again once its session file is known, and its report can
 	}
 });
 
+test("a foreground agent that fails resolves with its status, so a Promise.all keeps the agents beside it", async () => {
+	const ext = await extensionWithFakeChildren();
+	try {
+		const [failed, steady] = await Promise.all([
+			ext.agent({ name: "flaky", prompt: "FAIL overloaded", run_in_background: false }),
+			ext.agent({ name: "steady", prompt: "hello", run_in_background: false }),
+		]);
+		assert.equal(failed.structuredContent?.status, "failed", "a result, not a rejection that would end the script");
+		assert.match(String(failed.structuredContent?.error), /529 overloaded/);
+		assert.match(failed.content[0]!.text, /flaky .*· failed ·/);
+		assert.equal(steady.structuredContent?.status, "done");
+		assert.equal(steady.structuredContent?.result, "echo: hello");
+
+		await ext.agent({ name: "again", prompt: "hello", run_in_background: false });
+		const resumed = await ext.send({ to: "again", message: "FAIL overloaded", wait: true });
+		assert.equal(resumed.structuredContent?.status, "failed", "SendMessage with wait reports a failure the same way");
+	} finally {
+		await ext.shutdown();
+		delete process.env.PI_AGENTS_CONFIG;
+	}
+});
+
 test("SendMessage with wait returns a running agent's result once, without also announcing it", async () => {
 	const ext = await extensionWithFakeChildren();
 	try {
@@ -689,7 +767,9 @@ test("SendMessage with wait returns a running agent's result once, without also 
 test("a child process without pi-agents fails its run instead of running without its limits", async () => {
 	const ext = await extensionWithFakeChildren();
 	try {
-		await assert.rejects(ext.agent({ name: "bare", prompt: "UNLOADED", run_in_background: false }), /pi-agents did not load in the agent's process/);
+		const bare = await ext.agent({ name: "bare", prompt: "UNLOADED", run_in_background: false });
+		assert.equal(bare.structuredContent?.status, "failed");
+		assert.match(String(bare.structuredContent?.error), /pi-agents did not load in the agent's process/);
 		assert.equal(ext.records("bare").at(-1)?.status, "failed");
 	} finally {
 		await ext.shutdown();

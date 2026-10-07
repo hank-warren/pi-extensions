@@ -151,12 +151,12 @@ export class RpcProcess {
 		this.send({ type: "extension_ui_response", id, ...payload });
 	}
 
-	/** Abort any run, close stdin for an orderly exit, then escalate to signals. */
 	/** Resolves once the process has exited (immediately if it never started or already exited). */
 	whenExited(): Promise<void> {
 		return this.child && !this.exited ? this.exitedPromise : Promise.resolve();
 	}
 
+	/** Abort any run, close stdin for an orderly exit, then escalate to signals. */
 	async stop(graceMs = 2000): Promise<void> {
 		if (this.exited || !this.child) return;
 		this.stopping = true;

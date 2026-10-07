@@ -4,9 +4,10 @@ import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-c
 import { Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import { type AgentDefinition, composeAgent, parsePercent, THINKING_LEVELS, type ThinkingLevel } from "./agents.js";
-import { type AgentsConfig, expandHome } from "./config.js";
+import type { AgentsConfig } from "./config.js";
 import { capText, contentText, formatDuration, oneLine } from "./format.js";
 import type { AgentManager, AgentRun } from "./manager.js";
+import { expandHome } from "./paths.js";
 import { AGENT_GUIDELINES, agentToolDescription, buildChildPrompt } from "./prompts.js";
 import { type AgentDetails, detailsOf, renderAgentCall, renderAgentResult, statsLine } from "./render.js";
 import { ensureWorktree, type Exec, worktreeOrigin } from "./worktree.js";
@@ -276,7 +277,7 @@ export function registerTools(pi: ExtensionAPI, host: ToolHost, exposure: "codem
 			} finally {
 				stopStreaming();
 			}
-			if (run.status === "failed") throw new Error(resultText(run));
+			// A failed agent is a result, not an error: a throw would reject a script's Promise.all and stop the agents beside it.
 			return { content: [{ type: "text", text: resultText(run) }], details: detailsOf(run), structuredContent: structured(run) };
 		},
 		renderCall(args: Partial<AgentParams>, theme: Theme) {
@@ -316,7 +317,6 @@ export function registerTools(pi: ExtensionAPI, host: ToolHost, exposure: "codem
 			const outcome = await sendToAgent(host, run, params.message, params.wait);
 			if (params.wait) {
 				await waitStoppingOnAbort(host.manager, run, signal);
-				if (run.status === "failed") throw new Error(resultText(run));
 				return { content: [{ type: "text", text: resultText(run) }], details: detailsOf(run, false), structuredContent: structured(run) };
 			}
 			const text = outcome === "steered"
