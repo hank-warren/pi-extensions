@@ -22,7 +22,7 @@ Children are spawned with the parent's own Pi binary and Node, plus any `-e` ext
 
 | Tool | What it does |
 |---|---|
-| `Agent` | Start an agent: `description`, `prompt`, plus optional `instructions` (its role), `agent` (a saved agent to start from), `name`, `model`, `thinking`, `tools`, `autocompact`, `max_turns`, `run_in_background` (default true), `cwd`, `worktree`. |
+| `Agent` | Start an agent: `description`, `prompt`, plus optional `instructions` (its role), `agent` (a saved agent to start from), `name`, `model`, `thinking`, `tools`, `autocompact`, `max_turns`, `run_in_background` (default true), `context` (`fresh` or `fork`), `cwd`, `worktree`. |
 | `SendMessage` | Message an agent by name or id. A running agent gets it as steering after its current tool calls; a finished agent resumes with it as a follow-up and keeps its history. `wait: true` blocks for the result. |
 | `TaskStop` | Stop an agent. |
 
@@ -154,7 +154,16 @@ Report findings as file:line, severity, and why. No style nits.
 | `autocompact` | Compact at this percentage of the model's context window. See the next section. |
 | `maxTurns` | Turn budget per task (default 80). |
 | `background` | Default for `run_in_background`. |
+| `context` | `fresh` (default) or `fork`: the default for the call's `context`. See [Fresh or forked](#fresh-or-forked). |
 | `contextFiles: false` | Skip `AGENTS.md` / `CLAUDE.md`. |
+
+## Fresh or forked
+
+**A fresh agent (the default) starts with an empty conversation**: its prompt is all it knows of this session, so the prompt has to carry the goal, what is known and what to return.
+
+**`context: "fork"` starts it from a copy of this conversation** instead, for work that depends on what the session already knows. The copy is the parent's current branch from the start of its latest compaction's kept range, in its original order, so Pi and compaction extensions read it exactly as they read the parent: the same compaction, kept messages, context edits and branch summaries. Extension state, labels, usage notes and model or thinking changes stay behind, so the child's extensions start clean. The parent's tool call that started the agent has no result yet, so the copy closes it with a note saying the parent carries on with it and the agent's task is the next message. The child keeps its own model, thinking, tools and role: Pi records its system prompt and tool set over the copied ones before the first request, so `tools: []` still means no tools, and a fork may run on another provider than the parent.
+
+Every forked agent re-reads the whole context, so it costs that much more than a fresh one, and a conversation that does not fit in 90% of the agent's model's window is refused before it starts. A conversation last compacted by an extension forks only onto this session's model, since such a compaction can be bound to the model it was made for: a `pi-codex-compaction` native checkpoint is opaque to every other model. A session started with `--no-session` keeps its forks' sessions in a temporary directory, removed when the session ends. Set it per call, or as a saved agent's default with `context: fork`; the call wins.
 
 ## Context: the full window, or autocompact
 
@@ -176,7 +185,7 @@ An agent starts in the session's directory, or in `cwd` for one repository of a 
 - It also gets the instruction files of the session that started it, so a worktree outside the workspace still follows the workspace's `AGENTS.md`. They go in its system prompt after the files both share and before its own directory's.
 - The first time it works in another directory, through a file tool's `path` or bash `cd`, `pushd`, `git -C` or an absolute path, that directory's chain of instruction files it does not have yet is added to the tool result. A codemode script's calls attach them to the script's result. Files loaded this way stay in its system prompt for later prompts, and are loaded again after a compaction.
 
-**Worktrees.** Pass `worktree: { repo, branch, base? }` and the agent runs in a git worktree created from `origin/<base>`, which defaults to origin's default branch. It is placed at `<worktreeDir>/<branch with slashes as dashes>`, and reused if a worktree of that repository on that branch already exists there. If the branch already exists locally, the new worktree checks it out as it is rather than from `origin/<base>`; the agent's prompt and the `Agent` result say so, with how many commits behind `origin/<base>` it is. `worktreeDir` defaults to a `worktrees/` directory beside the repository, so `~/repos/foo` gets `~/repos/worktrees/feat-x`. `repo` is resolved against the session directory, so this works from a directory of repositories.
+**Worktrees.** Pass `worktree: { repo, branch, base? }` and the agent runs in a git worktree created from `origin/<base>`, which defaults to origin's default branch: `origin/HEAD`, or when the clone never recorded one, what `git ls-remote --symref origin HEAD` reports. It is placed at `<worktreeDir>/<branch with slashes as dashes>`, and reused if a worktree of that repository on that branch already exists there. If the branch already exists locally, the new worktree checks it out as it is rather than from `origin/<base>`; the agent's prompt and the `Agent` result say so, with how many commits behind `origin/<base>` it is. `worktreeDir` defaults to a `worktrees/` directory beside the repository, so `~/repos/foo` gets `~/repos/worktrees/feat-x`. `repo` is resolved against the session directory, so this works from a directory of repositories.
 
 An agent can also make its own worktrees when its task needs changes in a repository it reaches on the way. Its prompt names the same `worktreeDir` and layout, tells it to create them from the remote default branch and reuse existing ones, and never to edit a main checkout.
 
@@ -220,4 +229,4 @@ Settings live in `~/.pi/agent/pi-agents/config.json` (override the path with `PI
 
 ## Sessions
 
-Child sessions are written to `<parent session dir>/<parent session>/agents/`. Each agent is recorded in the parent session when it starts, again once its session file is known, and when it ends; one still running when the session ends is recorded as stopped, and one the parent loses in a crash is listed as stopped after a restart. The session ends for Pi's `/reload`, `/new`, a session switch or fork, and quitting: each of these stops every running agent and records it as stopped in the session it ran in, and back in that session `SendMessage` resumes it. So after a restart `/agents` still lists it, its transcript loads from the child's session file, and `SendMessage` resumes it from there, with the tools it had.
+Child sessions are written to `<parent session dir>/<parent session>/agents/`. A forked agent's session starts with the copied conversation and names the parent's in its header; its transcript in `/agents` starts at the fork. Each agent is recorded in the parent session when it starts, again once its session file is known, and when it ends; one still running when the session ends is recorded as stopped, and one the parent loses in a crash is listed as stopped after a restart. The session ends for Pi's `/reload`, `/new`, a session switch or fork, and quitting: each of these stops every running agent and records it as stopped in the session it ran in, and back in that session `SendMessage` resumes it. So after a restart `/agents` still lists it, its transcript loads from the child's session file, and `SendMessage` resumes it from there, with the tools it had.

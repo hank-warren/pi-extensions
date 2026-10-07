@@ -43,6 +43,11 @@ export function worktreeDirName(branch: string): string {
 	return branch.replace(/[\\/]+/g, "-").replace(/[^\w.-]/g, "-").replace(/^-+|-+$/g, "");
 }
 
+/** `git ls-remote --symref origin HEAD` output -> the branch origin's HEAD points at. */
+export function parseRemoteHead(output: string): string | undefined {
+	return /^ref:\s+refs\/heads\/(\S+)\s+HEAD$/m.exec(output)?.[1];
+}
+
 /**
  * Create a worktree for `request.branch` from `origin/<base>` under
  * `worktreeDir` (default: `<parent of repo>/worktrees`), or reuse one that
@@ -75,10 +80,13 @@ export async function ensureWorktree(
 	let base = request.base?.trim().replace(/^origin\//, "");
 	if (!base) {
 		const head = await git(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], repoRoot);
-		if (head.code !== 0 || !head.stdout.startsWith("origin/")) {
-			throw new Error(`cannot tell origin's default branch in ${repoRoot}; pass worktree.base`);
+		if (head.code === 0 && head.stdout.startsWith("origin/")) base = head.stdout.slice("origin/".length);
+		else {
+			// origin/HEAD is only set by clone or `git remote set-head`; ask origin itself.
+			const remote = await git(["ls-remote", "--symref", "--", "origin", "HEAD"], repoRoot);
+			base = remote.code === 0 ? parseRemoteHead(remote.stdout) : undefined;
+			if (!base) throw new Error(`cannot tell origin's default branch in ${repoRoot}: no origin/HEAD, and origin did not report its HEAD; pass worktree.base`);
 		}
-		base = head.stdout.slice("origin/".length);
 	}
 	if (!(await validBranch(base))) throw new Error(`invalid base branch: "${request.base ?? base}"`);
 

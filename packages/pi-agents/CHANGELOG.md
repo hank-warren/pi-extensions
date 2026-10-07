@@ -1,5 +1,15 @@
 # @hank-warren/pi-agents
 
+## 0.2.0
+
+### Minor Changes
+
+- Forked subagents, and worktrees in clones without `origin/HEAD`.
+
+  - `Agent` takes `context: "fork"` to start the agent from a copy of the current conversation instead of an empty one; saved agents can make it their default with `context: fork`, and the call wins. The copy is the parent's branch from its latest compaction's kept range, in its original order, so Pi and compaction extensions such as `pi-codex-compaction` read it as they read the parent. Extension state, labels and model or thinking changes stay behind, and the tool call that started the agent is closed with a note that the parent carries on with it. The agent keeps its own model, thinking, tools and role, and its transcript in `/agents` starts at the fork.
+  - A fork is refused before it starts when the conversation does not fit in 90% of the agent's model's window, or when the conversation was last compacted by an extension and the agent would run on a different model than the session.
+  - `worktree` without `base` now asks origin for its default branch (`git ls-remote --symref origin HEAD`) when the clone has no `origin/HEAD`, instead of failing.
+
 ## 0.1.0
 
 ### Minor Changes

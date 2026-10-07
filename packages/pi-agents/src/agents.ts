@@ -5,6 +5,10 @@ import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 
+/** What a child starts with: an empty conversation, or a copy of the parent's. */
+export const CONTEXT_MODES = ["fresh", "fork"] as const;
+export type ContextMode = (typeof CONTEXT_MODES)[number];
+
 /**
  * How an agent is set up. A saved one comes from a markdown file in the
  * config dir; an inline one is composed by the parent for a single task.
@@ -25,6 +29,8 @@ export interface AgentDefinition {
 	autocompact?: number;
 	/** Run in the background unless the caller asks otherwise. */
 	background?: boolean;
+	/** Start from a copy of the parent's conversation (`fork`) instead of an empty one. Omitted: fresh. */
+	context?: ContextMode;
 	/** Load AGENTS.md/CLAUDE.md context files (default true). */
 	contextFiles: boolean;
 	source: "user" | "inline";
@@ -83,6 +89,10 @@ export function parseAgentFile(content: string, path: string): { agent?: AgentDe
 	if (fm.autocompact !== undefined && autocompact === undefined) {
 		return { error: `${path}: autocompact must be a percentage of the context window between 0 and 100, e.g. 10` };
 	}
+	if (fm.context !== undefined && !(CONTEXT_MODES as readonly unknown[]).includes(fm.context)) {
+		return { error: `${path}: context must be one of ${CONTEXT_MODES.join(", ")}` };
+	}
+	const context = fm.context as ContextMode | undefined;
 	const model = typeof fm.model === "string" && fm.model.trim() && fm.model.trim() !== "inherit" ? fm.model.trim() : undefined;
 	const agent: AgentDefinition = {
 		name: fm.name,
@@ -95,6 +105,7 @@ export function parseAgentFile(content: string, path: string): { agent?: AgentDe
 		maxTurns: positiveInt(fm.maxTurns),
 		...(autocompact !== undefined ? { autocompact } : {}),
 		background: typeof fm.background === "boolean" ? fm.background : undefined,
+		...(context ? { context } : {}),
 		contextFiles: fm.contextFiles !== false,
 		source: "user",
 		path,
@@ -165,10 +176,11 @@ export function discoverAgents(userDir: string): DiscoveryResult {
  */
 export function composeAgent(
 	base: AgentDefinition | undefined,
-	inline: { instructions?: string; tools?: string[]; autocompact?: number; maxTurns?: number },
+	inline: { instructions?: string; tools?: string[]; autocompact?: number; maxTurns?: number; context?: ContextMode },
 ): AgentDefinition {
 	const prompt = [base?.prompt, inline.instructions?.trim()].filter(Boolean).join("\n\n");
 	const autocompact = inline.autocompact ?? base?.autocompact;
+	const context = inline.context ?? base?.context;
 	return {
 		name: base?.name ?? INLINE_TYPE,
 		description: base?.description ?? "",
@@ -181,6 +193,7 @@ export function composeAgent(
 		maxTurns: inline.maxTurns ?? base?.maxTurns,
 		...(autocompact !== undefined ? { autocompact } : {}),
 		background: base?.background,
+		...(context ? { context } : {}),
 		contextFiles: base?.contextFiles ?? true,
 		source: base ? base.source : "inline",
 		...(base?.path ? { path: base.path } : {}),
