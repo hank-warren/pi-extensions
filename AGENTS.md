@@ -83,7 +83,7 @@ Note on skill-name collisions: pi deduplicates packages, not skill names. If the
 
 Releases run on [changesets](https://github.com/changesets/changesets) via `.github/workflows/publish.yml`, using the `NPM_TOKEN` repo secret. Do not hand-edit package versions: `changeset version` is the only thing that writes them.
 
-`main` is protected (classic branch protection, see "Branch protection" below) — every change arrives through a pull request, and the workflow's token has no bypass. So the **release pull request carries the applied version bump**, and merging it is the release. From a worktree on `origin/main`, after the code has merged and been canaried:
+`main` is protected (classic branch protection, see "Branch protection" below) — every change arrives through a pull request, and the workflow's token has no bypass. So the **pull request carries the applied version bump**, and merging it is the release. That is either the code pull request itself, once its branch has been canaried live, or a separate release pull request from a worktree on `origin/main` after the code has merged and been canaried (see "Release in the pull request, or hold the changeset" below). Either way:
 
 ```bash
 npx changeset               # one per package: pick patch/minor/major, write the summary
@@ -91,11 +91,11 @@ npm run version-packages    # changeset version && npm install --package-lock-on
 git add .changeset packages package-lock.json
 ```
 
-That pull request holds the `.changeset/*.md` files **and** their result — bumped `package.json`s, each package's `CHANGELOG.md` entry, the refreshed lockfile — so the changesets are consumed in the same pull request that introduced them, and the reviewer sees exactly what will ship. It touches nothing else. On merge, the publish workflow's `gate` job asks npm which package versions in the tree are not yet published and, if any, the `publish` job runs `changeset publish` (which skips anything already on the registry, so re-runs are safe) and creates a GitHub release per package.
+That pull request holds the `.changeset/*.md` files **and** their result — bumped `package.json`s, each package's `CHANGELOG.md` entry, the refreshed lockfile — so the changesets are consumed in the same pull request that introduced them, and the reviewer sees exactly what will ship. On merge, the publish workflow's `gate` job asks npm which package versions in the tree are not yet published and, if any, the `publish` job runs `changeset publish` (which skips anything already on the registry, so re-runs are safe) and creates a GitHub release per package.
 
 **A `.changeset/*.md` that reaches `main` unapplied fails the gate.** It can only mean a release pull request was merged without `npm run version-packages`; the fix is a follow-up pull request that applies it. The gate fails rather than versioning for you because the workflow cannot write to `main` — that was the old design, and after protection it failed *green*: run 34046074558 built the version commit, had the push rejected with `GH006: Changes must be made through a pull request`, misread that as a push race, and exited 0 having published nothing.
 
-Batching several changes into one release is the default shape: they merge as separate code pull requests, canary together on `main`, and one release pull request versions them all.
+Batching several changes into one release is still available: they merge as separate code pull requests, canary together on `main`, and one release pull request versions them all.
 
 Releases are created by `scripts/create-releases.sh` from the publish step's parsed output — the packages it published (`New tag:` lines) plus any npm rejected as already published (see the propagation-lag note below):
 
@@ -235,9 +235,15 @@ Three things that cost time to learn:
 
 **When a canary step fails, suspect the guidance before the wiring.** Mocks cannot see what the model does with correct instructions: a model given two rules follows the louder one, and the plumbing can be perfect while the behavior is wrong. Ask the running model what its context actually contains.
 
-### Hold the changeset
+### Release in the pull request, or hold the changeset
 
-Code pull requests in this repo carry **no changeset and no version bump**. Merge them, canary the merged `main` live, and only then open a separate release pull request. Merging a version bump alongside code publishes it the moment the pull request lands (see Publishing), which ships a version nobody has run in a real session. The release pull request touches nothing but `.changeset/`, `packages/*/package.json`, `packages/*/CHANGELOG.md` and `package-lock.json` — the changesets and their applied result.
+Merging a version bump publishes it the moment the pull request lands (see Publishing), so what matters is that the code being released has run in a real session, not which pull request carries the bump.
+
+**A code pull request may carry its own release once its branch has been canaried live.** Canary the pull request's head with the setup above, covering the states the change touches, then add the changeset and run `npm run version-packages` in the same pull request. Its description records the canary — what ran and what each state showed — so a reviewer can see the release was exercised. Re-canary after any later change to package code; a rebase or a docs-only fixup does not need it.
+
+**Otherwise, hold the changeset:** a code pull request that was not canaried carries no changeset and no version bump. Merge it, canary the merged `main`, and open a separate release pull request that touches nothing but `.changeset/`, `packages/*/package.json`, `packages/*/CHANGELOG.md` and `package-lock.json`. That is also the shape for batching several merged changes into one release.
+
+The constant in both shapes: versions are written only by `npm run version-packages`, and every changeset is applied in the pull request that adds it.
 
 ## Conventions
 
