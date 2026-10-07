@@ -1,5 +1,11 @@
 # @hank-warren/pi-plan-mode
 
+## 1.8.1
+
+### Patch Changes
+
+- Do not load in subagent children. Plan mode belongs to the session a person drives: in a child with `PI_SUBAGENT_CHILD=1` (set by `@hank-warren/pi-agents` and pi-subagents) it now registers nothing, where before every child got `/plan`, `--plan`, the plan tools, the hooks and a settings watcher, and a `/plan` message sent to an agent could switch planning on there.
+
 ## 1.8.0
 
 ### Minor Changes
