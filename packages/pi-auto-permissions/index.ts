@@ -450,6 +450,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
             command,
             noteLabel: decisionSource === "guardian" ? "Guardian" : "Review failed",
             note: detail,
+            inTranscript: scope.target.scriptToolCallId === undefined,
           },
           permissionPromptOptions(config.evaluationLog.enabled),
           promptSignal,

@@ -6,20 +6,37 @@ import { ApprovalPrompt, type ApprovalPromptContent, approvalPromptText, noteYel
 
 const PLAIN_THEME = { fg: (_role: string, text: string) => text, bold: (text: string) => text };
 
-function build(command: string, rows: number, onSelect: (value: string) => void = () => {}, appearance?: string) {
+function build(
+  command: string,
+  rows: number,
+  onSelect: (value: string) => void = () => {},
+  appearance?: string,
+  inTranscript = true,
+) {
   const content: ApprovalPromptContent = {
     header: "Git push — Auto Permissions needs approval",
     command,
     noteLabel: "Guardian",
     note: "force push rewrites history",
+    inTranscript,
   };
   const selector = new OptionSelector({
     options: ["Allow", "Block"].map((value) => ({ value, label: value })),
     theme: PLAIN_THEME,
     onSelect: (option) => onSelect(option.value),
   });
-  return new ApprovalPrompt({ content, selector, theme: { ...PLAIN_THEME, appearance }, terminalRows: () => rows });
+  return new ApprovalPrompt({
+    content,
+    selector,
+    theme: { ...PLAIN_THEME, appearance },
+    terminalRows: () => rows,
+    requestRender: () => {},
+  });
 }
+
+const CTRL_O = "\x0f";
+const SHIFT_DOWN = "\x1b[1;2B";
+const wheel = (wheelDelta: number) => ({ type: "wheel", wheelDelta });
 
 const longCommand = Array.from({ length: 100 }, (_, i) => `echo line ${i + 1}`).join("\n");
 // eslint-disable-next-line no-control-regex
@@ -59,13 +76,40 @@ describe("ApprovalPrompt", () => {
     assert.ok(has(lines, "echo line 1"));
     assert.ok(has(lines, `echo line ${rows / 4 - 1}`));
     assert.ok(!has(lines, `echo line ${rows / 4}`));
-    assert.ok(has(lines, `… ${100 - (rows / 4 - 1)} more lines · full command is in the session above`));
+    assert.ok(has(lines, `… ${100 - (rows / 4 - 1)} more lines · ctrl+o view all, or scroll the session above`));
     assert.ok(has(lines, "Guardian:"));
     assert.ok(has(lines, "1. Allow"));
   });
 
-  it("never intercepts the wheel, so it scrolls the session", () => {
-    assert.equal("handleMouse" in build(longCommand, 40), false);
+  it("does not point a script-issued call at the session, which shows only the script", () => {
+    const lines = strip(build(longCommand, 40, () => {}, undefined, false).render(80));
+    assert.ok(has(lines, "more lines · ctrl+o view all"));
+    assert.ok(!has(lines, "session above"));
+  });
+
+  it("leaves the wheel to the session while collapsed", () => {
+    const prompt = build(longCommand, 40);
+    prompt.render(80);
+    assert.equal(prompt.handleMouse(wheel(3)), undefined);
+  });
+
+  it("ctrl+o opens the full command in a scrolling viewer that keeps the options", () => {
+    const rows = 40;
+    const prompt = build(longCommand, rows);
+    prompt.handleInput(CTRL_O);
+    let lines = strip(prompt.render(80));
+    assert.ok(lines.length <= rows - 6, `rendered ${lines.length} rows`);
+    assert.ok(lines.some((line) => /lines 1-\d+ of 100 .*ctrl\+o collapse/u.test(line)));
+    assert.ok(has(lines, "Guardian:") && has(lines, "1. Allow"));
+    for (let i = 0; i < 200; i++) prompt.handleInput(SHIFT_DOWN);
+    lines = strip(prompt.render(80));
+    assert.ok(has(lines, "echo line 100"), "every line is reachable");
+    assert.deepEqual(prompt.handleMouse(wheel(-5)), { handled: true });
+    lines = strip(prompt.render(80));
+    assert.ok(!has(lines, "echo line 100"));
+    prompt.handleInput(CTRL_O);
+    lines = strip(prompt.render(80));
+    assert.ok(has(lines, "more lines · ctrl+o view all"), "ctrl+o again collapses");
   });
 
   it("delegates selection keys to the selector", () => {

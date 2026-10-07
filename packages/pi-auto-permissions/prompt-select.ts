@@ -74,6 +74,7 @@ export function promptSelect(
       selector,
       theme,
       terminalRows: () => tui.terminal.rows,
+      requestRender: () => tui.requestRender(),
     });
   });
 }
