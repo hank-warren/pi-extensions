@@ -36,7 +36,7 @@ Children are spawned with the parent's own Pi binary and Node, plus any `-e` ext
 
 When the session has `codemode`, the three tools are registered with Pi's `codemode` exposure: they are not declared to the model as tools of their own, and the model starts agents from scripts. Without codemode they are ordinary tools.
 
-`Agent` declares an output schema, so a script gets a structured value back: `{ id, name, type, status, result, error, toolUses, contextTokens, durationMs, budgetExhausted, sessionFile, worktreePath, branch }`. An agent that fails resolves with `status: "failed"` and its `error` rather than rejecting, so one failure does not end a script and stop the agents beside it; a call still rejects for invalid arguments, such as an unknown model. Fan-out is a plain script:
+`Agent` declares an output schema, so a script gets a structured value back: `{ id, name, type, status, result, error, toolUses, contextTokens, durationMs, budgetExhausted, sessionFile, worktreePath, branch }`. An agent that fails resolves with `status: "failed"` and its `error` rather than rejecting, so one failure does not end a script and stop the agents beside it. That includes setup that fails with valid arguments: a worktree git cannot create, or a fork the session cannot give (too large for the model, compacted for another model, nothing to fork yet); such an agent never starts a process, and `/agents` lists it as failed. A call still rejects for invalid arguments, such as an unknown model or saved agent, or `cwd` and `worktree` together. Fan-out is a plain script:
 
 ```js
 const lanes = [

@@ -375,6 +375,23 @@ export class AgentManager {
 		return run;
 	}
 
+	/**
+	 * A run whose setup failed before any process started (a worktree or fork
+	 * that could not be made): failed with the reason, recorded so `/agents` lists
+	 * it, and never launched. The caller reports it; nothing is announced.
+	 */
+	failSetup(run: AgentRun, error: string): void {
+		run.status = "failed";
+		run.error = error;
+		run.endedAt = Date.now();
+		try {
+			this.deps.onStarted?.(run);
+		} catch {
+			// Recording is best effort.
+		}
+		this.changed();
+	}
+
 	/** Where children keep their sessions; undefined when this session is not saved. */
 	sessionDir(): string | undefined {
 		return this.deps.sessionDir();
