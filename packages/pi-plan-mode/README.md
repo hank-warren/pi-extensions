@@ -48,6 +48,8 @@ pi -e npm:@hank-warren/pi-plan-mode
 
 `--plan` starts a session directly in Plan mode.
 
+Plan mode is for the session you drive. In a subagent child (`PI_SUBAGENT_CHILD=1`, set by `@hank-warren/pi-agents` and pi-subagents) it registers nothing: no `/plan`, no plan tools, no hooks.
+
 While Plan mode is active, ask the agent to design the change. It can read, search, and run commands, but `edit` and `write` are blocked. When the plan is decision-complete, the agent calls `plan_mode_complete` and the plan is written to disk.
 
 A completed plan is not final until you act on it: just type feedback to revise — the next planning turn supersedes the proposed plan, and the next `plan_mode_complete` replaces it.

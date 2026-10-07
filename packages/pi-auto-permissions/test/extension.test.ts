@@ -18,7 +18,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { initTheme } from "@earendil-works/pi-coding-agent";
+import { createExtensionRuntime, ExtensionRunner, initTheme, SessionManager } from "@earendil-works/pi-coding-agent";
 import autoPermissionsExtension from "../index.ts";
 import { builtinTool, createCustomSelectorHarness, createMockContext, createMockPi } from "../../../test/support/mock-pi.ts";
 
@@ -34,6 +34,7 @@ interface DeniedEvent {
 	verdict: "revise" | "block";
 	reason: string;
 	decisionSource: string;
+	reviseFirst?: true;
 }
 
 interface DenialLine {
@@ -43,6 +44,7 @@ interface DenialLine {
 	verdict: string;
 	reason: string;
 	decisionSource: string;
+	reviseFirst?: true;
 }
 
 /** One dispatch through the guardian transport seam. */
@@ -215,6 +217,10 @@ interface SetupOptions {
 	/** Merged over the base config object before it is written. */
 	config?: Record<string, unknown>;
 	hasUI?: boolean;
+	/** Defaults to "tui". */
+	mode?: "tui" | "rpc";
+	/** `ctx.ui.select`, used for prompts in RPC mode. */
+	select?: (title: string, options: string[]) => Promise<string | undefined>;
 	projectTrusted?: boolean;
 	/** Lines written to `<cwd>/.pi/trusted-ops`. */
 	trustedOps?: string[];
@@ -364,8 +370,9 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 
 	const context = createMockContext({
 		cwd,
-		mode: "tui",
+		mode: options.mode ?? "tui",
 		hasUI: options.hasUI ?? true,
+		...(options.select ? { select: options.select } : {}),
 		models: [GUARDIAN_MODEL],
 		providers: { [GUARDIAN_MODEL.provider]: { id: GUARDIAN_MODEL.provider } },
 		isProjectTrusted: () => options.projectTrusted === true,
@@ -531,7 +538,9 @@ test("5 · a revise verdict blocks with the reviewer's reason and a guardian dec
 			assert.equal(harness.denied[0].decisionSource, "guardian");
 			assert.equal(harness.denied[0].verdict, "revise");
 			assert.equal(harness.denied[0].reason, "push to a branch, not main");
+			assert.equal(harness.denied[0].reviseFirst, undefined, "a guardian's own revise is not revise-first");
 			assert.equal(harness.denials()[0].decisionSource, "guardian");
+			assert.equal(harness.denials()[0].reviseFirst, undefined);
 			assert.deepEqual(harness.displays.map((display) => display.state), ["waiting", "revise"]);
 		},
 	);
@@ -1726,4 +1735,263 @@ test("34b · a call several levels down is released when its script ends, even w
 			assert.deepEqual(await settledWithin(deep, 250), { block: true, reason: "Auto Permissions review cancelled" });
 		},
 	);
+});
+
+type Handlers = Map<string, Array<(...args: never[]) => unknown>>;
+
+/**
+ * The system prompt a run starts with after these extensions' before_agent_start
+ * handlers, in this order, on the installed Pi's own ExtensionRunner: Pi 0.84
+ * chains prompt strings, Pi 1.x builds the prompt from its options afterwards.
+ * A last handler reads the result as Pi would send it.
+ */
+async function promptAfter(extensions: Handlers[], cwd: string): Promise<string> {
+	let prompt = "";
+	const probe: Handlers = new Map([["before_agent_start", [(event: { systemPrompt: string }) => void (prompt = event.systemPrompt)]]]);
+	const loaded = [...extensions, probe].map((handlers, index) => ({
+		path: `extension-${index}`,
+		resolvedPath: `extension-${index}`,
+		handlers,
+		tools: new Map(),
+		messageRenderers: new Map(),
+		commands: new Map(),
+		flags: new Map(),
+		shortcuts: new Map(),
+	}));
+	const runner = new ExtensionRunner(loaded as never, createExtensionRuntime(), cwd, SessionManager.inMemory(cwd), undefined as never);
+	const errors: unknown[] = [];
+	runner.onError((error) => errors.push(error));
+	const emit = (runner as unknown as { emitBeforeAgentStart(...args: unknown[]): Promise<unknown> }).emitBeforeAgentStart.bind(runner);
+	const options = { cwd, contextFiles: [] };
+	// Pi 0.84 takes (prompt, images, systemPrompt, options); Pi 1.x (prompt, images, options).
+	if (runner.emitBeforeAgentStart.length >= 4) await emit("task", undefined, "BASE PROMPT", options);
+	else await emit("task", undefined, options);
+	assert.deepEqual(errors, []);
+	return prompt;
+}
+
+async function asSubagentChild(run: () => Promise<void>): Promise<void> {
+	process.env.PI_SUBAGENT_CHILD = "1";
+	try {
+		await run();
+	} finally {
+		delete process.env.PI_SUBAGENT_CHILD;
+	}
+}
+
+test("35 · a subagent with a UI is told to revise first; the same command again goes to the human", async () => {
+	await asSubagentChild(() =>
+		withExtension(
+			{
+				rules: [GUARDED_RULE],
+				completeSimple: () => assistantResponse(verdictText("ask_user", "force push rewrites history")),
+			},
+			async (harness) => {
+				await harness.sessionStart();
+
+				const first = await harness.toolCall("git push --force origin main", "call-1");
+				assert.ok(first?.block);
+				assert.match(first.reason, /^Git push needs human approval: force push rewrites history/u);
+				assert.match(first.reason, /You are a subagent/u);
+				assert.match(first.reason, /run it again unchanged and the request goes to the human/u);
+				assert.equal(harness.customCalls, 0, "the first ask does not interrupt the human");
+				assert.equal(harness.denied[0].verdict, "revise");
+				assert.equal(harness.denied[0].decisionSource, "guardian");
+				assert.equal(harness.denied[0].reviseFirst, true, "marked apart from a guardian revise");
+				assert.equal(harness.denials()[0].reviseFirst, true, "in the denial log too");
+
+				const different = await harness.toolCall("git push --force origin release", "call-2");
+				assert.ok(different?.block);
+				assert.match(different.reason, /You are a subagent/u);
+				assert.equal(harness.customCalls, 0, "a different command gets its own revise-first turn");
+
+				await harness.turnEnd();
+				harness.answers.push("Allow");
+				assert.equal(await harness.toolCall("git push --force origin main", "call-3"), undefined);
+				assert.equal(harness.customCalls, 1, "repeating the command unchanged in a later turn escalates to the human");
+
+				await harness.turnEnd();
+				const later = await harness.toolCall("git push --force origin main", "call-4");
+				assert.ok(later?.block);
+				assert.match(later.reason, /You are a subagent/u, "once the human has answered, the next attempt is revised first again");
+				assert.equal(harness.customCalls, 1);
+				await harness.turnEnd();
+				harness.answers.push("Allow");
+				assert.equal(await harness.toolCall("git push --force origin main", "call-5"), undefined);
+				assert.equal(harness.customCalls, 2);
+			},
+		));
+});
+
+test("36 · revise-first applies only to subagent sessions with a UI", async () => {
+	await asSubagentChild(() =>
+		withExtension(
+			{
+				rules: [GUARDED_RULE],
+				hasUI: false,
+				completeSimple: () => assistantResponse(verdictText("ask_user", "force push rewrites history")),
+			},
+			async (harness) => {
+				await harness.sessionStart();
+				const result = await harness.toolCall("git push --force origin main");
+				assert.ok(result?.block);
+				assert.match(result.reason, /This session has no interactive user to ask\./u);
+				const prompt = harness.calls[0]!.request.systemPrompt;
+				assert.match(prompt, /cannot reach a human: this subagent has no interactive user/u, "the guardian is told no human will weigh in");
+				assert.doesNotMatch(prompt, /human later approves/u);
+			},
+		));
+
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			completeSimple: () => assistantResponse(verdictText("ask_user", "force push rewrites history")),
+		},
+		async (harness) => {
+			await harness.sessionStart();
+			harness.answers.push("Block");
+			await harness.toolCall("git push --force origin main");
+			assert.equal(harness.customCalls, 1, "an ordinary session still asks at once");
+		},
+	);
+});
+
+test("37 · a subagent session gets the permission guidance in its system prompt; an ordinary session does not", async () => {
+	const promptFor = async (harness: Harness) => {
+		const handler = harness.mock.events.get("before_agent_start")?.[0] as EventHandler | undefined;
+		assert.ok(handler, "the extension registers before_agent_start");
+		return (await handler({ type: "before_agent_start", prompt: "task", systemPrompt: "BASE" }, harness.ctx)) as
+			| { systemPrompt?: string }
+			| undefined;
+	};
+	await asSubagentChild(() =>
+		withExtension({ rules: [GUARDED_RULE] }, async (harness) => {
+			await harness.sessionStart();
+			const result = await promptFor(harness);
+			assert.ok(result?.systemPrompt?.startsWith("BASE\n\n## Auto Permissions (subagent)"), "older Pi: appended to the prompt string");
+
+			// Pi 1.x builds the prompt from its options; a returned systemPrompt would force the whole text.
+			const handler = harness.mock.events.get("before_agent_start")![0] as EventHandler;
+			const options = { contextFiles: [], sections: {} as Record<string, string> };
+			const structured = await handler({ type: "before_agent_start", prompt: "task", systemPrompt: "BASE", systemPromptOptions: options }, harness.ctx);
+			assert.equal(structured, undefined, "never forces the prompt, so later extensions' changes to its options still apply");
+			assert.match(options.sections.auto_permissions_subagent ?? "", /^## Auto Permissions \(subagent\)/u);
+		}));
+	await withExtension({ rules: [GUARDED_RULE] }, async (harness) => {
+		await harness.sessionStart();
+		assert.equal(await promptFor(harness), undefined);
+	});
+});
+
+test("37b · with another extension adding instruction files through the prompt options, both reach a subagent's prompt in either order", async () => {
+	await asSubagentChild(() =>
+		withExtension({ rules: [GUARDED_RULE] }, async (harness) => {
+			await harness.sessionStart();
+			const autoPermissions = harness.mock.events as unknown as Handlers;
+			// Adds an instruction file only through the structured prompt's options where Pi has them (to
+			// the text on older Pi), as any extension may: a prompt forced before it would drop the file.
+			const parentFile = { path: "/workspace/AGENTS.md", content: "PARENT WORKSPACE RULES" };
+			const addsFiles: Handlers = new Map([["before_agent_start", [(event: { systemPrompt: string; systemPromptOptions?: { contextFiles?: unknown[]; sections?: object } }) => {
+				const options = event.systemPromptOptions;
+				if (options?.contextFiles && options.sections) {
+					options.contextFiles.push(parentFile);
+					return undefined;
+				}
+				return { systemPrompt: `${event.systemPrompt}\n\n${parentFile.content}` };
+			}]]]);
+			for (const [label, order] of [["auto-permissions first", [autoPermissions, addsFiles]], ["auto-permissions last", [addsFiles, autoPermissions]]] as const) {
+				const prompt = await promptAfter([...order], process.cwd());
+				assert.match(prompt, /PARENT WORKSPACE RULES/u, `${label}: the other extension's instruction file is in the prompt`);
+				assert.match(prompt, /## Auto Permissions \(subagent\)/u, `${label}: and so is the subagent guidance`);
+			}
+		}));
+});
+
+test("38 · in RPC mode the approval prompt goes through ui.select, so a subagent's parent can render it", async () => {
+	const titles: string[] = [];
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			mode: "rpc",
+			select: async (title, options) => {
+				titles.push(title);
+				return options.find((option) => option.startsWith("Allow"));
+			},
+			completeSimple: () => assistantResponse(verdictText("ask_user", "force push rewrites history")),
+		},
+		async (harness) => {
+			await harness.sessionStart();
+			assert.equal(await harness.toolCall("git push --force origin main"), undefined);
+			assert.equal(harness.customCalls, 0, "custom() renders nothing over RPC");
+			assert.equal(titles.length, 1);
+			assert.match(titles[0]!, /Git push — Auto Permissions needs approval/u);
+		},
+	);
+});
+
+test("39 · same-turn duplicates of a refused command stay refused; only a later turn reaches the human", async () => {
+	await asSubagentChild(() =>
+		withExtension(
+			{
+				rules: [GUARDED_RULE],
+				completeSimple: () => assistantResponse(verdictText("ask_user", "force push rewrites history")),
+			},
+			async (harness) => {
+				await harness.sessionStart();
+
+				// Two identical sibling calls in one assistant message.
+				await harness.assistantMessage([
+					{ id: "call-1", command: "git push --force origin main" },
+					{ id: "call-2", command: "git push --force origin main" },
+				]);
+				for (const id of ["call-1", "call-2"]) {
+					const result = await harness.toolCall("git push --force origin main", id);
+					assert.match(result?.reason ?? "", /You are a subagent/u, `${id} is refused, not escalated`);
+				}
+
+				// Identical calls from one codemode script, issued together.
+				await harness.toolExecutionStart("script-1");
+				const fromScript = await Promise.all([
+					harness.toolCall("git push --force origin main", "script-1/1", "script-1"),
+					harness.toolCall("git push --force origin main", "script-1/2", "script-1"),
+				]);
+				for (const result of fromScript) assert.match(result?.reason ?? "", /You are a subagent/u);
+				assert.equal(harness.customCalls, 0, "nothing reached the human within the turn");
+				await harness.toolExecutionEnd("script-1");
+
+				await harness.turnEnd();
+				harness.answers.push("Block");
+				await harness.toolCall("git push --force origin main", "call-3");
+				assert.equal(harness.customCalls, 1, "the next turn's unchanged retry asks the human");
+			},
+		));
+});
+
+test("40 · in a subagent, a failed review is revise-first too, with review_failure attribution", async () => {
+	await asSubagentChild(() =>
+		withExtension(
+			{
+				rules: [GUARDED_RULE],
+				completeSimple: () => {
+					throw new Error("reviewer offline");
+				},
+			},
+			async (harness) => {
+				await harness.sessionStart();
+
+				const first = await harness.toolCall("git push origin main", "call-1");
+				assert.match(first?.reason ?? "", /^Git push needs human approval: Automatic review failed: reviewer offline/u);
+				assert.match(first?.reason ?? "", /You are a subagent/u);
+				assert.equal(harness.customCalls, 0, "a reviewer outage does not interrupt the human on the first try");
+				assert.equal(harness.denied[0]?.decisionSource, "review_failure");
+				assert.equal(harness.denied[0]?.verdict, "revise");
+				assert.equal(harness.denied[0]?.reviseFirst, true);
+
+				await harness.turnEnd();
+				harness.answers.push("Block");
+				assert.deepEqual(await harness.toolCall("git push origin main", "call-2"), { block: true, reason: "Blocked by user" });
+				assert.equal(harness.customCalls, 1, "the unchanged retry in a later turn asks the human");
+				assert.match(harness.prompts[0]!.join("\n"), /Automatic review failed: reviewer offline/u);
+			},
+		));
 });

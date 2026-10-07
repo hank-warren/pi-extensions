@@ -22,6 +22,10 @@ export function setHerdrBlocked(pi: ExtensionAPI, active: boolean, label?: strin
  *   idempotent and performs its own teardown, so nothing else is needed)
  * - a host that reports `hasUI` but cannot render custom components
  *
+ * In RPC mode (`hasUI` is true but `custom()` returns undefined) the prompt
+ * goes through `ctx.ui.select`, which the RPC client renders: that is how a
+ * subagent child's approval reaches the human in the parent session.
+ *
  * A Tab-typed note is delivered to the agent as a steering user message,
  * matching what the retired `ExtensionSelectorComponent` monkey patch in
  * pi-permission-selector did.
@@ -33,6 +37,7 @@ export function promptSelect(
   values: string[],
   signal: AbortSignal,
 ): Promise<string | undefined> {
+  if (ctx.mode === "rpc") return ctx.ui.select(title, values, { signal });
   return ctx.ui.custom<string | undefined>((tui, theme, _keybindings, done) => {
     let finished = false;
     const onAbort = () => finish(undefined);

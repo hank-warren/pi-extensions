@@ -63,6 +63,20 @@ async function waitForNotification(
 	assert.equal(context.notifications.at(-1)?.message, expected);
 }
 
+test("in a subagent child plan-mode registers nothing: it belongs to the session a person drives", () => {
+	process.env.PI_SUBAGENT_CHILD = "1";
+	try {
+		const mock = createMockPi({ activeTools: ["read", "bash"] });
+		planMode(mock.pi);
+		assert.equal(mock.flags.size, 0);
+		assert.deepEqual(mock.tools, []);
+		assert.equal(mock.commands.size, 0);
+		assert.equal(mock.events.size, 0, "no hooks, so nothing it does can reach a child's prompt or tools");
+	} finally {
+		delete process.env.PI_SUBAGENT_CHILD;
+	}
+});
+
 test("plan-mode registers flag, tools, command, and safety hooks", () => {
 	const mock = createMockPi({ activeTools: ["read", "bash"] });
 	planMode(mock.pi);

@@ -4,16 +4,16 @@ import { isAbsolute, join } from "node:path";
 /**
  * Runtime facts about a subagent child session, forwarded to the guardian as
  * evidence. Facts only — the guardian judges what they imply; see
- * SUBAGENT_CONTEXT_SYSTEM_PROMPT in review.ts.
+ * subagentContextSystemPrompt() in review.ts.
  *
- * Detection is based on the environment contract of `pi-subagents`
- * (nicobailon/pi-subagents), which spawns children with `PI_SUBAGENT_CHILD=1`
- * plus run id and nesting depth. Absent that env, sessions are treated as
- * ordinary sessions and review behavior is unchanged.
+ * Detection is based on the environment contract that `@hank-warren/pi-agents`
+ * and `pi-subagents` (nicobailon/pi-subagents) both use: children are spawned
+ * with `PI_SUBAGENT_CHILD=1` plus run id and nesting depth. Absent that env,
+ * sessions are treated as ordinary sessions and review behavior is unchanged.
  */
 export interface SubagentExecutionContext {
   subagent: true;
-  /** pi-subagents run id (PI_SUBAGENT_RUN_ID), when present. */
+  /** The subagent's run id (PI_SUBAGENT_RUN_ID), when present. */
   runId?: string;
   /** Nesting depth for nested subagents (PI_SUBAGENT_DEPTH), when > 0. */
   depth?: number;

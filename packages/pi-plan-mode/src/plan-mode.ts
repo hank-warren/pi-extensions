@@ -126,6 +126,9 @@ interface PlanModeDependencies {
 }
 
 export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDependencies = {}) {
+	// Plan mode belongs to the session a person drives. A subagent child
+	// (PI_SUBAGENT_CHILD=1, set by pi-agents and pi-subagents) gets none of it.
+	if (process.env.PI_SUBAGENT_CHILD === "1") return;
 	let interactiveUiPromise: Promise<InteractiveUi> | undefined;
 	const loadInteractiveUi = () => {
 		if (dependencies.loadInteractiveUi) return dependencies.loadInteractiveUi();

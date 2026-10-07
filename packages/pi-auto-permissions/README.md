@@ -243,7 +243,7 @@ The guardian must return one of three decisions:
 
 - `approve`: execute the command
 - `revise`: block it and tell the main agent what to correct
-- `ask_user`: open an approval prompt (rendered with [`@hank-warren/pi-permission-selector`](../pi-permission-selector)'s `OptionSelector`): numbered options with `1`–`9` hotkeys, Tab to attach a note that is delivered to the agent as a steering user message, Esc to cancel — which blocks the command
+- `ask_user`: open an approval prompt (rendered with [`@hank-warren/pi-permission-selector`](../pi-permission-selector)'s `OptionSelector`): numbered options with `1`–`9` hotkeys, Tab to attach a note that is delivered to the agent as a steering user message, Esc to cancel — which blocks the command. In RPC mode, as in a pi-agents child whose prompts the parent shows, the prompt is Pi's plain select dialog instead: Allow or Block, without Tab notes. It waits for the RPC client's answer, so a client that never answers holds the command until the turn is cancelled
 
 ## Conversation context and caching
 
@@ -443,9 +443,18 @@ Group names come from your configured rules. A trusted group bypasses guarded re
 
 ## Subagent sessions
 
-When a session is a [pi-subagents](https://github.com/nicobailon/pi-subagents) child (`PI_SUBAGENT_CHILD=1`), the guardian receives additional execution facts with each review — run id, nesting depth, whether the cwd is a linked git worktree, and the checked-out branch — plus a prompt section telling it to judge risk by effect scope and reversibility relative to the subagent's own workspace instead of by command name. Mutations confined to the subagent's isolated worktree, its own feature branch, or resources it created are approvable when they serve the delegated task; `ask_user` is reserved for effects that escape that scope (shared or default branches, host-level configuration, production systems, credentials, data leaving the machine).
+When a session is a subagent child (`PI_SUBAGENT_CHILD=1`, set by `@hank-warren/pi-agents` and [pi-subagents](https://github.com/nicobailon/pi-subagents)), the guardian receives additional execution facts with each review — run id, nesting depth, whether the cwd is a linked git worktree, and the checked-out branch — plus a prompt section telling it to judge risk by effect scope and reversibility relative to the subagent's own workspace instead of by command name. Mutations confined to the subagent's isolated worktree, its own feature branch, or resources it created are approvable when they serve the delegated task; `ask_user` is reserved for effects that escape that scope (shared or default branches, host-level configuration, production systems, credentials, data leaving the machine).
 
-Subagent sessions have no interactive user, so an `ask_user` verdict blocks the command immediately with a reason instructing the child to route around the gated operation or report the blocker. Reviewer usage records from subagent sessions carry `"subagent": true` in the usage sidecar.
+The child itself is told it is a subagent: a short section appended to its system prompt says that commands needing approval pause the supervising session, so it should prefer in-scope and read-only commands and revise when asked to. On Pi 1.x the section is a named prompt section (`auto_permissions_subagent`), so it never replaces the prompt that Pi and other extensions build, such as the parent's instruction files pi-agents adds to a child.
+
+An `ask_user` verdict in a subagent, or a failed review (timeout, unavailable reviewer, unparsable verdict), never interrupts the human on the first try:
+
+- **Child with a UI** (an RPC child whose prompts surface in the parent, as with pi-agents): the command is blocked with a revise-first reason. Issuing the *same* command again unchanged in a later turn escalates it to the human as an ordinary approval prompt, once: after that, a later identical attempt is revised first again. Duplicates within the same turn (sibling calls, or a codemode `Promise.all`) are refused as well, because the model has not seen the first refusal yet. Any other command gets its own revise-first turn.
+- **Child without a UI**: the command is blocked with a reason instructing the child to route around the gated operation or report the blocker.
+
+The guardian's subagent section says which of these applies, so a child without a UI is never told a human may approve later. A revise-first refusal is recorded in the denial log and the `auto-permissions:denied` event with `"reviseFirst": true`, keeping the `decisionSource` of the verdict behind it, so it stays distinguishable from a guardian's own revise.
+
+Reviewer usage records from subagent sessions carry `"subagent": true` in the usage sidecar.
 
 ## Guardian dispatch
 
