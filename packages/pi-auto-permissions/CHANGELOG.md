@@ -1,5 +1,11 @@
 # @hank-warren/pi-auto-permissions
 
+## 0.20.0
+
+### Minor Changes
+
+- Rework the approval prompt so a long command can no longer push Allow/Block off-screen. The dialog shows the command (cut to a preview past a quarter of the terminal; Ctrl+O opens the full command in a scrolling viewer inside the prompt, which matters for commands a codemode script built, since the transcript shows only the script), then the guardian's note behind a `▌` bar in a fixed strong yellow, then the options, which stay pinned while you scroll the session. The review widget steps aside while the prompt is open instead of repeating it, and a settled result's reason now carries a `▌` bar in the outcome's color.
+
 ## 0.19.0
 
 ### Minor Changes

@@ -445,7 +445,13 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
         choice = await promptSelect(
           pi,
           ctx,
-          `${gate.label} — Auto Permissions needs approval\n\n${detail}\n\n${command}`,
+          {
+            header: `${gate.label} — Auto Permissions needs approval`,
+            command,
+            noteLabel: decisionSource === "guardian" ? "Guardian" : "Review failed",
+            note: detail,
+            inTranscript: scope.target.scriptToolCallId === undefined,
+          },
           permissionPromptOptions(config.evaluationLog.enabled),
           promptSignal,
         );

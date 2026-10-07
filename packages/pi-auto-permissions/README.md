@@ -243,7 +243,7 @@ The guardian must return one of three decisions:
 
 - `approve`: execute the command
 - `revise`: block it and tell the main agent what to correct
-- `ask_user`: open an approval prompt (rendered with [`@hank-warren/pi-permission-selector`](../pi-permission-selector)'s `OptionSelector`): numbered options with `1`–`9` hotkeys, Tab to attach a note that is delivered to the agent as a steering user message, Esc to cancel — which blocks the command. In RPC mode, as in a pi-agents child whose prompts the parent shows, the prompt is Pi's plain select dialog instead: Allow or Block, without Tab notes. It waits for the RPC client's answer, so a client that never answers holds the command until the turn is cancelled
+- `ask_user`: open an approval prompt (rendered with [`@hank-warren/pi-permission-selector`](../pi-permission-selector)'s `OptionSelector`): the command, then the guardian's note behind a `▌` bar in a fixed strong yellow (gold on dark themes, dark goldenrod on light ones, regardless of the theme's `warning` color), then numbered options. A command taller than a quarter of the terminal is cut to a preview, and the prompt stays pinned while you scroll the session above. Ctrl+O opens the full command in a scrolling viewer inside the prompt (Shift+↑/↓ or the mouse wheel; PgUp/PgDn outside fullscreen) and closes it again — the only complete copy when a codemode script built the command, since the transcript then shows the script. Numbered options with `1`–`9` hotkeys, Tab to attach a note that is delivered to the agent as a steering user message, Esc to cancel — which blocks the command. In RPC mode, as in a pi-agents child whose prompts the parent shows, the prompt is Pi's plain select dialog instead: Allow or Block, without Tab notes. It waits for the RPC client's answer, so a client that never answers holds the command until the turn is cancelled
 
 ## Conversation context and caching
 
@@ -403,7 +403,7 @@ The default UI shows guardian progress as a single animated status line in a tem
 auto permissions · Git commit · ✶ waiting for openai-codex-auto-permissions/gpt-5.6-luna
 ```
 
-A sparkle spinner (`✶ ✸ ✻ ✽`) cycles while the guardian is reviewing and resolves to `✓ approved`, `↻ revision requested`, `? waiting for your approval`, or `✗ blocked`. When approval is needed, a static warning-colored `●` precedes the prompt heading so the active prompt remains visually distinct from the transcript. The guardian's reason, when present, appears on a dim second line; the command itself is not repeated because it is already visible in the Bash tool box. Configure the widget with:
+A sparkle spinner (`✶ ✸ ✻ ✽`) cycles while the guardian is reviewing and resolves to `✓ approved`, `↻ revision requested`, or `✗ blocked`. When approval is needed, the widget row steps aside for the approval dialog, whose static yellow `●` heading keeps it visually distinct from the transcript; with several commands under review, the summary line still counts the ones `waiting for your approval`. The reason, when present, appears on a second line behind a `▌` bar in the outcome's color; the command itself is not repeated because it is already visible in the Bash tool box. Configure the widget with:
 
 ```json
 {
