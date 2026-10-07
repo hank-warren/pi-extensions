@@ -50,7 +50,21 @@ const CLEARED_ENV = [
 	"PI_MULTI_LOGIN_CONFIG",
 	"PI_STASH_CONFIG",
 	"HERDR_ENV",
+	// The subagent contract pi-agents sets and Auto Permissions reads.
 	"PI_SUBAGENT_CHILD",
+	"PI_SUBAGENT_RUN_ID",
+	"PI_SUBAGENT_DEPTH",
+	// pi-agents: everything a parent sets for its child, and the config override.
+	"PI_AGENTS_CHILD",
+	"PI_AGENTS_NAME",
+	"PI_AGENTS_TYPE",
+	"PI_AGENTS_MAX_TURNS",
+	"PI_AGENTS_AUTOCOMPACT",
+	"PI_AGENTS_CONTEXT_FILES",
+	"PI_AGENTS_NO_CONTEXT_FILES",
+	"PI_AGENTS_TOOLS",
+	"PI_AGENTS_DENY_TOOLS",
+	"PI_AGENTS_CONFIG",
 	// pi-cliproxyapi-provider's connection, credential and metadata settings.
 	// A host pointed at a live CLIProxyAPI would otherwise steer the provider's
 	// config tests and let its discovery tests reach a real proxy.
