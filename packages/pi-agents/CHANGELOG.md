@@ -1,5 +1,11 @@
 # @hank-warren/pi-agents
 
+## 0.2.1
+
+### Patch Changes
+
+- A worktree or fork that cannot be set up is now a failed agent, not a rejected call. When git cannot create the worktree, or the session cannot be forked (too large for the model, compacted for another model, nothing to fork yet), `Agent` resolves with `status: "failed"` and the reason, `/agents` lists it, and the agents beside it in a script's `Promise.all` carry on. Invalid arguments, such as an unknown model or `cwd` with `worktree`, still reject.
+
 ## 0.2.0
 
 ### Minor Changes
