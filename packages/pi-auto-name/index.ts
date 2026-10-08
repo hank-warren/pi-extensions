@@ -1,15 +1,18 @@
 /**
  * pi-auto-name — names the session after what it is about.
  *
- * Once the first turn of an unnamed session settles, the session's own model
- * reads a short digest of the branch (the user's requests and the latest
- * reply) and answers with a 3-5 word title, which becomes the session name
- * exactly as if set with `/name`. `/rename` regenerates it on demand.
+ * When the first turn settles, and every second turn after that (1, 3, 5, …),
+ * the session's own model reads a short digest of the branch (the user's
+ * requests and the latest reply) and answers with a 3-5 word title, which
+ * becomes the session name exactly as if set with `/name`. Automatic renames
+ * only replace a name this extension set itself; `/rename` regenerates it on
+ * demand and hands a hand-set name back to the automatic renames.
  *
  * The title request stands alone: nothing enters the transcript or the model's
  * context, and it shares no session id or prompt-cache entry with the session.
- * The only write is the `session_info` entry `setSessionName` appends, which
- * never reaches the model.
+ * The only writes are the `session_info` entry `setSessionName` appends and a
+ * `pi-auto-name` custom entry recording which name is ours; neither reaches
+ * the model.
  *
  * Inside Herdr the name is also reported as the pane token `$session_name`
  * (see herdr.ts), so a sidebar row can show it without pi's title decoration.
@@ -24,6 +27,7 @@ const MAX_EXCERPT_CHARS = 400;
 const RECENT_REQUESTS = 3;
 const TIMEOUT_MS = 30_000;
 const STATUS_KEY = "pi-auto-name";
+const OWNED_ENTRY = "pi-auto-name";
 
 const SYSTEM_PROMPT = [
 	"You name coding-agent sessions so the user can tell them apart.",
@@ -67,6 +71,15 @@ export function buildDigest(entries: readonly unknown[], cwd: string): string | 
 	return lines.join("\n");
 }
 
+/** The last name this extension set on the branch, so ownership survives resume and fork. */
+export function lastAutoName(entries: readonly unknown[]): string | undefined {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const entry = entries[i] as { type?: string; customType?: string; data?: { name?: unknown } };
+		if (entry?.type === "custom" && entry.customType === OWNED_ENTRY && typeof entry.data?.name === "string") return entry.data.name;
+	}
+	return undefined;
+}
+
 export function sanitizeTitle(raw: string): string | undefined {
 	const line = raw.split("\n").find((candidate) => candidate.trim()) ?? "";
 	let title = line
@@ -104,7 +117,7 @@ async function generateTitle(ctx: ExtensionContext, thinkingLevel: ReturnType<Ex
 
 export default function autoName(pi: ExtensionAPI): void {
 	let inFlight: AbortController | undefined;
-	let autoTried = false;
+	let settledTurns = 0;
 
 	const cancel = () => {
 		inFlight?.abort();
@@ -112,16 +125,19 @@ export default function autoName(pi: ExtensionAPI): void {
 	};
 
 	/** Resolves to the applied title, or undefined when superseded or skipped. */
-	async function rename(ctx: ExtensionContext, onlyIfUnnamed: boolean): Promise<string | undefined> {
+	async function rename(ctx: ExtensionContext, automatic: boolean): Promise<string | undefined> {
 		cancel();
+		const before = pi.getSessionName();
 		const own = new AbortController();
 		inFlight = own;
 		const timer = setTimeout(() => own.abort(), TIMEOUT_MS);
 		timer.unref?.();
 		try {
 			const title = await generateTitle(ctx, pi.getThinkingLevel(), own.signal);
-			if (own.signal.aborted || (onlyIfUnnamed && pi.getSessionName())) return undefined;
-			pi.setSessionName(title);
+			// A `/name` during the request wins over an automatic title.
+			if (own.signal.aborted || (automatic && pi.getSessionName() !== before)) return undefined;
+			if (title !== before) pi.setSessionName(title);
+			if (title !== lastAutoName(ctx.sessionManager.getBranch())) pi.appendEntry(OWNED_ENTRY, { name: title });
 			return title;
 		} catch (error) {
 			if (own.signal.aborted) return undefined;
@@ -136,7 +152,7 @@ export default function autoName(pi: ExtensionAPI): void {
 	// over), on every rename, and a clear on quit. TUI only, like the auto name.
 	pi.on("session_start", (_event, ctx) => {
 		cancel();
-		autoTried = false;
+		settledTurns = 0;
 		if (ctx.mode === "tui") void reportSessionName(pi.getSessionName());
 	});
 	pi.on("session_info_changed", (event, ctx) => {
@@ -147,16 +163,20 @@ export default function autoName(pi: ExtensionAPI): void {
 		if (event.reason === "quit" && ctx.mode === "tui") await reportSessionName(undefined);
 	});
 
-	// One automatic attempt per session, and only while it has no name: a name
-	// from `/name`, a fork's parent, or an earlier run is never replaced.
+	// Turns 1, 3, 5, … of each session, and only while the name is unset or ours:
+	// a name from `/name` or set before this extension ran is never replaced.
 	pi.on("agent_settled", async (_event, ctx) => {
-		if (autoTried || inFlight || ctx.mode !== "tui" || pi.getSessionName()) return;
-		if (!buildDigest(ctx.sessionManager.getBranch(), ctx.cwd)) return;
-		autoTried = true;
+		if (ctx.mode !== "tui") return;
+		settledTurns++;
+		if (settledTurns % 2 === 0 || inFlight) return;
+		const branch = ctx.sessionManager.getBranch();
+		const name = pi.getSessionName();
+		if (name && name !== lastAutoName(branch)) return;
+		if (!buildDigest(branch, ctx.cwd)) return;
 		try {
 			await rename(ctx, true);
 		} catch {
-			// Cosmetic: a failed title leaves the session unnamed; /rename retries.
+			// Cosmetic: a failed title keeps the old name until the next attempt.
 		}
 	});
 
