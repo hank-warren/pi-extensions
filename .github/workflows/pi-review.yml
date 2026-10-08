@@ -30,7 +30,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - uses: hank-warren/pi-action/pr-review@v1
+      - uses: hank-warren/pi-action/pr-review@fix/try-unlisted-models  # DO NOT MERGE: canary for hank-warren/pi-action#3
         with:
           cliproxyapi-api-key: ${{ secrets.CLIPROXYAPI_API_KEY }}
           cliproxyapi-base-url: ${{ vars.CLIPROXYAPI_BASE_URL }}
