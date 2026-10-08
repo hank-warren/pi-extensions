@@ -116,12 +116,12 @@ function statusText(config: ReturnType<typeof loadConfig>, snapshot: CatalogSnap
     `CLIProxyAPI provider: ${config.providerName}`,
     `Base URL: ${config.baseUrl}`,
     `Auth required: ${config.authRequired ? "yes" : "no"}`,
-    `Models: ${snapshot.built.stats.total} (${snapshot.built.stats.enriched} enriched, ${snapshot.built.stats.unmatched} unmatched)`,
+    `Models: ${snapshot.built.stats.total} (${snapshot.built.stats.enriched} enriched, ${snapshot.built.stats.unmatched} unmatched, ${snapshot.built.stats.cpaSpecs} with CPA limits)`,
     `Reasoning models: ${capabilityCount(snapshot, "reasoning")}`,
     `Image-capable models: ${capabilityCount(snapshot, "image")}`,
     `CPA snapshot: ${age(snapshot.cpaUpdatedAt)}`,
     metadataStatusLine(snapshot, metadataStale),
-    `GPT-5.6 context window: ${snapshot.gpt56ContextWindow === "full" ? "full models.dev limit" : "canonical 272000"}`,
+    `GPT-5.6 context window: ${snapshot.gpt56ContextWindow === "full" ? "full (CPA max_context_window, else models.dev)" : "canonical 272000"}`,
     `Per-turn Claude effort: ${snapshot.perTurnEffort ? "enabled (needs CLIProxyAPI v8.0.3+)" : "disabled"}`,
     `Claude mid-conversation updates: ${snapshot.midConversationUpdates ? "enabled (needs CLIProxyAPI v8.0.4+)" : "disabled"}`,
   ].join("\n");
@@ -130,7 +130,8 @@ function statusText(config: ReturnType<typeof loadConfig>, snapshot: CatalogSnap
 function refreshPart(label: string, result: SourceRefreshResult): string {
   if (!result.attempted) return `${label}: not requested`;
   if (result.error) return `${label}: failed (${errorText(result.error)}); retained previous snapshot`;
-  return `${label}: ${result.changed ? "updated" : "unchanged"}`;
+  const specs = result.specError ? `; CPA model specs failed (${errorText(result.specError)}), kept previous limits` : "";
+  return `${label}: ${result.changed ? "updated" : "unchanged"}${specs}`;
 }
 
 function parseRefreshTarget(value: string | undefined): RefreshTarget | undefined {

@@ -1,5 +1,19 @@
 # @hank-warren/pi-cliproxyapi-provider
 
+## 0.4.0
+
+### Minor Changes
+
+- Take model limits from CLIProxyAPI itself and give routing-prefixed models their base model's metadata.
+
+  - Each discovery also reads CLIProxyAPI's Codex-client catalog (`/v1/models?client_version=`), which carries its registry's context window, output limit, effort levels, input modalities and display name. Its context window and output limit win over models.dev, so pi's `max_tokens` matches what the route allows (`devin/claude-opus-5-5`: 64000). An entry is used only when it carries `max_tokens`, CPA's own data rather than template filler. A failed spec fetch never fails discovery and keeps the previous specs.
+  - A prefixed id (`team/gpt-6-sol`, `plus/gpt-6-sol`, `devin/claude-opus-5-5`) that matches nothing is matched by its base id, so account-pinned and provider-namespaced routes get real cost, modalities and thinking maps instead of pi's 128000/16384 defaults. Requests keep the full id.
+  - A canonical owner now also matches punctuation-insensitively within its provider (Devin's `gpt-5-6-sol`), and CLIProxyAPI's `moonshot`/`zhipu` owners map to models.dev's `moonshotai`/`zhipuai`.
+  - CPA's effort list describes models nothing else does (Devin's SWE models), ignoring the `gpt-5.5` template list CPA pads unknown models with.
+  - A models.dev limit of `0` (image-generation models) no longer becomes a 0-token context window.
+  - `gpt56ContextWindow: "full"` now uses CPA's `max_context_window`, falling back to models.dev; canonical mode takes the smaller of CPA's and pi's window.
+  - `/cliproxyapi status` counts models with CPA limits, and a refresh reports a failed spec fetch.
+
 ## 0.3.0
 
 ### Minor Changes

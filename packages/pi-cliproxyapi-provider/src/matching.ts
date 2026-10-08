@@ -1,4 +1,5 @@
 import type { CpaModel } from "./cpa.ts";
+import { modelName } from "./model-api.ts";
 import type { ModelsDevCatalog, ModelsDevMetadata } from "./types.ts";
 
 const CANONICAL_OWNER_PREFIXES: Record<string, string> = {
@@ -9,14 +10,25 @@ const CANONICAL_OWNER_PREFIXES: Record<string, string> = {
   mistral: "mistral",
   xai: "xai",
   zhipuai: "zhipuai",
+  // CLIProxyAPI's spelling of the two labs models.dev keys with an `ai` suffix.
+  zhipu: "zhipuai",
   alibaba: "alibaba",
   moonshotai: "moonshotai",
+  moonshot: "moonshotai",
   minimax: "minimax",
   nvidia: "nvidia",
   cohere: "cohere",
 };
 
-export type MetadataMatchMethod = "alias" | "exact" | "owner-prefix" | "owner-hint" | "suffix" | "normalized-suffix" | "provider-fallback";
+export type MetadataMatchMethod =
+  | "alias"
+  | "exact"
+  | "owner-prefix"
+  | "owner-hint"
+  | "suffix"
+  | "normalized-suffix"
+  | "provider-fallback"
+  | "route-base";
 
 export interface MetadataMatch {
   metadataId: string;
@@ -150,6 +162,15 @@ export function findMetadataMatch(
     if (catalog[ownerKey]) {
       return { metadataId: ownerKey, metadata: catalog[ownerKey], method: "owner-prefix" };
     }
+    // Same owner, punctuation-insensitive: Devin spells versions with dashes
+    // (`gpt-5-6-sol`, `glm-5-3`) where models.dev uses dots.
+    const ownerNormalizedKey = oneMatch(normalizedSuffixCandidates.filter((metadataId) => {
+      const metadata = catalog[metadataId];
+      return metadata && sourceProvider(metadataId, metadata).toLowerCase() === canonicalOwner;
+    }));
+    if (ownerNormalizedKey) {
+      return { metadataId: ownerNormalizedKey, metadata: catalog[ownerNormalizedKey], method: "owner-prefix" };
+    }
   }
 
   const hintedKey = ownerHintMatch(owner, normalizedSuffixCandidates, catalog);
@@ -179,4 +200,30 @@ export function findMetadataMatch(
   }
 
   return undefined;
+}
+
+/**
+ * {@link findMetadataMatch}, falling back to the model's base id when its CPA
+ * id carries a routing prefix.
+ *
+ * CLIProxyAPI namespaces a model by the route serving it: a configured prefix
+ * that pins one OAuth account (`team/gpt-6-sol`, `plus/gpt-6-sol`) or a
+ * provider namespace (`devin/claude-opus-5-5`). models.dev lists only the
+ * model, so the prefixed id matches nothing and would render with pi's bare
+ * defaults. The prefixed id is tried first, so an alias or a catalog entry
+ * written for it still wins; only the metadata lookup drops the prefix, and the
+ * registered model keeps its full id so requests still reach that route.
+ */
+export function findRouteMetadataMatch(
+  cpaModel: Pick<CpaModel, "id" | "owned_by">,
+  catalog: ModelsDevCatalog,
+  aliases: Record<string, string>,
+  fallbackProvider?: string | null,
+): MetadataMatch | undefined {
+  const direct = findMetadataMatch(cpaModel, catalog, aliases, fallbackProvider);
+  if (direct) return direct;
+  const base = modelName(cpaModel.id);
+  if (base === cpaModel.id || base === "") return undefined;
+  const routed = findMetadataMatch({ ...cpaModel, id: base }, catalog, aliases, fallbackProvider);
+  return routed ? { ...routed, method: "route-base" } : undefined;
 }

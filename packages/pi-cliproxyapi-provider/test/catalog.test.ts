@@ -201,8 +201,8 @@ test("refresh deduplicates concurrent requests", async () => {
     await instance.load();
     const originalFetch = globalThis.fetch;
     let fetches = 0;
-    globalThis.fetch = (async () => {
-      fetches += 1;
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      if (!String(url).includes("client_version")) fetches += 1;
       await new Promise((resolve) => setTimeout(resolve, 10));
       return new Response(JSON.stringify({ data: [{ id: "fresh" }] }), { status: 200 });
     }) as typeof fetch;
@@ -225,8 +225,8 @@ test("deduplicated callers can abort without cancelling the shared refresh", asy
     await instance.load();
     const originalFetch = globalThis.fetch;
     let fetches = 0;
-    globalThis.fetch = (async () => {
-      fetches += 1;
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      if (!String(url).includes("client_version")) fetches += 1;
       await new Promise((resolve) => setTimeout(resolve, 20));
       return new Response(JSON.stringify({ data: [{ id: "fresh" }] }), { status: 200 });
     }) as typeof fetch;
@@ -347,7 +347,7 @@ test("models-if-stale skips models.dev when the metadata snapshot is fresh", asy
       const result = await instance.refresh("models-if-stale", "background");
       assert.equal(result.models.updated, true);
       assert.equal(result.metadata.attempted, false);
-      assert.deepEqual(urls, ["http://cliproxyapi.test/v1/models"]);
+      assert.deepEqual(urls.sort(), ["http://cliproxyapi.test/v1/models", "http://cliproxyapi.test/v1/models?client_version="]);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -375,7 +375,11 @@ test("models-if-stale fetches models.dev when the snapshot is the built-in seed 
       assert.equal(result.snapshot.metadataSource, "cache");
       assert.equal(result.snapshot.built.models[0].name, "Fresh from models.dev");
       assert.equal(result.snapshot.built.models[0].maxTokens, 64000);
-      assert.deepEqual(urls.sort(), ["http://cliproxyapi.test/v1/models", "https://models.dev/api.json"]);
+      assert.deepEqual(urls.sort(), [
+        "http://cliproxyapi.test/v1/models",
+        "http://cliproxyapi.test/v1/models?client_version=",
+        "https://models.dev/api.json",
+      ]);
       // The refreshed snapshot is no longer stale, so the next routine refresh skips it.
       assert.equal(instance.metadataIsStale(result.snapshot), false);
     } finally {
