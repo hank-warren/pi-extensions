@@ -1,7 +1,11 @@
-import type { CpaModel } from "./cpa.ts";
-import { findMetadataMatch, type MetadataMatchMethod } from "./matching.ts";
+import type { CpaModel, CpaModelSpec } from "./cpa.ts";
+import { findRouteMetadataMatch, type MetadataMatchMethod } from "./matching.ts";
 import { resolveModelWire, type ModelWire } from "./model-api.ts";
-import { getModelCapabilityOverrides, thinkingLevelMapFromMetadata } from "./model-capabilities.ts";
+import {
+  getModelCapabilityOverrides,
+  thinkingLevelMapFromEfforts,
+  thinkingLevelMapFromMetadata,
+} from "./model-capabilities.ts";
 import { NO_PI_PROFILES, type PiModelProfiles } from "./pi-profiles.ts";
 import type { Gpt56ContextWindowMode } from "./settings.ts";
 import type {
@@ -47,6 +51,8 @@ export interface BuildProviderModelsStats {
   unmatched: number;
   matchMethods: Record<MetadataMatchMethod, number>;
   unmatchedModelIds: string[];
+  /** Models whose limits came from CLIProxyAPI's own registry. */
+  cpaSpecs: number;
 }
 
 export interface BuildProviderModelsResult {
@@ -54,9 +60,12 @@ export interface BuildProviderModelsResult {
   stats: BuildProviderModelsStats;
 }
 
-function inputFromMetadata(metadata: ModelsDevMetadata): InputModality[] {
-  const input = metadata.modalities?.input ?? [];
+function inputFromModalities(input: readonly string[]): InputModality[] {
   return input.includes("image") ? ["text", "image"] : ["text"];
+}
+
+function inputFromMetadata(metadata: ModelsDevMetadata): InputModality[] {
+  return inputFromModalities(metadata.modalities?.input ?? []);
 }
 
 function costFromMetadata(metadata: ModelsDevMetadata): ProviderModelConfigLike["cost"] {
@@ -81,17 +90,54 @@ function costFromMetadata(metadata: ModelsDevMetadata): ProviderModelConfigLike[
   };
 }
 
+/**
+ * The context window pi compacts against.
+ *
+ * CLIProxyAPI's registry wins when it publishes one: it is the proxy that
+ * accepts or rejects the request, and a route can be narrower than the model
+ * (`devin/` and Antigravity routes, an account-pinned prefix).
+ *
+ * Codex Responses models keep the conservative window unless
+ * `gpt56ContextWindow` opts into the full one. The smallest of CPA's window
+ * and pi's native window wins there, because overstating it makes pi compact
+ * too late (pi knows Codex Spark at 128000). In full mode CPA's
+ * `max_context_window` is the ceiling, with models.dev behind it.
+ */
 function contextWindowForModel(
   wire: ModelWire,
   metadataContextWindow: number | undefined,
   mode: Gpt56ContextWindowMode,
+  spec: CpaModelSpec | undefined,
 ): number {
-  if (!wire.codexResponses) return metadataContextWindow ?? PI_MODEL_DEFAULTS.contextWindow;
-  // Pi's native window wins in canonical mode: it is smaller for some models
-  // (Codex Spark is 128000), and overstating it makes pi compact too late.
-  const canonical = wire.profile?.contextWindow ?? GPT_5_6_CANONICAL_CONTEXT_WINDOW;
-  if (mode === "full") return metadataContextWindow ?? canonical;
+  if (!wire.codexResponses) return spec?.contextWindow ?? metadataContextWindow ?? PI_MODEL_DEFAULTS.contextWindow;
+  const known = [spec?.contextWindow, wire.profile?.contextWindow].filter((value): value is number => value !== undefined);
+  const canonical = known.length > 0 ? Math.min(...known) : GPT_5_6_CANONICAL_CONTEXT_WINDOW;
+  if (mode === "full") return spec?.maxContextWindow ?? metadataContextWindow ?? canonical;
   return canonical;
+}
+
+/**
+ * The effort list CLIProxyAPI copies from its `gpt-5.5` Codex template onto
+ * every model its registry has no thinking data for (Claude 3.5 Haiku, Devin's
+ * SWE-1.6). A real list that happens to be identical cannot be told apart from
+ * that filler, so this exact list is ignored; such a model falls back to pi's
+ * reasoning default, which `/cliproxyapi models` can override.
+ */
+const CPA_TEMPLATE_FILLER_EFFORTS = ["low", "medium", "high", "xhigh"];
+
+/** Thinking levels from CLIProxyAPI's effort list, consulted only when no better source describes the model. */
+function specThinkingLevelMap(spec: CpaModelSpec | undefined): ProviderModelConfigLike["thinkingLevelMap"] {
+  const levels = spec?.reasoningLevels;
+  if (!levels) return undefined;
+  if (levels.length === CPA_TEMPLATE_FILLER_EFFORTS.length && levels.every((level, index) => level === CPA_TEMPLATE_FILLER_EFFORTS[index])) {
+    return undefined;
+  }
+  return thinkingLevelMapFromEfforts(levels);
+}
+
+/** models.dev lists non-chat models (image generation) with a 0 limit, which means "not applicable". */
+function positiveLimit(value: number | undefined): number | undefined {
+  return value !== undefined && value > 0 ? value : undefined;
 }
 
 /**
@@ -144,29 +190,32 @@ function modelFromMetadata(
   };
   const wire = resolveModelWire(capabilityContext, profiles);
   const capabilityOverrides = getModelCapabilityOverrides(capabilityContext);
+  const spec = cpaModel.spec;
   const reasoning = wire.profile?.reasoning
     ?? capabilityOverrides.reasoning
     ?? metadata.reasoning
+    ?? (specThinkingLevelMap(spec) ? true : undefined)
     ?? PI_MODEL_DEFAULTS.reasoning;
   // Pi's native map for the upstream CPA fronts is authoritative. Family rules
-  // cover models newer than the running pi; otherwise the metadata decides.
+  // cover models newer than the running pi; otherwise the metadata decides,
+  // and CPA's own effort list only fills a gap.
   const profileMap = wire.profile?.thinkingLevelMap;
   const thinkingLevelMap = (profileMap ? { ...profileMap } : undefined)
     ?? capabilityOverrides.thinkingLevelMap
-    ?? (reasoning ? thinkingLevelMapFromMetadata(metadata) : undefined);
+    ?? (reasoning ? thinkingLevelMapFromMetadata(metadata) ?? specThinkingLevelMap(spec) : undefined);
   const compat = compatFromWire(wire, cpaModel, features);
 
   return {
     id: cpaModel.id,
-    name: metadata.name ?? cpaModel.id,
+    name: spec?.displayName ?? metadata.name ?? cpaModel.id,
     reasoning,
     ...(wire.api ? { api: wire.api } : {}),
     ...(compat ? { compat } : {}),
     ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
-    input: inputFromMetadata(metadata),
+    input: metadata.modalities?.input ? inputFromMetadata(metadata) : inputFromModalities(spec?.inputModalities ?? []),
     cost: costFromMetadata(metadata),
-    contextWindow: contextWindowForModel(wire, metadata.limit?.context, gpt56ContextWindow),
-    maxTokens: metadata.limit?.output ?? PI_MODEL_DEFAULTS.maxTokens,
+    contextWindow: contextWindowForModel(wire, positiveLimit(metadata.limit?.context), gpt56ContextWindow, spec),
+    maxTokens: spec?.maxTokens ?? positiveLimit(metadata.limit?.output) ?? PI_MODEL_DEFAULTS.maxTokens,
   };
 }
 
@@ -188,17 +237,24 @@ function defaultModel(
   const wire = resolveModelWire(modelContext, profiles);
   const capabilityOverrides = getModelCapabilityOverrides(modelContext);
   const compat = compatFromWire(wire, cpaModel, features);
+  const spec = cpaModel.spec;
+  // With no catalog entry, CPA's effort list is the only description left;
+  // pi's native profile and the family rules still win over it.
+  const specMap = wire.profile || capabilityOverrides.thinkingLevelMap ? undefined : specThinkingLevelMap(spec);
 
   return {
     id: cpaModel.id,
-    name: cpaModel.id,
+    name: spec?.displayName ?? cpaModel.id,
     ...cloneModelDefaults(),
+    ...(specMap ? { reasoning: true, thinkingLevelMap: specMap } : {}),
     ...capabilityOverrides,
     ...(wire.profile ? { reasoning: wire.profile.reasoning } : {}),
     ...(wire.profile?.thinkingLevelMap ? { thinkingLevelMap: { ...wire.profile.thinkingLevelMap } } : {}),
     ...(wire.api ? { api: wire.api } : {}),
     ...(compat ? { compat } : {}),
-    contextWindow: contextWindowForModel(wire, undefined, gpt56ContextWindow),
+    ...(spec?.inputModalities ? { input: inputFromModalities(spec.inputModalities) } : {}),
+    contextWindow: contextWindowForModel(wire, undefined, gpt56ContextWindow, spec),
+    ...(spec?.maxTokens ? { maxTokens: spec.maxTokens } : {}),
   };
 }
 
@@ -211,6 +267,7 @@ function emptyMatchMethods(): Record<MetadataMatchMethod, number> {
     suffix: 0,
     "normalized-suffix": 0,
     "provider-fallback": 0,
+    "route-base": 0,
   };
 }
 
@@ -247,7 +304,7 @@ export function buildProviderModels(
   let enriched = 0;
 
   const models = cpaModels.map((cpaModel) => {
-    const match = findMetadataMatch(cpaModel, catalog, aliases, metadataFallbackProvider);
+    const match = findRouteMetadataMatch(cpaModel, catalog, aliases, metadataFallbackProvider);
     if (!match) {
       unmatchedModelIds.push(cpaModel.id);
       return applyModelOverride(defaultModel(cpaModel, gpt56ContextWindow, profiles, features), overrides);
@@ -269,6 +326,7 @@ export function buildProviderModels(
       unmatched: unmatchedModelIds.length,
       matchMethods,
       unmatchedModelIds,
+      cpaSpecs: cpaModels.filter((model) => model.spec?.contextWindow !== undefined || model.spec?.maxTokens !== undefined).length,
     },
   };
 }

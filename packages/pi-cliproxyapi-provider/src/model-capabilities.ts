@@ -136,20 +136,33 @@ export function thinkingLevelMapFromMetadata(metadata: ModelsDevMetadata): Think
   const effort = options.find((option) => option?.type === "effort" && Array.isArray(option.values));
   if (!effort?.values) return undefined;
 
-  const accepted = new Set(effort.values);
-  const map: ThinkingLevelMap = {};
+  const map = mapFromAcceptedEfforts(new Set(effort.values));
+  if (!map.off && options.every((option) => option?.type === "effort")) map.off = null;
+  return map;
+}
 
+function mapFromAcceptedEfforts(accepted: ReadonlySet<string>): ThinkingLevelMap {
+  const map: ThinkingLevelMap = {};
   for (const level of PI_EFFORT_LEVELS) {
     map[level] = accepted.has(level) ? level : null;
   }
-
-  if (accepted.has("none")) {
-    map.off = "none";
-  } else if (options.every((option) => option?.type === "effort")) {
-    map.off = null;
-  }
-
+  if (accepted.has("none")) map.off = "none";
   return map;
+}
+
+/**
+ * A thinking map from the effort names CLIProxyAPI lists for a model, for
+ * models no better source describes (Devin's own SWE models, for example).
+ *
+ * Each listed pi level maps to itself and every other level to `null`; `none`
+ * maps to `off`. Unlike models.dev, CPA's list cannot say that thinking is
+ * impossible to switch off, so without `none` the `off` slot is left to pi's
+ * default. Returns `undefined` when no listed name is a pi level.
+ */
+export function thinkingLevelMapFromEfforts(efforts: readonly string[]): ThinkingLevelMap | undefined {
+  const accepted = new Set(efforts.map((effort) => effort.toLowerCase()));
+  if (!PI_EFFORT_LEVELS.some((level) => accepted.has(level))) return undefined;
+  return mapFromAcceptedEfforts(accepted);
 }
 
 export function getModelCapabilityOverrides(context: ModelCapabilityContext): ModelCapabilityOverrides {

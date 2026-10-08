@@ -1,6 +1,6 @@
 import { cpaModelsCachePath, discoveryHeaders, modelsDevCachePath } from "./discovery.ts";
 import { readCache, writeCache, type CacheEnvelope } from "./cache.ts";
-import { fetchCpaModels, parseCpaModelsCache, type CpaModel } from "./cpa.ts";
+import { fetchCpaModels, fetchCpaModelSpecs, parseCpaModelsCache, withCpaModelSpecs, type CpaModel, type CpaModelSpec } from "./cpa.ts";
 import { builtinSeedCatalog } from "./builtin-seed.ts";
 import { fetchModelsDevCatalog, hasSourceProviderMetadata, parseModelsDevCatalog } from "./models-dev.ts";
 import { loadPiModelProfiles, NO_PI_PROFILES, type PiModelProfiles } from "./pi-profiles.ts";
@@ -46,6 +46,8 @@ export interface SourceRefreshResult {
   updated: boolean;
   changed: boolean;
   error?: unknown;
+  /** CPA's model-spec catalog failed; the model list still updated and kept the previous specs. */
+  specError?: unknown;
 }
 
 export interface CatalogRefreshResult {
@@ -64,7 +66,10 @@ export interface ProviderCatalogOptions {
   getApiKey: () => Promise<string | undefined>;
   backgroundTimeoutMs?: number;
   manualTimeoutMs?: number;
-  /** Budget for a models.dev fetch riding on a background refresh. Defaults to the manual timeout. */
+  /**
+   * Budget for a models.dev fetch, or CPA's model-spec catalog, riding on a
+   * background refresh. Defaults to the manual timeout.
+   */
   metadataBackgroundTimeoutMs?: number;
   /** Age after which a routine refresh re-fetches models.dev. Defaults to {@link METADATA_STALE_AFTER_MS}. */
   metadataStaleAfterMs?: number;
@@ -87,6 +92,11 @@ function canonicalJson(value: unknown): string {
 
 function sameCpaModels(left: CpaModel[], right: CpaModel[]): boolean {
   return canonicalJson(left) === canonicalJson(right);
+}
+
+/** The specs a snapshot already holds, so a failed spec fetch keeps last-known-good values. */
+function previousSpecs(models: CpaModel[]): Map<string, CpaModelSpec> {
+  return new Map(models.flatMap((model) => model.spec ? [[model.id, model.spec] as const] : []));
 }
 
 function sameMetadata(left: ModelsDevCatalog, right: ModelsDevCatalog): boolean {
@@ -216,15 +226,30 @@ export class ProviderCatalog {
     if (models.attempted) {
       try {
         const apiKey = await (getDiscoveryApiKey ?? this.options.getApiKey)();
-        const fresh = await fetchCpaModels(
+        const headers = discoveryHeaders(this.options.config, apiKey);
+        // The spec catalog is ~0.5-2.5 MB against the list's ~10 kB, so it gets
+        // the metadata budget, and its failure never fails discovery.
+        const specsRequest = fetchCpaModelSpecs(
           this.options.config.baseUrl,
-          discoveryHeaders(this.options.config, apiKey),
+          headers,
+          mode === "background"
+            ? this.options.metadataBackgroundTimeoutMs ?? this.options.manualTimeoutMs ?? 10_000
+            : this.options.manualTimeoutMs ?? 10_000,
+          signal,
+        ).then((specs) => ({ specs }), (error: unknown) => ({ error }));
+        const listed = await fetchCpaModels(
+          this.options.config.baseUrl,
+          headers,
           mode === "background" ? this.options.backgroundTimeoutMs ?? 2_000 : this.options.manualTimeoutMs ?? 10_000,
           signal,
         );
-        if (mode === "background" && current.cpaModels.length > 0 && fresh.length === 0) {
+        if (mode === "background" && current.cpaModels.length > 0 && listed.length === 0) {
           throw new Error("CPA automatic discovery returned no models; retained the last successful snapshot");
         }
+        const specResult = await specsRequest;
+        if (signal?.aborted) throw signal.reason ?? new Error("Refresh aborted");
+        const fresh = withCpaModelSpecs(listed, "specs" in specResult ? specResult.specs : previousSpecs(current.cpaModels));
+        if ("error" in specResult) models.specError = specResult.error;
         const freshUpdatedAt = Date.now();
         const changed = !sameCpaModels(current.cpaModels, fresh);
         await (this.options.writeSnapshot ?? writeCache)(cpaModelsCachePath(this.options.config), fresh, freshUpdatedAt);
