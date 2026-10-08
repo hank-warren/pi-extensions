@@ -1996,3 +1996,173 @@ test("40 · in a subagent, a failed review is revise-first too, with review_fail
 			},
 		));
 });
+
+async function asUnattended(run: () => Promise<void>, approvers?: string): Promise<void> {
+	process.env.PI_AUTO_PERMISSIONS_UNATTENDED = "1";
+	if (approvers !== undefined) process.env.PI_AUTO_PERMISSIONS_APPROVERS = approvers;
+	try {
+		await run();
+	} finally {
+		delete process.env.PI_AUTO_PERMISSIONS_UNATTENDED;
+		delete process.env.PI_AUTO_PERMISSIONS_APPROVERS;
+	}
+}
+
+test("41 · an unattended RPC session blocks an ask_user verdict and never opens a prompt, even on a later retry", async () => {
+	const titles: string[] = [];
+	await asUnattended(() =>
+		withExtension(
+			{
+				rules: [GUARDED_RULE],
+				mode: "rpc",
+				config: { evaluationLog: { enabled: true } },
+				// What an auto-allowing ACP bridge would answer, if it were ever asked.
+				select: async (title, options) => {
+					titles.push(title);
+					return options.find((option) => option.startsWith("Allow"));
+				},
+				completeSimple: () => assistantResponse(verdictText("ask_user", "force push rewrites history")),
+			},
+			async (harness) => {
+				await harness.sessionStart();
+
+				const first = await harness.toolCall("git push --force origin main", "call-1");
+				assert.ok(first?.block);
+				assert.match(first.reason, /^Git push needs the user's approval: force push rewrites history/u);
+				assert.match(first.reason, /Nobody answers approval prompts in this session/u);
+				assert.equal(harness.denied[0]?.verdict, "block");
+				assert.equal(harness.denied[0]?.decisionSource, "guardian");
+				assert.equal(harness.denied[0]?.reviseFirst, undefined);
+				assert.match(harness.calls[0]!.request.systemPrompt, /UNATTENDED SESSION/u, "the guardian is told nobody answers prompts");
+
+				const sameTurn = await harness.toolCall("git push --force origin main", "call-2");
+				assert.match(sameTurn?.reason ?? "", /Nobody answers approval prompts/u);
+				await harness.turnEnd();
+				const laterTurn = await harness.toolCall("git push --force origin main", "call-3");
+				assert.match(laterTurn?.reason ?? "", /Nobody answers approval prompts/u, "a retry without a new user message stays blocked");
+
+				assert.deepEqual(titles, [], "ui.select is never called, so a bridge cannot auto-allow");
+				assert.equal(harness.customCalls, 0);
+				assert.equal(existsSync(join(harness.configPath, "..", "review-evals.jsonl")), false, "no prompt, so no evaluation record");
+			},
+		));
+});
+
+test("42 · in an unattended session, a retry after the user's approving message is reviewed again and runs on approve", async () => {
+	await asUnattended(() =>
+		withExtension(
+			{
+				rules: [GUARDED_RULE],
+				mode: "rpc",
+				select: async () => assert.fail("an unattended session never prompts"),
+				completeSimple: (_call, index) =>
+					assistantResponse(index === 0
+						? verdictText("ask_user", "pushing to main was not authorized")
+						: verdictText("approve", "the user approved this exact push")),
+			},
+			async (harness) => {
+				await harness.sessionStart();
+				const blocked = await harness.toolCall("git push origin main", "call-1");
+				assert.match(blocked?.reason ?? "", /needs the user's approval/u);
+
+				await harness.turnEnd();
+				harness.contextEntries.push({
+					type: "message",
+					id: "u-approve",
+					message: { role: "user", content: [{ type: "text", text: "yes, run git push origin main" }] },
+				});
+				assert.equal(await harness.toolCall("git push origin main", "call-2"), undefined);
+				assert.equal(harness.calls.length, 2, "the retry went back to the guardian");
+				assert.match(harness.calls[1]!.envelope, /yes, run git push origin main/u, "with the user's reply in the evidence");
+			},
+		));
+});
+
+test("43 · unattended wins over revise-first in a subagent, and a failed review blocks with review_failure attribution", async () => {
+	await asSubagentChild(() =>
+		asUnattended(() =>
+			withExtension(
+				{
+					rules: [GUARDED_RULE],
+					mode: "rpc",
+					select: async () => assert.fail("an unattended session never prompts"),
+					completeSimple: () => {
+						throw new Error("reviewer offline");
+					},
+				},
+				async (harness) => {
+					await harness.sessionStart();
+					const result = await harness.toolCall("git push origin main");
+					assert.match(result?.reason ?? "", /^Git push needs the user's approval: Automatic review failed: reviewer offline/u);
+					assert.doesNotMatch(result?.reason ?? "", /You are a subagent/u);
+					assert.equal(harness.denied[0]?.decisionSource, "review_failure");
+					assert.equal(harness.denied[0]?.verdict, "block");
+					assert.equal(harness.denied[0]?.reviseFirst, undefined);
+				},
+			)));
+
+	await asSubagentChild(() =>
+		asUnattended(() =>
+			withExtension(
+				{
+					rules: [GUARDED_RULE],
+					mode: "rpc",
+					completeSimple: () => assistantResponse(verdictText("ask_user", "force push rewrites history")),
+				},
+				async (harness) => {
+					await harness.sessionStart();
+					await harness.toolCall("git push --force origin main");
+					const prompt = harness.calls[0]!.request.systemPrompt;
+					assert.match(prompt, /cannot reach a human: this subagent has no interactive user/u, "the subagent section never promises a prompt");
+					assert.match(prompt, /UNATTENDED SESSION/u);
+				},
+			)));
+});
+
+test("44 · an unattended session gets its own system prompt section, in place of the subagent one", async () => {
+	const sectionsFor = async (harness: Harness) => {
+		const handler = harness.mock.events.get("before_agent_start")![0] as EventHandler;
+		const options = { contextFiles: [], sections: {} as Record<string, string> };
+		const structured = await handler({ type: "before_agent_start", prompt: "task", systemPrompt: "BASE", systemPromptOptions: options }, harness.ctx);
+		assert.equal(structured, undefined, "never forces the prompt");
+		const legacy = (await handler({ type: "before_agent_start", prompt: "task", systemPrompt: "BASE" }, harness.ctx)) as { systemPrompt?: string };
+		return { sections: options.sections, legacy: legacy.systemPrompt ?? "" };
+	};
+	await asUnattended(() =>
+		withExtension({ rules: [GUARDED_RULE], mode: "rpc" }, async (harness) => {
+			await harness.sessionStart();
+			const { sections, legacy } = await sectionsFor(harness);
+			assert.match(sections.auto_permissions_unattended ?? "", /^## Auto Permissions \(unattended\)/u);
+			assert.ok(legacy.startsWith("BASE\n\n## Auto Permissions (unattended)"));
+		}));
+	await asSubagentChild(() =>
+		asUnattended(() =>
+			withExtension({ rules: [GUARDED_RULE], mode: "rpc" }, async (harness) => {
+				await harness.sessionStart();
+				const { sections, legacy } = await sectionsFor(harness);
+				assert.deepEqual(Object.keys(sections), ["auto_permissions_unattended"]);
+				assert.doesNotMatch(legacy, /\(subagent\)/u);
+			})));
+});
+
+test("45 · PI_AUTO_PERMISSIONS_APPROVERS reaches the guardian as the only senders who can authorize", async () => {
+	await asUnattended(
+		() =>
+			withExtension(
+				{
+					rules: [GUARDED_RULE],
+					mode: "rpc",
+					completeSimple: () => assistantResponse(verdictText("ask_user", "force push rewrites history")),
+				},
+				async (harness) => {
+					await harness.sessionStart();
+					await harness.toolCall("git push --force origin main");
+					assert.match(
+						harness.calls[0]!.request.systemPrompt,
+						/one of these identities can authorize an operation: hank, a8339fce\./u,
+					);
+				},
+			),
+		"hank, a8339fce, not allowed!",
+	);
+});
