@@ -1,7 +1,7 @@
 {
   "name": "@hank-warren/pi-auto-name",
-  "version": "0.2.0",
-  "description": "Names each Pi session after its work (3-5 words) once the first turn settles, using the session's own model; /rename regenerates it.",
+  "version": "0.3.0",
+  "description": "Names each Pi session after its work (3-5 words) on the first turn and every second turn after, using the session's own model; /rename regenerates it.",
   "type": "module",
   "keywords": [
     "pi-package",
