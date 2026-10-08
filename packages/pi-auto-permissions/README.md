@@ -456,6 +456,26 @@ The guardian's subagent section says which of these applies, so a child without 
 
 Reviewer usage records from subagent sessions carry `"subagent": true` in the usage sidecar.
 
+## Unattended sessions
+
+Some hosts have a UI that nobody answers. An ACP bridge driven by a chat system — Buzz running Pi through `buzz-pi-acp`, for example — forwards each approval prompt as a `session/request_permission` and auto-selects its first "allow" option, so every `ask_user` verdict would quietly become an approval (and, with the evaluation log on, be recorded as "asking was unnecessary").
+
+Set `PI_AUTO_PERMISSIONS_UNATTENDED=1` in the environment of such a session, for example in the command that launches the bridge:
+
+```bash
+env PI_AUTO_PERMISSIONS_UNATTENDED=1 buzz-pi-acp
+```
+
+In that mode:
+
+- An `ask_user` verdict, or a failed review, **blocks** the command and never opens a prompt. The agent is told to get the result another way, or to ask the user to approve the exact command in its reply and stop.
+- The agent gets a short system prompt section (`auto_permissions_unattended` on Pi 1.x) saying the same before it starts.
+- The guardian is told that approval can only arrive as a later user message naming the exact operation and target, that an assistant's claim of approval is never authorization, and that a chat system may relay messages from several senders. A retry is reviewed again like any command, so it goes through only once the user's reply is in the evidence.
+- Nothing is written to the evaluation log, because no human answered a prompt.
+- Revise-first does not apply, even in a subagent: there is no human to protect from the interruption, and the block already says what to do.
+
+To restrict who can approve, set `PI_AUTO_PERMISSIONS_APPROVERS` to a comma-separated list of sender identities as the chat system writes them (names, public keys, account ids; up to 16, letters, digits and `_.@:+-` only). The guardian then treats only messages from those senders as authorization. Without it, the guardian accepts approval from the sender who gave the agent its task.
+
 ## Guardian dispatch
 
 Reviewer requests dispatch through the host's model runtime rather than pi-ai's compat layer, so provider transports registered by other extensions (for example `@gotgenes/pi-anthropic-auth` OAuth request shaping) apply to guardian calls. When the runtime seam is unavailable, dispatch falls back to `compat.completeSimple`.

@@ -10,6 +10,7 @@ import {
 } from "./config.js";
 import { resolveGuardianCompleteSimple } from "./guardian-transport.js";
 import { detectSubagentContext } from "./subagent-context.js";
+import { detectUnattended, unattendedSystemPrompt } from "./unattended.js";
 import { mergeOverrideEvidence } from "./override-evidence.js";
 import type { ReviewScope } from "./review-scope.js";
 import type { SessionOverrides } from "./session-overrides.js";
@@ -315,9 +316,12 @@ export function createGuardianReviewer(
     // buildReviewerSystemPrompt append the untrusted project-instructions
     // evidence block, keeping policy contiguous and evidence terminal.
     const subagentContext = detectSubagentContext(ctx.cwd);
+    const unattended = detectUnattended();
     const basePolicyPrompt = [
       config.systemPrompt,
-      ...(subagentContext ? [subagentContextSystemPrompt(ctx.hasUI)] : []),
+      // An unattended session's prompts reach no human, whatever its UI.
+      ...(subagentContext ? [subagentContextSystemPrompt(ctx.hasUI && !unattended)] : []),
+      ...(unattended ? [unattendedSystemPrompt(unattended)] : []),
     ].join("\n\n");
     // Appended outside config.systemPrompt so sessions using a customized
     // systemPromptFile still learn how to weigh override records. The injected

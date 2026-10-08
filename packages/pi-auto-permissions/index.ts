@@ -27,6 +27,12 @@ import { createGuardianReviewer } from "./guardian-reviewer.js";
 import { registerSettingsCommand } from "./settings-command.js";
 import type { BlockResult, ReviewScope, ReviewTarget } from "./review-scope.js";
 import { detectSubagentContext } from "./subagent-context.js";
+import {
+  detectUnattended,
+  UNATTENDED_PERMISSIONS_PROMPT,
+  UNATTENDED_PROMPT_SECTION,
+  unattendedBlockReason,
+} from "./unattended.js";
 import type { ReviewDisplayState } from "./widget-status.js";
 
 /**
@@ -194,6 +200,9 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   // to the human, once: the entry goes with it. Same-turn duplicates (sibling calls, codemode Promise.all)
   // are refused too, since the model has not yet seen the first refusal.
   let subagentSession = false;
+  // Set per session: PI_AUTO_PERMISSIONS_UNATTENDED=1 means nobody answers
+  // prompts (an ACP bridge auto-allows them), so ask_user blocks instead.
+  let unattendedSession = false;
   let turnGeneration = 0;
   const reviseFirst = new Map<string, number>();
   let lastConfigError: string | undefined;
@@ -427,6 +436,15 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
       return cancelled();
     }
     display.show(scope, "ask_user", detail);
+    if (unattendedSession) {
+      return settle(scope, {
+        display: "blocked",
+        verdict: "block",
+        source: decisionSource,
+        reason: detail,
+        block: unattendedBlockReason(gate.label, detail),
+      });
+    }
     if (!ctx.hasUI) {
       return settle(scope, {
         display: "blocked",
@@ -568,7 +586,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     source: "guardian" | "review_failure",
     lifecycleSignal: AbortSignal,
   ): BlockResult | undefined {
-    if (!subagentSession || !scope.ctx.hasUI) return undefined;
+    if (!subagentSession || !scope.ctx.hasUI || unattendedSession) return undefined;
     // As askUser does: a refusal the model will never see must not count as
     // its revise-first turn, or its retry would go straight to the human.
     const cancelled = cancelledAfterAwait(scope, lifecycleSignal);
@@ -829,7 +847,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", (event) => {
-    if (!subagentSession) return;
+    if (!subagentSession && !unattendedSession) return;
     try {
       if (!loadAutoPermissionsConfig().enabled) return;
     } catch {
@@ -839,12 +857,16 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     // dropping what later extensions change in its options (pi-agents adds
     // the parent's instruction files there), so the guidance goes into a
     // named section instead. Older Pi takes the prompt as a string.
+    // Unattended wins over subagent: its prompts pause no supervising session.
+    const [sectionName, guidance] = unattendedSession
+      ? [UNATTENDED_PROMPT_SECTION, UNATTENDED_PERMISSIONS_PROMPT]
+      : [SUBAGENT_PROMPT_SECTION, SUBAGENT_PERMISSIONS_PROMPT];
     const sections = (event as { systemPromptOptions?: { sections?: Record<string, string> } }).systemPromptOptions?.sections;
     if (sections) {
-      sections[SUBAGENT_PROMPT_SECTION] = SUBAGENT_PERMISSIONS_PROMPT;
+      sections[sectionName] = guidance;
       return;
     }
-    return { systemPrompt: `${event.systemPrompt}\n\n${SUBAGENT_PERMISSIONS_PROMPT}` };
+    return { systemPrompt: `${event.systemPrompt}\n\n${guidance}` };
   });
 
   registerSettingsCommand(pi, { overrides, reviewer });
@@ -875,6 +897,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
 
     resetCallTracking();
     subagentSession = detectSubagentContext(ctx.cwd) !== undefined;
+    unattendedSession = detectUnattended() !== undefined;
     reviseFirst.clear();
     reviewer.startSession(ctx.cwd);
     overrides.restore(ctx.sessionManager.getBranch());
