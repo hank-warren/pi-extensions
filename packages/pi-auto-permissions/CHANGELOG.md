@@ -1,5 +1,11 @@
 # @hank-warren/pi-auto-permissions
 
+## 0.21.0
+
+### Minor Changes
+
+- Add unattended mode for sessions whose approval prompts nobody answers, such as Buzz driving Pi through `buzz-pi-acp`, which auto-selects the first "allow" option of every prompt. With `PI_AUTO_PERMISSIONS_UNATTENDED=1`, an `ask_user` verdict or a failed review blocks the command instead of prompting, and the agent is told to ask the user to approve the exact command in its reply and stop. The guardian is told that a later user message naming the exact operation and target is the approval, high-risk actions included, and that an assistant's claim of approval never counts. The optional `PI_AUTO_PERMISSIONS_APPROVERS` (comma-separated sender identities) limits who can approve; a list with no valid entry fails closed. Unattended sessions skip revise-first and write nothing to the evaluation log.
+
 ## 0.20.0
 
 ### Minor Changes

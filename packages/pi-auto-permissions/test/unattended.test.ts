@@ -11,10 +11,14 @@ test("unattended mode is opt-in through PI_AUTO_PERMISSIONS_UNATTENDED=1 only", 
   assert.equal(detectUnattended({}), undefined);
   assert.equal(detectUnattended({ PI_AUTO_PERMISSIONS_UNATTENDED: "0" }), undefined);
   assert.equal(detectUnattended({ PI_AUTO_PERMISSIONS_UNATTENDED: "true" }), undefined);
-  assert.deepEqual(detectUnattended({ PI_AUTO_PERMISSIONS_UNATTENDED: "1" }), { approvers: [] });
+  assert.deepEqual(detectUnattended({ PI_AUTO_PERMISSIONS_UNATTENDED: "1" }), { approvers: [], approversConfigured: false });
+  assert.deepEqual(
+    detectUnattended({ PI_AUTO_PERMISSIONS_UNATTENDED: "1", PI_AUTO_PERMISSIONS_APPROVERS: "  " }),
+    { approvers: [], approversConfigured: false },
+  );
   assert.deepEqual(
     detectUnattended({ PI_AUTO_PERMISSIONS_UNATTENDED: "1", PI_AUTO_PERMISSIONS_APPROVERS: "hank" }),
-    { approvers: ["hank"] },
+    { approvers: ["hank"], approversConfigured: true },
   );
 });
 
@@ -36,7 +40,7 @@ test("the block reason tells the agent to ask in its reply and not to retry", ()
 });
 
 test("the guardian section names the approvers when configured, the task's sender otherwise", () => {
-  const configured = unattendedSystemPrompt({ approvers: ["hank", "a8339fce"] });
+  const configured = unattendedSystemPrompt({ approvers: ["hank", "a8339fce"], approversConfigured: true });
   assert.match(configured, /^UNATTENDED SESSION\n/u);
   assert.match(configured, /can only arrive as a later USER record/u);
   assert.match(configured, /names the exact operation and target is the execution-time approval/u);
@@ -44,7 +48,15 @@ test("the guardian section names the approvers when configured, the task's sende
   assert.match(configured, /one of these identities can authorize an operation: hank, a8339fce\./u);
   assert.doesNotMatch(configured, /sender who gave the agent its task/u);
 
-  const unconfigured = unattendedSystemPrompt({ approvers: [] });
+  const unconfigured = unattendedSystemPrompt({ approvers: [], approversConfigured: false });
   assert.match(unconfigured, /authorization comes only from the sender who gave the agent its task/u);
   assert.doesNotMatch(unconfigured, /these identities/u);
+});
+
+test("an approver list whose every entry is invalid fails closed, never falling back to the task's sender", () => {
+  const context = detectUnattended({ PI_AUTO_PERMISSIONS_UNATTENDED: "1", PI_AUTO_PERMISSIONS_APPROVERS: "Hank Warren" });
+  assert.deepEqual(context, { approvers: [], approversConfigured: true });
+  const prompt = unattendedSystemPrompt(context!);
+  assert.match(prompt, /none of its entries is a valid sender identity, so no message can authorize anything beyond low-risk actions/u);
+  assert.doesNotMatch(prompt, /sender who gave the agent its task/u);
 });

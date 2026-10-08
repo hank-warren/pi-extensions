@@ -474,7 +474,7 @@ In that mode:
 - Nothing is written to the evaluation log, because no human answered a prompt.
 - Revise-first does not apply, even in a subagent: there is no human to protect from the interruption, and the block already says what to do.
 
-To restrict who can approve, set `PI_AUTO_PERMISSIONS_APPROVERS` to a comma-separated list of sender identities as the chat system writes them (names, public keys, account ids; up to 16, letters, digits and `_.@:+-` only). The guardian then treats only messages from those senders as authorization. Without it, the guardian accepts approval from the sender who gave the agent its task.
+To restrict who can approve, set `PI_AUTO_PERMISSIONS_APPROVERS` to a comma-separated list of sender identities as the chat system writes them (names, public keys, account ids; up to 16, letters, digits and `_.@:+-` only). The guardian then treats only messages from those senders as authorization. Invalid entries are dropped; if none is valid (a display name with a space, say), the list fails closed and no message can authorize anything beyond low-risk actions. Without the variable, the guardian accepts approval from the sender who gave the agent its task.
 
 ## Guardian dispatch
 
