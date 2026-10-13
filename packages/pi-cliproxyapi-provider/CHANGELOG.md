@@ -1,5 +1,15 @@
 # @hank-warren/pi-cliproxyapi-provider
 
+## 0.5.0
+
+### Minor Changes
+
+- CLIProxyAPI is now the source of truth for model details. Everything its model catalog publishes wins: display name, context window, output limit, input modalities and effort levels. models.dev and pi's built-in catalog supply cost, and fill only what CLIProxyAPI leaves out.
+
+  - **Thinking levels:** CLIProxyAPI's effort list decides which levels pi offers, and a level it does not list is hidden. Claude keeps `off` from pi's native definition, because CLIProxyAPI's catalog cannot express it. On the Codex route `minimal` maps to `low`. An empty list or the `gpt-5.5` template filler still falls back to pi's native map, the family rules and the metadata. Models without a `none` effort no longer offer `off`: on the Codex GPT-5.6/6 routes, CLIProxyAPI ran it at `low`.
+  - **Codex context window:** `canonical` (the default) now publishes CLIProxyAPI's `context_window` for the route, for example 500000 for GPT-6.1 Sol, instead of capping it at pi's 272000. `full` still publishes `max_context_window`.
+  - **Input:** a route CLIProxyAPI serves as text-only, such as `devin/deepseek-v4-flash` and `devin/inkling`, is no longer offered images.
+
 ## 0.4.0
 
 ### Minor Changes
