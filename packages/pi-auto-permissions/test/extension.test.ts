@@ -1764,9 +1764,12 @@ async function promptAfter(extensions: Handlers[], cwd: string): Promise<string>
 	runner.onError((error) => errors.push(error));
 	const emit = (runner as unknown as { emitBeforeAgentStart(...args: unknown[]): Promise<unknown> }).emitBeforeAgentStart.bind(runner);
 	const options = { cwd, contextFiles: [] };
-	// Pi 0.84 takes (prompt, images, systemPrompt, options); Pi 1.x (prompt, images, options).
-	if (runner.emitBeforeAgentStart.length >= 4) await emit("task", undefined, "BASE PROMPT", options);
-	else await emit("task", undefined, options);
+	// Pi 0.84 takes (prompt, images, systemPrompt, options); Pi 1.0-1.1 (prompt, images, options);
+	// Pi 1.2+ (trigger, options).
+	const arity = runner.emitBeforeAgentStart.length;
+	if (arity >= 4) await emit("task", undefined, "BASE PROMPT", options);
+	else if (arity === 3) await emit("task", undefined, options);
+	else await emit({ messageType: "user", prompt: "task" }, options);
 	assert.deepEqual(errors, []);
 	return prompt;
 }

@@ -542,7 +542,10 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 
 	pi.on("before_agent_start", (event, ctx) => {
 		settleBeforePrompt(ctx);
-		if (state.enabled && state.awaitingAction) {
+		// Pi 1.2+ also starts runs from notifications (`messageType: "custom"`);
+		// only the user's own prompt counts as revision feedback.
+		const userPrompt = (event as { messageType?: string }).messageType !== "custom";
+		if (userPrompt && state.enabled && state.awaitingAction) {
 			// A new turn supersedes the previous ready plan: revision feedback
 			// re-opens planning until another plan_mode_complete arrives.
 			pendingReadyNonce = undefined;

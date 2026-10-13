@@ -14,14 +14,16 @@ import { AgentViewer, type ViewerKeys } from "../src/viewer.js";
 
 // Pi's components read its global theme, as they do in a real session.
 initTheme("dark", false);
-const strip = (lines: string[]) => lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, "").replace(/\x1b\]8;;[^\x07]*\x07/g, "").trimEnd());
+// SGR, OSC 8 links (BEL or ST), and the APC cursor markers Pi 1.2 editors emit.
+const ZERO_WIDTH = /\x1b\[[0-9;]*m|\x1b\]8;;[^\x07\x1b]*(?:\x07|\x1b\\)|\x1b_[^\x07\x1b]*(?:\x07|\x1b\\)/g;
+const strip = (lines: string[]) => lines.map((line) => line.replace(ZERO_WIDTH, "").trimEnd());
 const plain: Theme = {
 	fg: (_color: string, text: string) => text,
 	bg: (_color: string, text: string) => text,
 	bold: (text: string) => text,
 	getColorMode: () => "truecolor",
 } as unknown as Theme;
-const visible = (line: string) => line.replace(/\x1b\[[0-9;]*m/g, "").length;
+const visible = (line: string) => line.replace(ZERO_WIDTH, "").length;
 const keys: ViewerKeys = {
 	matches: (data, id) => ({ "app.tools.expand": "\x0f", "app.thinking.toggle": "\x14", "tui.select.cancel": "\x1b" } as Record<string, string>)[id] === data,
 	getKeys: (id) => ({ "app.tools.expand": ["ctrl+o"], "app.thinking.toggle": ["ctrl+t"] } as Record<string, string[]>)[id] ?? [],

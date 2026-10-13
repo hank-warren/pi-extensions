@@ -265,7 +265,9 @@ export function registerChild(pi: ExtensionAPI, state: ChildState): void {
 
 	pi.on("before_agent_start", (event, ctx) => {
 		// A continuation after compacting is the same task: its turns keep counting.
-		if (event.prompt !== CONTINUE_AFTER_COMPACTION) budgetAtPromptStart(budget);
+		// So is a run a notification started (Pi 1.2+ `messageType: "custom"`, no prompt).
+		const { messageType, prompt } = event as { messageType?: string; prompt?: string };
+		if (messageType !== "custom" && prompt !== CONTINUE_AFTER_COMPACTION) budgetAtPromptStart(budget);
 		if (!state.announced) {
 			state.announced = true;
 			ctx.ui.setStatus(CHILD_STATUS_KEY, "ready");

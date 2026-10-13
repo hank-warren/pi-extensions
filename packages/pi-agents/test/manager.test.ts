@@ -648,9 +648,12 @@ async function promptAfter(extensions: Handlers[], cwd: string, contextFiles: Ar
 	runner.onError((error) => errors.push(error));
 	const emit = (runner as unknown as { emitBeforeAgentStart(...args: unknown[]): Promise<unknown> }).emitBeforeAgentStart.bind(runner);
 	const options = { cwd, contextFiles };
-	// Pi 0.84 takes (prompt, images, systemPrompt, options); Pi 1.x (prompt, images, options).
-	if (runner.emitBeforeAgentStart.length >= 4) await emit("task", undefined, "BASE PROMPT", options);
-	else await emit("task", undefined, options);
+	// Pi 0.84 takes (prompt, images, systemPrompt, options); Pi 1.0-1.1 (prompt, images, options);
+	// Pi 1.2+ (trigger, options).
+	const arity = runner.emitBeforeAgentStart.length;
+	if (arity >= 4) await emit("task", undefined, "BASE PROMPT", options);
+	else if (arity === 3) await emit("task", undefined, options);
+	else await emit({ messageType: "user", prompt: "task" }, options);
 	assert.deepEqual(errors, []);
 	return prompt;
 }
@@ -875,6 +878,32 @@ test("a reload inside a child brings pi-agents back as the same child, limits in
 		assert.equal(await call("read"), undefined);
 		await reloaded.events.get("turn_end")![0]!({ toolResults: [{}] }, ctx);
 		assert.equal((await call("read"))?.block, true, "the turn budget counts on across the reload");
+	} finally {
+		for (const key of ["PI_AGENTS_CHILD", "PI_AGENTS_TOOLS", "PI_AGENTS_MAX_TURNS"]) delete process.env[key];
+		forgetChild();
+	}
+});
+
+test("a run a notification starts keeps counting the child's turns; a new prompt resets them", async () => {
+	Object.assign(process.env, { PI_AGENTS_CHILD: "1", PI_AGENTS_TOOLS: JSON.stringify(["read"]), PI_AGENTS_MAX_TURNS: "2" });
+	try {
+		const mock = createMockPi();
+		piAgents(mock.pi);
+		const ctx = { ui: { setStatus: () => {}, notify: () => {} }, getContextUsage: () => undefined, model: undefined, abort: () => {} };
+		await mock.events.get("session_start")![0]!({ reason: "startup" }, ctx);
+		const before = mock.events.get("before_agent_start")![0]!;
+		const turnEnd = mock.events.get("turn_end")![0]!;
+		const call = () => mock.events.get("tool_call")![0]!({ toolName: "read" }, ctx) as Promise<{ block?: boolean } | undefined>;
+		await before({ messageType: "user", prompt: "go", systemPromptOptions: {} }, ctx);
+		await turnEnd({ toolResults: [{}] }, ctx);
+		await turnEnd({ toolResults: [{}] }, ctx);
+		assert.equal((await call())?.block, true, "budget used up");
+
+		await before({ messageType: "custom", message: { customType: "process-exit" }, systemPromptOptions: {} }, ctx);
+		assert.equal((await call())?.block, true, "a triggerTurn notification is the same task");
+
+		await before({ messageType: "user", prompt: "next task", systemPromptOptions: {} }, ctx);
+		assert.equal(await call(), undefined, "a new prompt starts a fresh budget");
 	} finally {
 		for (const key of ["PI_AGENTS_CHILD", "PI_AGENTS_TOOLS", "PI_AGENTS_MAX_TURNS"]) delete process.env[key];
 		forgetChild();
