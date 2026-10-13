@@ -725,6 +725,23 @@ test("a new planning turn supersedes the previous ready plan", async () => {
 	});
 });
 
+test("a run a notification starts keeps the ready plan; the user's next prompt revises it", async () => {
+	await withAgentDir(async () => {
+		const mock = createMockPi({ activeTools: ["read"] });
+		planMode(mock.pi);
+		const context = createMockContext();
+		await startPlanning(mock, context);
+		await completeTool(mock)("call", { plan: "# First" }, undefined, undefined, context.ctx);
+
+		const before = mock.events.get("before_agent_start")?.[0];
+		await before?.({ messageType: "custom", systemPrompt: "base" }, context.ctx);
+		assert.equal(context.statuses.get("plan-mode"), "◆ plan · ready → /plan", "Pi 1.2 fires the hook for triggerTurn messages too");
+
+		await before?.({ messageType: "user", prompt: "change step 2", systemPrompt: "base" }, context.ctx);
+		assert.equal(context.statuses.get("plan-mode"), "◆ plan · revising");
+	});
+});
+
 test("plan mode prompt states the mode rules without tool-policy language", () => {
 	const prompt = buildPlanModePrompt();
 	assert.match(prompt, /\[PLAN MODE ACTIVE\]/);
