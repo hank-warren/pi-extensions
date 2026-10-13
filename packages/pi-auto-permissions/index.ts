@@ -21,6 +21,7 @@ import type { Gate } from "./gates.js";
 import { classifyCommand } from "./classify.js";
 import type { PermissionVerdict, ReviewEvidenceRecord } from "./review.js";
 import { promptSelect, setHerdrBlocked } from "./prompt-select.js";
+import { RemotePrompts, type RemotePromptHandle } from "./remote-answers.js";
 import { createReviewDisplay } from "./review-display.js";
 import { createSessionOverrides } from "./session-overrides.js";
 import { createGuardianReviewer } from "./guardian-reviewer.js";
@@ -193,6 +194,9 @@ function assistantToolCalls(message: unknown): AssistantToolCall[] {
 
 export default function autoPermissionsExtension(pi: ExtensionAPI) {
   const overrides = createSessionOverrides(pi);
+  // Opt-in (`remoteAnswers`); with it off no prompt registers, so answers are ignored.
+  const remotePrompts = new RemotePrompts(pi);
+  remotePrompts.listen();
   let trustedGroups = new Set<string>();
   // Set per session: a subagent child (PI_SUBAGENT_CHILD=1) revises before it
   // asks. `reviseFirst` maps each command it was told to revise to the turn
@@ -457,22 +461,32 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
 
     const evaluationContext = config.evaluationLog.enabled ? reviewer.collectEvidence(scope) : [];
     setHerdrBlocked(pi, true, gate.label);
+    const content = {
+      header: `${gate.label} — Auto Permissions needs approval`,
+      command,
+      noteLabel: decisionSource === "guardian" ? "Guardian" : "Review failed",
+      note: detail,
+      inTranscript: scope.target.scriptToolCallId === undefined,
+    };
+    const options = permissionPromptOptions(config.evaluationLog.enabled);
+    // RPC prompts render in another process (a subagent's parent), which owns answering them.
+    let remote: RemotePromptHandle | undefined;
+    if (config.remoteAnswers && ctx.mode !== "rpc") {
+      remote = remotePrompts.begin({
+        gate: gate.label,
+        header: content.header,
+        command,
+        noteLabel: content.noteLabel,
+        note: detail,
+        options,
+        cwd: ctx.cwd,
+        sessionId: ctx.sessionManager.getSessionId(),
+      });
+    }
+    let choice: string | undefined;
     try {
-      let choice: string | undefined;
       try {
-        choice = await promptSelect(
-          pi,
-          ctx,
-          {
-            header: `${gate.label} — Auto Permissions needs approval`,
-            command,
-            noteLabel: decisionSource === "guardian" ? "Guardian" : "Review failed",
-            note: detail,
-            inTranscript: scope.target.scriptToolCallId === undefined,
-          },
-          permissionPromptOptions(config.evaluationLog.enabled),
-          promptSignal,
-        );
+        choice = await promptSelect(pi, ctx, content, options, promptSignal, remote?.attach);
       } catch (error) {
         if (!lifecycleStale() && !reviewCancelled(signal)) throw error;
         if (!lifecycleStale()) discardLineageIfTurnCancelled(scope);
@@ -502,6 +516,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
         block: "Blocked by user",
       });
     } finally {
+      remote?.close(choice);
       if (!lifecycleStale()) setHerdrBlocked(pi, false);
     }
   }

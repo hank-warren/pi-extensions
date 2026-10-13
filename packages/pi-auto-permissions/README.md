@@ -430,6 +430,20 @@ When the environment variable `HERDR_ENV` is set to exactly `1`, the extension a
 
 This is an optional integration and nothing needs to be configured to use it. Outside Herdr the variable is unset, the emit is skipped entirely, and every other feature behaves identically; the extension has no dependency on Herdr being installed.
 
+### Answering a prompt from another device
+
+Off by default. Set `"remoteAnswers": true` to let another extension relay an open approval prompt elsewhere, such as to your phone, and answer it from there. Nothing changes until you do: with the setting off, no event is sent and every answer is ignored.
+
+With it on:
+
+- **When a prompt opens**, the extension emits `auto-permissions:prompt` on `pi.events`: `{ active: true, id, gate, header, command, noteLabel, note, options, cwd, sessionId, openedAt }`.
+- **When it settles**, it emits `{ active: false, id, choice?, remote }`. `choice` is absent when the prompt was cancelled; `remote` says whether the answer came from the event.
+- **To answer**, emit `auto-permissions:answer` with `{ id, choice }`. The answer is honoured only while that prompt is still open, and only with one of the `options` it announced. It settles the prompt exactly as the matching keypress would, including the override evidence and the evaluation log.
+- **The terminal prompt stays live.** Whichever answer comes first wins, and a later one is ignored.
+- **Subagent prompts are not announced.** They are rendered by the parent session (RPC mode), which owns answering them.
+
+The events stay inside the pi process; how a relay reaches another device, and who may answer there, is that extension's job. Only enable this with a relay you trust: any extension that can emit the answer event can approve a prompt.
+
 ## Trusted groups
 
 In a trusted project, create `.pi/trusted-ops` to bypass selected rule groups:
