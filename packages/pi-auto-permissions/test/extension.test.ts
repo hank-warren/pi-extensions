@@ -2169,3 +2169,122 @@ test("45 · PI_AUTO_PERMISSIONS_APPROVERS reaches the guardian as the only sende
 		"hank, a8339fce, not allowed!",
 	);
 });
+
+const ASK_SCRIPT = () => assistantResponse(verdictText("ask_user", "force push rewrites history"));
+
+/** Collect `auto-permissions:prompt` events into `into`. */
+function recordPromptEvents(harness: Harness, into: Array<Record<string, unknown>>): void {
+	harness.mock.eventBus.on("auto-permissions:prompt", (data) => into.push(data as Record<string, unknown>));
+}
+
+test("26 · remote answers are off by default: nothing is announced and an answer is ignored", async () => {
+	const events: Array<Record<string, unknown>> = [];
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			completeSimple: ASK_SCRIPT,
+			custom: async (factory, harness) => {
+				// Even a well-formed answer naming every option must not settle the prompt.
+				for (const choice of ["Allow", "Block"]) harness.mock.eventBus.emit("auto-permissions:answer", { id: "any", choice });
+				return answerOptionSelector(factory, harness);
+			},
+		},
+		async (harness) => {
+			recordPromptEvents(harness, events);
+			await harness.sessionStart();
+			harness.answers.push("Block");
+			assert.deepEqual(await harness.toolCall("git push --force origin main"), { block: true, reason: "Blocked by user" });
+			assert.deepEqual(events, [], "no prompt event without remoteAnswers");
+		},
+	);
+});
+
+test("27 · with remoteAnswers on, an open prompt is announced and settled by an answer naming it and one of its options", async () => {
+	const events: Array<Record<string, unknown>> = [];
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			config: { remoteAnswers: true },
+			completeSimple: ASK_SCRIPT,
+			custom: async (factory, harness) => {
+				const selector = createCustomSelectorHarness(factory, 100);
+				const opened = events.at(-1)!;
+				const bus = harness.mock.eventBus;
+				// Ignored: a wrong id, an option the prompt does not offer, a malformed payload.
+				bus.emit("auto-permissions:answer", { id: "not-this-prompt", choice: "Allow" });
+				bus.emit("auto-permissions:answer", { id: opened.id, choice: "Allow everything forever" });
+				bus.emit("auto-permissions:answer", { id: opened.id });
+				bus.emit("auto-permissions:answer", null);
+				assert.equal(events.length, 1, "still open after the ignored answers");
+				bus.emit("auto-permissions:answer", { id: opened.id, choice: "Allow" });
+				return selector.resultPromise;
+			},
+		},
+		async (harness) => {
+			recordPromptEvents(harness, events);
+			await harness.sessionStart();
+			assert.equal(await harness.toolCall("git push --force origin main"), undefined, "the remote Allow runs the command");
+			assert.equal(events.length, 2);
+			const [opened, closed] = events;
+			assert.equal(opened.active, true);
+			assert.equal(typeof opened.id, "string");
+			assert.equal(opened.command, "git push --force origin main");
+			assert.equal(opened.note, "force push rewrites history");
+			assert.equal(opened.noteLabel, "Guardian");
+			assert.deepEqual(opened.options, ["Allow", "Block"]);
+			assert.deepEqual(closed, { active: false, id: opened.id, choice: "Allow", remote: true });
+			assert.deepEqual(
+				harness.overrideEntries()[0].overrides.map((override) => [override.command, override.choice]),
+				[["git push --force origin main", "allow"]],
+				"a remote answer is recorded like a terminal one",
+			);
+		},
+	);
+});
+
+test("28 · with remoteAnswers on, the terminal still answers first, and a late remote answer changes nothing", async () => {
+	const events: Array<Record<string, unknown>> = [];
+	await withExtension(
+		{ rules: [GUARDED_RULE], config: { remoteAnswers: true }, completeSimple: ASK_SCRIPT },
+		async (harness) => {
+			recordPromptEvents(harness, events);
+			await harness.sessionStart();
+			harness.answers.push("Block");
+			assert.deepEqual(await harness.toolCall("git push --force origin main"), { block: true, reason: "Blocked by user" });
+			const [opened, closed] = events;
+			assert.deepEqual(closed, { active: false, id: opened.id, choice: "Block", remote: false });
+			harness.mock.eventBus.emit("auto-permissions:answer", { id: opened.id, choice: "Allow" });
+			assert.equal(events.length, 2, "nothing more is announced");
+		},
+	);
+});
+
+test("29 · with remoteAnswers on, a cancelled prompt closes without a choice, and RPC prompts are never announced", async () => {
+	const events: Array<Record<string, unknown>> = [];
+	await withExtension(
+		{ rules: [GUARDED_RULE], config: { remoteAnswers: true }, completeSimple: ASK_SCRIPT },
+		async (harness) => {
+			recordPromptEvents(harness, events);
+			await harness.sessionStart();
+			// No queued answer: the driver presses Esc.
+			assert.deepEqual(await harness.toolCall("git push --force origin main"), { block: true, reason: "Blocked by user" });
+			assert.deepEqual(events[1], { active: false, id: events[0].id, remote: false });
+		},
+	);
+	const rpcEvents: Array<Record<string, unknown>> = [];
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			config: { remoteAnswers: true },
+			mode: "rpc",
+			select: async () => "Block",
+			completeSimple: ASK_SCRIPT,
+		},
+		async (harness) => {
+			recordPromptEvents(harness, rpcEvents);
+			await harness.sessionStart();
+			await harness.toolCall("git push --force origin main");
+			assert.deepEqual(rpcEvents, []);
+		},
+	);
+});

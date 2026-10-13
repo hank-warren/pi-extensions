@@ -37,17 +37,21 @@ export function promptSelect(
   content: ApprovalPromptContent,
   values: string[],
   signal: AbortSignal,
+  /** Receives a function that settles this prompt with a choice, as a keypress would (remote answers). */
+  onAnswerable?: (answer: (choice: string) => boolean) => void,
 ): Promise<string | undefined> {
   if (ctx.mode === "rpc") return ctx.ui.select(approvalPromptText(content), values, { signal });
   return ctx.ui.custom<string | undefined>((tui, theme, _keybindings, done) => {
     let finished = false;
     const onAbort = () => finish(undefined);
-    const finish = (result: string | undefined) => {
-      if (finished) return;
+    const finish = (result: string | undefined): boolean => {
+      if (finished) return false;
       finished = true;
       signal.removeEventListener("abort", onAbort);
       done(result);
+      return true;
     };
+    onAnswerable?.((choice) => finish(choice));
     const selector = new OptionSelector({
       options: values.map((value) => ({ value, label: value })),
       allowComment: true,

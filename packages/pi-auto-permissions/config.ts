@@ -81,6 +81,12 @@ export interface AutoPermissionsConfig {
    */
   reviewAllShell: boolean;
   /**
+   * Announce open approval prompts on pi's event bus (`auto-permissions:prompt`) and accept
+   * an answer for one from another extension (`auto-permissions:answer`), for relaying a
+   * prompt to another device. Default false: nothing is emitted or accepted.
+   */
+  remoteAnswers: boolean;
+  /**
    * How many guardian reviews may run at once when several guarded commands
    * are pending together (parallel tool calls, codemode scripts). Verdicts are
    * still applied, and the user still asked, one command at a time. 1 restores
@@ -339,6 +345,7 @@ export function loadAutoPermissionsConfig(path = autoPermissionsConfigPath()): A
   const raw = readObject(path);
   optionalBoolean(raw.enabled, "enabled");
   optionalBoolean(raw.reviewAllShell, "reviewAllShell");
+  optionalBoolean(raw.remoteAnswers, "remoteAnswers");
   if (raw.rules !== undefined && !Array.isArray(raw.rules)) throw new Error("rules must be an array");
   // Absent means the built-in ruleset is active; an authored array replaces it
   // entirely unless it splices "$defaults" back in; an explicit [] gates
@@ -357,6 +364,7 @@ export function loadAutoPermissionsConfig(path = autoPermissionsConfigPath()): A
     denialLog: resolveSidecar(raw, "denialLog", "denials.jsonl", true, path),
     rules,
     reviewAllShell: raw.reviewAllShell === true,
+    remoteAnswers: raw.remoteAnswers === true,
     reviewConcurrency: boundedInteger(
       raw.reviewConcurrency,
       DEFAULT_REVIEW_CONCURRENCY,

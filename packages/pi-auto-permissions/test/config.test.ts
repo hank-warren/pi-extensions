@@ -203,6 +203,14 @@ describe("auto permissions config", () => {
 		}
 	});
 
+	test("remoteAnswers defaults off, accepts true, and rejects non-booleans", () => {
+		assert.equal(loadAutoPermissionsConfig(configFile({})).remoteAnswers, false);
+		assert.equal(loadAutoPermissionsConfig(configFile({ remoteAnswers: true })).remoteAnswers, true);
+		for (const remoteAnswers of ["yes", 1, [], {}]) {
+			assert.throws(() => loadAutoPermissionsConfig(configFile({ remoteAnswers })), /remoteAnswers must be boolean/);
+		}
+	});
+
 	test("reviewAllShell defaults off, accepts true, and rejects non-booleans", () => {
 		assert.equal(loadAutoPermissionsConfig(configFile({})).reviewAllShell, false);
 		assert.equal(loadAutoPermissionsConfig(configFile({ reviewAllShell: true })).reviewAllShell, true);

@@ -62,6 +62,7 @@
     "widget-status.ts",
     "classify.ts",
     "prompt-select.ts",
+    "remote-answers.ts",
     "approval-prompt.ts",
     "review-display.ts",
     "review-scope.ts",
