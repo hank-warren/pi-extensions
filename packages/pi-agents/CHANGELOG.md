@@ -1,5 +1,11 @@
 # @hank-warren/pi-agents
 
+## 0.2.2
+
+### Patch Changes
+
+- Handle runs that Pi 1.2 starts from notifications. Pi 1.2.0 fires `before_agent_start` for runs started by `pi.sendMessage(..., { triggerTurn: true })`, as `messageType: "custom"` with no prompt. A subagent no longer resets its turn budget on such a run, and plan mode no longer treats it as revision feedback that discards a plan awaiting approval. Both still add their system-prompt sections to those runs. Behaviour on Pi 1.1 and earlier is unchanged.
+
 ## 0.2.1
 
 ### Patch Changes
