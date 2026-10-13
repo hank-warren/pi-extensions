@@ -149,7 +149,7 @@ function providerSettingsItems(
     {
       id: "gpt56ContextWindow",
       label: "GPT-5.6 context window",
-      description: "canonical advertises 272000 tokens; full uses the models.dev limit.",
+      description: "canonical uses CPA's context_window for the route; full uses its max_context_window.",
       currentValue: settings.gpt56ContextWindow,
       values: ["canonical", "full"],
     },

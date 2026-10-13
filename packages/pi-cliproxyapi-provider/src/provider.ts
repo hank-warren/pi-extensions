@@ -1,3 +1,4 @@
+import type { ThinkingLevelMap } from "@earendil-works/pi-ai";
 import type { CpaModel, CpaModelSpec } from "./cpa.ts";
 import { findRouteMetadataMatch, type MetadataMatchMethod } from "./matching.ts";
 import { resolveModelWire, type ModelWire } from "./model-api.ts";
@@ -5,6 +6,7 @@ import {
   getModelCapabilityOverrides,
   thinkingLevelMapFromEfforts,
   thinkingLevelMapFromMetadata,
+  type ModelCapabilityOverrides,
 } from "./model-capabilities.ts";
 import { NO_PI_PROFILES, type PiModelProfiles } from "./pi-profiles.ts";
 import type { Gpt56ContextWindowMode } from "./settings.ts";
@@ -94,14 +96,14 @@ function costFromMetadata(metadata: ModelsDevMetadata): ProviderModelConfigLike[
  * The context window pi compacts against.
  *
  * CLIProxyAPI's registry wins when it publishes one: it is the proxy that
- * accepts or rejects the request, and a route can be narrower than the model
- * (`devin/` and Antigravity routes, an account-pinned prefix).
+ * accepts or rejects the request, and a route can be narrower or wider than
+ * the model (`devin/` and Antigravity routes, an account-pinned prefix).
  *
- * Codex Responses models keep the conservative window unless
- * `gpt56ContextWindow` opts into the full one. The smallest of CPA's window
- * and pi's native window wins there, because overstating it makes pi compact
- * too late (pi knows Codex Spark at 128000). In full mode CPA's
- * `max_context_window` is the ceiling, with models.dev behind it.
+ * Codex Responses models have two CPA windows: `context_window`, the route's
+ * default, and `max_context_window`, the ceiling a `max-context-length`
+ * override opens. The default `canonical` mode publishes the first and `full`
+ * the second. Pi's native window, then 272000, stand in only when CPA
+ * publishes neither.
  */
 function contextWindowForModel(
   wire: ModelWire,
@@ -110,8 +112,7 @@ function contextWindowForModel(
   spec: CpaModelSpec | undefined,
 ): number {
   if (!wire.codexResponses) return spec?.contextWindow ?? metadataContextWindow ?? PI_MODEL_DEFAULTS.contextWindow;
-  const known = [spec?.contextWindow, wire.profile?.contextWindow].filter((value): value is number => value !== undefined);
-  const canonical = known.length > 0 ? Math.min(...known) : GPT_5_6_CANONICAL_CONTEXT_WINDOW;
+  const canonical = spec?.contextWindow ?? wire.profile?.contextWindow ?? GPT_5_6_CANONICAL_CONTEXT_WINDOW;
   if (mode === "full") return spec?.maxContextWindow ?? metadataContextWindow ?? canonical;
   return canonical;
 }
@@ -125,14 +126,85 @@ function contextWindowForModel(
  */
 const CPA_TEMPLATE_FILLER_EFFORTS = ["low", "medium", "high", "xhigh"];
 
-/** Thinking levels from CLIProxyAPI's effort list, consulted only when no better source describes the model. */
-function specThinkingLevelMap(spec: CpaModelSpec | undefined): ProviderModelConfigLike["thinkingLevelMap"] {
+/**
+ * CLIProxyAPI's effort list when it is the registry's own data. An empty list
+ * (budget-only thinking, or none) and the template filler say nothing usable.
+ */
+function cpaEfforts(spec: CpaModelSpec | undefined): string[] | undefined {
   const levels = spec?.reasoningLevels;
-  if (!levels) return undefined;
+  if (!levels || levels.length === 0) return undefined;
   if (levels.length === CPA_TEMPLATE_FILLER_EFFORTS.length && levels.every((level, index) => level === CPA_TEMPLATE_FILLER_EFFORTS[index])) {
     return undefined;
   }
-  return thinkingLevelMapFromEfforts(levels);
+  return levels;
+}
+
+/**
+ * Thinking levels from CLIProxyAPI's effort list, which decides the set: a
+ * level CPA does not list is hidden. Two things that list cannot say come from
+ * elsewhere:
+ *
+ * - `off` on Claude. CPA's catalog drops its registry's `zero_allowed`, so it
+ *   can only say `off` by listing `none`, which it never does for Claude. Pi's
+ *   native definition knows whether the upstream accepts
+ *   `thinking.type = disabled` (Opus 4.7 does, Fable 5.x does not); without one
+ *   the metadata's map decides, else pi's default.
+ * - `minimal` on the Codex route, which has no such effort: pi sends `low`
+ *   instead, as its native Codex definitions do, rather than hiding the level.
+ */
+function cpaThinkingLevelMap(
+  efforts: readonly string[],
+  wire: ModelWire,
+  metadata: ModelsDevMetadata | undefined,
+): ThinkingLevelMap | undefined {
+  const map = thinkingLevelMapFromEfforts(efforts);
+  if (!map) return undefined;
+  if (map.off === undefined) {
+    if (wire.api === "anthropic-messages") {
+      const off = wire.profile
+        ? wire.profile.thinkingLevelMap?.off
+        : metadata ? thinkingLevelMapFromMetadata(metadata)?.off : undefined;
+      if (off !== undefined) map.off = off;
+    } else {
+      map.off = null;
+    }
+  }
+  if (wire.codexResponses && map.minimal === null && map.low === "low") map.minimal = "low";
+  return map;
+}
+
+/**
+ * Whether the model reasons and which levels pi offers. CLIProxyAPI's effort
+ * list wins when it is real data (see {@link cpaEfforts}); otherwise pi's
+ * native definition, the family rules, then the metadata decide, as they would
+ * for a model CPA knows nothing about.
+ */
+function thinkingForModel(
+  wire: ModelWire,
+  capabilityOverrides: ModelCapabilityOverrides,
+  metadata: ModelsDevMetadata | undefined,
+  spec: CpaModelSpec | undefined,
+): Pick<ProviderModelConfigLike, "reasoning" | "thinkingLevelMap"> {
+  const efforts = cpaEfforts(spec);
+  const cpaMap = efforts ? cpaThinkingLevelMap(efforts, wire, metadata) : undefined;
+  if (cpaMap) return { reasoning: true, thinkingLevelMap: cpaMap };
+
+  const reasoning = wire.profile?.reasoning
+    ?? capabilityOverrides.reasoning
+    ?? metadata?.reasoning
+    ?? PI_MODEL_DEFAULTS.reasoning;
+  const profileMap = wire.profile?.thinkingLevelMap;
+  const thinkingLevelMap = (profileMap ? { ...profileMap } : undefined)
+    ?? (capabilityOverrides.thinkingLevelMap ? { ...capabilityOverrides.thinkingLevelMap } : undefined)
+    ?? (reasoning && metadata ? thinkingLevelMapFromMetadata(metadata) : undefined);
+  return { reasoning, ...(thinkingLevelMap ? { thinkingLevelMap } : {}) };
+}
+
+/** Input modalities: CLIProxyAPI's for the route, else the metadata's, else text. */
+function inputForModel(spec: CpaModelSpec | undefined, metadata: ModelsDevMetadata | undefined): InputModality[] {
+  if (spec?.inputModalities) return inputFromModalities(spec.inputModalities);
+  if (metadata?.modalities?.input) return inputFromMetadata(metadata);
+  return [...PI_MODEL_DEFAULTS.input];
 }
 
 /** models.dev lists non-chat models (image generation) with a 0 limit, which means "not applicable". */
@@ -189,22 +261,12 @@ function modelFromMetadata(
     metadataModelId: metadata.id,
   };
   const wire = resolveModelWire(capabilityContext, profiles);
-  const capabilityOverrides = getModelCapabilityOverrides(capabilityContext);
   const spec = cpaModel.spec;
-  const reasoning = wire.profile?.reasoning
-    ?? capabilityOverrides.reasoning
-    ?? metadata.reasoning
-    ?? (specThinkingLevelMap(spec) ? true : undefined)
-    ?? PI_MODEL_DEFAULTS.reasoning;
-  // Pi's native map for the upstream CPA fronts is authoritative. Family rules
-  // cover models newer than the running pi; otherwise the metadata decides,
-  // and CPA's own effort list only fills a gap.
-  const profileMap = wire.profile?.thinkingLevelMap;
-  const thinkingLevelMap = (profileMap ? { ...profileMap } : undefined)
-    ?? capabilityOverrides.thinkingLevelMap
-    ?? (reasoning ? thinkingLevelMapFromMetadata(metadata) ?? specThinkingLevelMap(spec) : undefined);
+  const { reasoning, thinkingLevelMap } = thinkingForModel(wire, getModelCapabilityOverrides(capabilityContext), metadata, spec);
   const compat = compatFromWire(wire, cpaModel, features);
 
+  // CLIProxyAPI's registry wins on everything it publishes; the metadata
+  // supplies cost and fills fields CPA leaves out.
   return {
     id: cpaModel.id,
     name: spec?.displayName ?? metadata.name ?? cpaModel.id,
@@ -212,7 +274,7 @@ function modelFromMetadata(
     ...(wire.api ? { api: wire.api } : {}),
     ...(compat ? { compat } : {}),
     ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
-    input: metadata.modalities?.input ? inputFromMetadata(metadata) : inputFromModalities(spec?.inputModalities ?? []),
+    input: inputForModel(spec, metadata),
     cost: costFromMetadata(metadata),
     contextWindow: contextWindowForModel(wire, positiveLimit(metadata.limit?.context), gpt56ContextWindow, spec),
     maxTokens: spec?.maxTokens ?? positiveLimit(metadata.limit?.output) ?? PI_MODEL_DEFAULTS.maxTokens,
@@ -235,24 +297,19 @@ function defaultModel(
 ): ProviderModelConfigLike {
   const modelContext = { availableModelId: cpaModel.id };
   const wire = resolveModelWire(modelContext, profiles);
-  const capabilityOverrides = getModelCapabilityOverrides(modelContext);
   const compat = compatFromWire(wire, cpaModel, features);
   const spec = cpaModel.spec;
-  // With no catalog entry, CPA's effort list is the only description left;
-  // pi's native profile and the family rules still win over it.
-  const specMap = wire.profile || capabilityOverrides.thinkingLevelMap ? undefined : specThinkingLevelMap(spec);
+  const { reasoning, thinkingLevelMap } = thinkingForModel(wire, getModelCapabilityOverrides(modelContext), undefined, spec);
 
   return {
     id: cpaModel.id,
     name: spec?.displayName ?? cpaModel.id,
     ...cloneModelDefaults(),
-    ...(specMap ? { reasoning: true, thinkingLevelMap: specMap } : {}),
-    ...capabilityOverrides,
-    ...(wire.profile ? { reasoning: wire.profile.reasoning } : {}),
-    ...(wire.profile?.thinkingLevelMap ? { thinkingLevelMap: { ...wire.profile.thinkingLevelMap } } : {}),
+    reasoning,
+    ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
     ...(wire.api ? { api: wire.api } : {}),
     ...(compat ? { compat } : {}),
-    ...(spec?.inputModalities ? { input: inputFromModalities(spec.inputModalities) } : {}),
+    input: inputForModel(spec, undefined),
     contextWindow: contextWindowForModel(wire, undefined, gpt56ContextWindow, spec),
     ...(spec?.maxTokens ? { maxTokens: spec.maxTokens } : {}),
   };

@@ -114,7 +114,7 @@ test("CPA's effort list describes a model nothing else knows", () => {
   ).models;
 
   assert.equal(model.reasoning, true);
-  assert.deepEqual(model.thinkingLevelMap, { minimal: null, low: null, medium: "medium", high: "high", xhigh: null, max: "max" });
+  assert.deepEqual(model.thinkingLevelMap, { minimal: null, low: null, medium: "medium", high: "high", xhigh: null, max: "max", off: null }, "no `none` listed, so no off");
   assert.equal(model.contextWindow, 262000);
   assert.equal(model.maxTokens, 64000);
 });

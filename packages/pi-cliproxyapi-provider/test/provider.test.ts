@@ -748,3 +748,83 @@ test("keeps GPT-5.5 on Responses once a pi upgrade drops it from the Codex catal
   assert.deepEqual(gpt55.thinkingLevelMap, { minimal: "low", xhigh: "xhigh" }, "mirrors pi's native map");
   assert.equal(lookalike.api, undefined);
 });
+
+const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+
+async function withSpecs(models: CpaModel[], metadata: ModelsDevCatalog = {}, mode: "canonical" | "full" = "canonical") {
+  const result = buildProviderModels(models, metadata, {}, mode, {}, null, await piProfiles);
+  return Object.fromEntries(result.models.map((model) => [model.id, model]));
+}
+
+test("CPA's effort list decides the levels over pi's native map and the metadata", async () => {
+  const models = await withSpecs([
+    { id: "gpt-6-sol", owned_by: "openai", spec: { maxTokens: 128000, reasoningLevels: [...EFFORTS, "ultra"] } },
+    { id: "devin/gpt-6-sol", owned_by: "openai", spec: { maxTokens: 64000, reasoningLevels: ["none", ...EFFORTS] } },
+    { id: "kimi-k3", owned_by: "moonshot", spec: { maxTokens: 64000, reasoningLevels: ["low", "high", "max"] } },
+    { id: "devin/glm-5-2", owned_by: "zhipu", spec: { maxTokens: 64000, reasoningLevels: ["none", "max"] } },
+  ], {
+    "moonshotai/kimi-k3": { id: "kimi-k3", sourceProvider: "moonshotai", reasoning: true, reasoning_options: [{ type: "effort", values: ["low", "medium", "high"] }] },
+  });
+
+  // Pi's native gpt-6-sol map offers off as `none`; this route lists no `none`.
+  assert.deepEqual(models["gpt-6-sol"].thinkingLevelMap, { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max", off: null });
+  assert.deepEqual(models["devin/gpt-6-sol"].thinkingLevelMap, { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max", off: "none" });
+  assert.deepEqual(models["kimi-k3"].thinkingLevelMap, { minimal: null, low: "low", medium: null, high: "high", xhigh: null, max: "max", off: null });
+  assert.equal(models["devin/glm-5-2"].reasoning, true);
+  assert.deepEqual(models["devin/glm-5-2"].thinkingLevelMap, { minimal: null, low: null, medium: null, high: null, xhigh: null, max: "max", off: "none" });
+});
+
+test("Claude keeps off from pi's native definition, which CPA's effort list cannot express", async () => {
+  const spec = { maxTokens: 128000, reasoningLevels: EFFORTS };
+  const models = await withSpecs([
+    { id: "claude-opus-5-5", owned_by: "anthropic", spec },
+    { id: "claude-sonnet-5", owned_by: "anthropic", spec },
+    { id: "claude-nova-9", owned_by: "anthropic", spec },
+    { id: "claude-nova-10", owned_by: "anthropic", spec },
+  ], {
+    "anthropic/claude-nova-9": { id: "claude-nova-9", sourceProvider: "anthropic", reasoning: true, reasoning_options: [{ type: "effort", values: EFFORTS }] },
+  });
+
+  assert.equal(models["claude-opus-5-5"].thinkingLevelMap?.off, null, "pi: the upstream rejects disabled thinking");
+  assert.equal(models["claude-opus-5-5"].thinkingLevelMap?.minimal, null, "CPA lists no minimal");
+  assert.equal(models["claude-opus-5-5"].thinkingLevelMap?.max, "max");
+  assert.ok(!("off" in models["claude-sonnet-5"].thinkingLevelMap!), "pi leaves off available");
+  assert.equal(models["claude-nova-9"].thinkingLevelMap?.off, null, "unknown to pi: effort-only metadata decides");
+  assert.ok(!("off" in models["claude-nova-10"].thinkingLevelMap!), "nothing else knows: pi's default");
+});
+
+test("an empty or template-filler CPA effort list falls back to pi's native map", async () => {
+  const models = await withSpecs([
+    { id: "gpt-5.5", owned_by: "openai", spec: { maxTokens: 128000, reasoningLevels: ["low", "medium", "high", "xhigh"] } },
+    { id: "claude-opus-5-5", owned_by: "anthropic", spec: { maxTokens: 128000, reasoningLevels: [] } },
+  ]);
+
+  assert.deepEqual(models["gpt-5.5"].thinkingLevelMap, { minimal: "low", xhigh: "xhigh" });
+  assert.deepEqual(models["claude-opus-5-5"].thinkingLevelMap, { off: null, minimal: null, xhigh: "xhigh", max: "max" });
+});
+
+test("CPA's input modalities beat the metadata's", async () => {
+  const models = await withSpecs([
+    { id: "kimi-k3", owned_by: "moonshot", spec: { maxTokens: 64000, inputModalities: ["text"] } },
+    { id: "kimi-k3-vision", owned_by: "moonshot", spec: { maxTokens: 64000 } },
+  ], {
+    "moonshotai/kimi-k3": { id: "kimi-k3", sourceProvider: "moonshotai", modalities: { input: ["text", "image"] } },
+    "moonshotai/kimi-k3-vision": { id: "kimi-k3-vision", sourceProvider: "moonshotai", modalities: { input: ["text", "image"] } },
+  });
+
+  assert.deepEqual(models["kimi-k3"].input, ["text"]);
+  assert.deepEqual(models["kimi-k3-vision"].input, ["text", "image"], "CPA silent: the metadata fills in");
+});
+
+test("a Codex route publishes CPA's context_window by default and its max_context_window in full mode", async () => {
+  const cpa: CpaModel[] = [
+    { id: "gpt-6-sol", owned_by: "openai", spec: { contextWindow: 500000, maxContextWindow: 872000, maxTokens: 128000 } },
+    { id: "gpt-5.3-codex-spark", owned_by: "openai", spec: { contextWindow: 200000, maxContextWindow: 200000, maxTokens: 64000 } },
+  ];
+  const canonical = await withSpecs(cpa);
+  assert.equal(canonical["gpt-6-sol"].contextWindow, 500000, "not capped at pi's 272000");
+  assert.equal(canonical["gpt-5.3-codex-spark"].contextWindow, 200000, "not capped at pi's 128000");
+
+  const full = await withSpecs(cpa, {}, "full");
+  assert.equal(full["gpt-6-sol"].contextWindow, 872000);
+});
