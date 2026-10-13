@@ -1,5 +1,11 @@
 # @hank-warren/pi-auto-permissions
 
+## 0.22.0
+
+### Minor Changes
+
+- Opt-in `remoteAnswers`: announce open approval prompts on `auto-permissions:prompt` and accept an answer for one on `auto-permissions:answer`, so another extension can relay a prompt to another device. Off by default; nothing is emitted or accepted until it is set.
+
 ## 0.21.0
 
 ### Minor Changes
