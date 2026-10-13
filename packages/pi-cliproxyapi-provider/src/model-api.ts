@@ -38,7 +38,7 @@ export function isGpt6Model(context: ModelApiContext): boolean {
  * The Codex Responses family: every GPT model CLIProxyAPI serves from a Codex
  * OAuth credential rather than a plain OpenAI API key. They share the same
  * Responses-only upstream, the same usage shape, and the same conservative
- * 272000 context window unless the CPA route is known to allow more.
+ * 272000 fallback context window when CPA publishes none for the route.
  *
  * Membership is pi's own `openai-codex` catalog when one is supplied. The
  * GPT-5.5/5.6/6 patterns cover models newer than the running pi and models a
