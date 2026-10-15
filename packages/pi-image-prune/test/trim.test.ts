@@ -177,7 +177,7 @@ test("prunePayload replaces dropped images in every provider shape and keeps the
 });
 
 test("re-reading a pruned image keeps the new copy", async () => {
-	const { droppedImageData, prunePayload } = await import("../trim.ts");
+	const { imageOccurrences, prunePayload } = await import("../trim.ts");
 	const same = "S".repeat(4_000);
 	const messages = [
 		{ role: "user", content: [{ type: "image", data: same, mimeType: "image/png" }], timestamp: 1 },
@@ -187,7 +187,7 @@ test("re-reading a pruned image keeps the new copy", async () => {
 	const p = policy({ maxBytes: 6_000, targetBytes: 4_500, countText: true });
 	const { dropped, unseen } = selectImages(toItems(messages), p);
 	assert.deepEqual([...dropped], [0], "the older copy goes, the re-read stays");
-	const data = droppedImageData(messages, dropped, unseen);
+	const data = imageOccurrences(messages, dropped, unseen);
 	const image = (d: string) => ({ type: "image", source: { type: "base64", media_type: "image/png", data: d } });
 
 	// The context hook already replaced the older copy: the payload holds only the kept one.
@@ -199,4 +199,25 @@ test("re-reading a pruned image keeps the new copy", async () => {
 	const result = prunePayload(rebuilt, data) as typeof rebuilt;
 	assert.deepEqual(result.messages[0].content, [{ type: "text", text: PLACEHOLDER_TEXT }]);
 	assert.deepEqual(result.messages[1].content, [image(same)]);
+});
+
+test("enforcePayloadLimit drops images the context pass never saw, oldest first", async () => {
+	const { enforcePayloadLimit } = await import("../trim.ts");
+	const img = (d: string) => ({ type: "input_image", detail: "auto", image_url: `data:image/png;base64,${d}` });
+	const payload = {
+		input: [
+			{ type: "compaction", encrypted_content: "E".repeat(20_000) },
+			{ role: "user", content: [img("A".repeat(30_000))] },
+			{ role: "user", content: [img("B".repeat(30_000))] },
+			{ role: "user", content: [img("C".repeat(30_000))] },
+		],
+	};
+	const p = policy({ maxBytes: 100_000, targetBytes: 60_000, countText: true });
+	const { payload: result, dropped } = enforcePayloadLimit(payload, p, new Map()) as { payload: typeof payload; dropped: number };
+	assert.equal(dropped, 2);
+	assert.ok(JSON.stringify(result).length <= 60_000);
+	assert.deepEqual(result.input[1].content, [{ type: "input_text", text: PLACEHOLDER_TEXT }]);
+	assert.equal((result.input[3] as { content: unknown[] }).content[0], (payload.input[3] as { content: unknown[] }).content[0]);
+	assert.equal(enforcePayloadLimit(result, p, new Map()).dropped, 0, "a pruned payload stays put");
+	assert.equal(enforcePayloadLimit(payload, policy({ maxBytes: 200_000, targetBytes: 100_000, countText: true }), new Map()).payload, payload);
 });

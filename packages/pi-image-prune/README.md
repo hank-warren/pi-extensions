@@ -23,7 +23,7 @@ Images go in batches, not one per turn. Each batch changes the start of the requ
 
 When a new batch is left out, Pi shows a one-line notice with the estimated request size and the limit.
 
-The drops are also re-applied to the finished provider payload, because another extension may rebuild the request from the session after the context hook: `@hank-warren/pi-codex-compaction` does after a native checkpoint. Load this package after it (the repository's manifest already does) so its payload hook runs last.
+The finished provider payload gets a second pass, because it can differ from what the context hook saw: `@hank-warren/pi-codex-compaction` rebuilds the request after a native checkpoint, adding the checkpoint's retained history and encrypted state. The drops are re-applied there, matched per copy so that re-reading a pruned file still delivers it, and for a configured rule the limit is enforced on the payload's real size with the same oldest-first batches. Load this package after pi-codex-compaction (the repository's manifest already does) so its payload hook runs last.
 
 ## Configuration
 

@@ -2,8 +2,9 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { loadConfig, matchRule, type PruneConfig } from "./config.ts";
 import {
 	applyDrops,
-	droppedImageData,
+	enforcePayloadLimit,
 	estimateBytes,
+	imageOccurrences,
 	type Occurrence,
 	prunePayload,
 	selectImages,
@@ -74,8 +75,9 @@ export default function imagePrune(pi: ExtensionAPI): void {
 	let config: PruneConfig = { rules: [] };
 	let loaded = false;
 	let lastDropped = 0;
-	// Drops from the latest context pass, re-applied to the finished payload.
-	let droppedData = new Map<string, Occurrence[]>();
+	// Image occurrences from the latest context pass, for the finished payload.
+	let occurrences = new Map<string, Occurrence[]>();
+	let lastPayloadDropped = 0;
 
 	const ensureConfig = (ctx: ExtensionContext) => {
 		if (loaded) return;
@@ -87,14 +89,15 @@ export default function imagePrune(pi: ExtensionAPI): void {
 	pi.on("session_start", (_event, ctx) => {
 		loaded = false;
 		lastDropped = 0;
-		droppedData = new Map();
+		lastPayloadDropped = 0;
+		occurrences = new Map();
 		ensureConfig(ctx);
 	});
 
 	pi.on("context", (event, ctx) => {
 		ensureConfig(ctx);
 		const policy = resolvePolicy(config, ctx.model);
-		droppedData = new Map();
+		occurrences = new Map();
 		if (!policy) return;
 
 		const items = toItems(event.messages);
@@ -107,13 +110,22 @@ export default function imagePrune(pi: ExtensionAPI): void {
 		}
 		lastDropped = dropped.size;
 
-		droppedData = droppedImageData(event.messages, dropped, unseen);
+		occurrences = imageOccurrences(event.messages, dropped, unseen);
 		const messages = applyDrops(event.messages, dropped, unseen);
 		if (messages !== event.messages) return { messages };
 	});
 
-	pi.on("before_provider_request", (event) => {
-		const payload = prunePayload(event.payload, droppedData);
+	pi.on("before_provider_request", (event, ctx) => {
+		let payload = prunePayload(event.payload, occurrences);
+		const policy = resolvePolicy(config, ctx.model);
+		if (policy?.countText) {
+			const enforced = enforcePayloadLimit(payload, policy, occurrences);
+			if (enforced.dropped > lastPayloadDropped && ctx.hasUI) {
+				ctx.ui.notify(`pi-image-prune: ${enforced.dropped} more image(s) left out to fit the finished request (limit ${mb(policy.maxBytes)})`, "info");
+			}
+			lastPayloadDropped = enforced.dropped;
+			payload = enforced.payload;
+		}
 		if (payload !== event.payload) return payload;
 	});
 }

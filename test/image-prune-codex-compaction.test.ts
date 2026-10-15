@@ -24,22 +24,20 @@ function entry(message: Record<string, unknown>, parentId: string | null): Sessi
 	return { type: "message", id: `e${++id}`, parentId, timestamp: at(), message: { timestamp: Date.now(), ...message } } as SessionEntry;
 }
 
-test("images pruned by the context hook stay out of a payload rebuilt after a native checkpoint", async () => {
+async function scenario(replacementHistory: unknown[], tailTurns: number) {
 	mkdirSync(getAgentDir(), { recursive: true });
 	writeFileSync(join(getAgentDir(), "pi-image-prune.json"), JSON.stringify({
 		rules: [{ models: ["cpa/gpt-6-*"], maxRequestBytes: 100_000, trimToBytes: 60_000 }],
 	}));
-
 	const first = entry({ role: "user", content: [{ type: "text", text: "start" }] }, null);
 	const checkpoint: SessionEntry = {
 		type: "compaction", id: "checkpoint", parentId: first.id, timestamp: at(), summary: "marker",
 		firstKeptEntryId: first.id, tokensBefore: 50_000,
-		details: { kind: NATIVE_COMPACTION_KIND, version: 1, modelKey: modelKey(model),
-			replacementHistory: [{ type: "compaction", encrypted_content: "opaque" }] },
+		details: { kind: NATIVE_COMPACTION_KIND, version: 1, modelKey: modelKey(model), replacementHistory },
 	} as SessionEntry;
 	const branch: SessionEntry[] = [first, checkpoint];
-	// Four screenshot turns after the checkpoint, each followed by a reply, 30 kB each.
-	for (let turn = 0; turn < 4; turn++) {
+	// Screenshot turns after the checkpoint, each followed by a reply, 30 kB each.
+	for (let turn = 0; turn < tailTurns; turn++) {
 		const data = String.fromCharCode(65 + turn).repeat(30_000);
 		branch.push(entry({ role: "user", content: [{ type: "text", text: `shot ${turn}` }, { type: "image", data, mimeType: "image/png" }] }, branch.at(-1)!.id));
 		branch.push(entry({ role: "assistant", content: [{ type: "text", text: `seen ${turn}` }], api: model.api,
@@ -63,17 +61,35 @@ test("images pruned by the context hook stay out of a payload rebuilt after a na
 		}
 		return value;
 	};
-	for (const name of ["session_start"]) for (const handler of mock.events.get(name) ?? []) await handler({}, ctx);
+	for (const handler of mock.events.get("session_start") ?? []) await handler({}, ctx);
 
 	const tail = branch.slice(2).map((e) => (e as { message: unknown }).message);
-	const messages = (await run("context", { messages: tail }, "messages")) as Array<{ content: Array<{ type: string; text?: string }> }>;
+	const messages = (await run("context", { messages: tail }, "messages")) as Array<{ content: Array<{ type: string }> }>;
 	const keptInContext = messages.flatMap((m) => m.content).filter((b) => b.type === "image").length;
-	assert.ok(keptInContext < 4, "the context hook pruned something");
-
 	const payload = (await run("before_provider_request", { payload: { model: model.id, input: [{ role: "developer", content: "system" }] } }, "payload")) as { input: unknown[] };
-	const serialized = JSON.stringify(payload.input);
+	return { keptInContext, serialized: JSON.stringify(payload.input) };
+}
+
+const compactionItem = { type: "compaction", encrypted_content: "opaque" };
+
+test("images pruned by the context hook stay out of a payload rebuilt after a native checkpoint", async () => {
+	const { keptInContext, serialized } = await scenario([compactionItem], 4);
+	assert.ok(keptInContext < 4, "the context hook pruned something");
 	assert.ok(serialized.includes("opaque"), "codex-compaction rebuilt the request from its checkpoint");
 	assert.equal((serialized.match(/"input_image"/g) ?? []).length, keptInContext);
 	assert.ok(serialized.includes(PLACEHOLDER_TEXT));
 	assert.ok(serialized.length < 100_000);
+});
+
+test("the limit covers images and encrypted state carried in the checkpoint", async () => {
+	// The context hook sees only 2 tail images (60 kB): under the limit. The checkpoint adds 2 more images and 20 kB of state.
+	const retained = (c: string) => ({ type: "message", role: "user", content: [{ type: "input_image", detail: "auto", image_url: `data:image/png;base64,${c.repeat(30_000)}` }] });
+	const { keptInContext, serialized } = await scenario(
+		[retained("X"), retained("Y"), { type: "compaction", encrypted_content: "E".repeat(20_000) }],
+		2,
+	);
+	assert.equal(keptInContext, 2, "the context pass alone saw nothing to prune");
+	assert.ok(serialized.length <= 100_000, `payload ${serialized.length} bytes`);
+	assert.ok(!serialized.includes("X".repeat(30_000)), "the oldest checkpoint image went first");
+	assert.ok(serialized.includes(PLACEHOLDER_TEXT));
 });

@@ -189,11 +189,11 @@ export interface Occurrence {
 }
 
 /**
- * Every occurrence of each image that was dropped at least once, keyed by its
- * base64 data. Occurrences matter because re-reading a file yields identical
- * data: an older copy can be dropped while a newer one is kept.
+ * Every occurrence of every image, keyed by its base64 data. Occurrences matter
+ * because re-reading a file yields identical data: an older copy can be dropped
+ * while a newer one is kept.
  */
-export function droppedImageData(
+export function imageOccurrences(
 	messages: readonly AgentMessage[],
 	dropped: ReadonlySet<number>,
 	unseen: ReadonlySet<number>,
@@ -209,7 +209,6 @@ export function droppedImageData(
 			ordinal++;
 		}
 	}
-	for (const [data, list] of all) if (!list.some((o) => o.dropped)) all.delete(data);
 	return all;
 }
 
@@ -231,34 +230,23 @@ function textPart(original: Record<string, Json>, text: string): Record<string, 
 	return { type: original.type === "input_image" ? "input_text" : "text", text };
 }
 
-function forEachNode(node: Json, visit: (record: Record<string, Json>) => void): void {
-	if (Array.isArray(node)) {
-		for (const child of node) forEachNode(child, visit);
-	} else if (node && typeof node === "object") {
-		visit(node as Record<string, Json>);
-		for (const value of Object.values(node)) forEachNode(value, visit);
-	}
+/** Image parts of a payload, in serialization order. */
+function payloadImages(payload: Json): string[] {
+	const images: string[] = [];
+	const visit = (node: Json) => {
+		if (Array.isArray(node)) return node.forEach(visit);
+		if (!node || typeof node !== "object") return;
+		const data = base64Of(node as Record<string, Json>);
+		if (data !== undefined) return void images.push(data);
+		Object.values(node).forEach(visit);
+	};
+	visit(payload);
+	return images;
 }
 
-/**
- * Re-applies drops to a finished provider payload. Needed when another
- * extension rebuilds the request from the session after the `context` hook ran
- * (pi-codex-compaction does, after a native checkpoint), which would otherwise
- * restore every pruned image. Returns the input unchanged when nothing matches.
- *
- * A payload's copies of one image are always the newest of its occurrences:
- * drops take the oldest copies first, and a rebuilt payload covers a suffix of
- * the conversation. So copies are matched to occurrences counting from the end.
- */
-export function prunePayload(payload: Json, dropped: ReadonlyMap<string, readonly Occurrence[]>): Json {
-	if (dropped.size === 0) return payload;
-	const copies = new Map<string, number>();
-	forEachNode(payload, (record) => {
-		const data = base64Of(record);
-		if (data !== undefined && dropped.has(data)) copies.set(data, (copies.get(data) ?? 0) + 1);
-	});
-	if (copies.size === 0) return payload;
-	const seenCopies = new Map<string, number>();
+/** Replaces the image parts `replacement` returns text for (by serialization-order index). Copy-on-write. */
+function replaceImages(payload: Json, replacement: (index: number) => string | undefined): Json {
+	let index = 0;
 	const walk = (node: Json): Json => {
 		if (Array.isArray(node)) {
 			let changed = false;
@@ -271,14 +259,9 @@ export function prunePayload(payload: Json, dropped: ReadonlyMap<string, readonl
 		}
 		if (!node || typeof node !== "object") return node;
 		const record = node as Record<string, Json>;
-		const data = base64Of(record);
-		const occurrences = data === undefined ? undefined : dropped.get(data);
-		if (data !== undefined && occurrences) {
-			const copy = seenCopies.get(data) ?? 0;
-			seenCopies.set(data, copy + 1);
-			const occurrence = occurrences[occurrences.length - copies.get(data)! + copy];
-			if (occurrence?.dropped) return textPart(record, occurrence.seen ? PLACEHOLDER_TEXT : UNSEEN_PLACEHOLDER_TEXT);
-			return node;
+		if (base64Of(record) !== undefined) {
+			const text = replacement(index++);
+			return text === undefined ? node : textPart(record, text);
 		}
 		let changed = false;
 		const next: Record<string, Json> = {};
@@ -290,4 +273,82 @@ export function prunePayload(payload: Json, dropped: ReadonlyMap<string, readonl
 		return changed ? next : node;
 	};
 	return walk(payload);
+}
+
+/**
+ * Matches a payload's image copies to conversation occurrences. A payload's
+ * copies of one image are the newest of its occurrences (drops take the oldest
+ * first, and a rebuilt payload covers a suffix of the conversation), so copies
+ * are matched counting from the end. Copies with no occurrence, such as images
+ * carried in a compaction checkpoint, are undefined.
+ */
+function matchOccurrences(images: readonly string[], occurrences: ReadonlyMap<string, readonly Occurrence[]>) {
+	const copies = new Map<string, number>();
+	for (const data of images) copies.set(data, (copies.get(data) ?? 0) + 1);
+	const nth = new Map<string, number>();
+	return images.map((data) => {
+		const list = occurrences.get(data);
+		const copy = nth.get(data) ?? 0;
+		nth.set(data, copy + 1);
+		return list?.[list.length - copies.get(data)! + copy];
+	});
+}
+
+/**
+ * Re-applies drops to a finished provider payload. Needed when another
+ * extension rebuilds the request from the session after the `context` hook ran
+ * (pi-codex-compaction does, after a native checkpoint), which would otherwise
+ * restore every pruned image. Returns the input unchanged when nothing matches.
+ */
+export function prunePayload(payload: Json, occurrences: ReadonlyMap<string, readonly Occurrence[]>): Json {
+	if (![...occurrences.values()].some((list) => list.some((o) => o.dropped))) return payload;
+	const matched = matchOccurrences(payloadImages(payload), occurrences);
+	if (!matched.some((o) => o?.dropped)) return payload;
+	return replaceImages(payload, (index) => {
+		const occurrence = matched[index];
+		if (!occurrence?.dropped) return undefined;
+		return occurrence.seen ? PLACEHOLDER_TEXT : UNSEEN_PLACEHOLDER_TEXT;
+	});
+}
+
+const SLOT = "__pi_image_prune_slot__";
+
+/**
+ * Enforces a whole-request byte limit on the finished payload, which can hold
+ * more than the `context` hook saw (a compaction checkpoint's retained history
+ * and encrypted state). Same oldest-first batch walk as the context pass, over
+ * the payload's own bytes, so an unchanged payload prefix gets the same drops.
+ * Returns the payload and how many more images it left out.
+ */
+export function enforcePayloadLimit(
+	payload: Json,
+	policy: TrimPolicy,
+	occurrences: ReadonlyMap<string, readonly Occurrence[]>,
+): { payload: Json; dropped: number } {
+	const images = payloadImages(payload);
+	if (images.length === 0) return { payload, dropped: 0 };
+	const sizes: number[] = [];
+	const slotted = replaceImages(payload, (index) => {
+		sizes.push(Buffer.byteLength(JSON.stringify({ type: "image", data: images[index] }), "utf8"));
+		return SLOT;
+	});
+	const segments = JSON.stringify(slotted).split(new RegExp(`\\{"type":"(?:input_)?text","text":"${SLOT}"\\}`));
+	if (segments.length !== images.length + 1) return { payload, dropped: 0 };
+
+	const items: Item[] = [];
+	segments.forEach((segment, index) => {
+		items.push({ kind: "fixed", bytes: Buffer.byteLength(segment, "utf8") });
+		if (index < images.length) items.push({ kind: "image", bytes: sizes[index] });
+	});
+	if (estimateBytes(items, new Set(), 0) <= policy.maxBytes) return { payload, dropped: 0 };
+
+	const { dropped } = selectImages(items, { ...policy, maxImages: Number.POSITIVE_INFINITY });
+	if (dropped.size === 0) return { payload, dropped: 0 };
+	const matched = matchOccurrences(images, occurrences);
+	const next = replaceImages(payload, (index) => {
+		if (!dropped.has(index)) return undefined;
+		// Checkpoint images have no occurrence; they were sent before the checkpoint, so seen.
+		return matched[index]?.seen === false ? UNSEEN_PLACEHOLDER_TEXT : PLACEHOLDER_TEXT;
+	});
+	return { payload: next, dropped: dropped.size };
 }
