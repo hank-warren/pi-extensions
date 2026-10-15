@@ -161,16 +161,42 @@ test("applyDrops replaces dropped images with placeholders and leaves the input 
 
 test("prunePayload replaces dropped images in every provider shape and keeps the rest", async () => {
 	const { prunePayload } = await import("../trim.ts");
-	const dropped = new Map([["AAAA", true], ["BBBB", false]]);
+	const once = (seen: boolean) => [{ dropped: true, seen }];
+	const dropped = new Map([["AAAA", once(true)], ["BBBB", once(false)], ["CCCC", once(true)]]);
 	const payload = {
 		messages: [{ role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } }, { type: "image", source: { data: "KEEP" } }] }],
 		input: [{ role: "user", content: [{ type: "input_image", detail: "auto", image_url: "data:image/png;base64,BBBB" }] }],
-		chat: [{ type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }],
+		chat: [{ type: "image_url", image_url: { url: "data:image/png;base64,CCCC" } }],
 	};
 	const result = prunePayload(payload, dropped) as typeof payload;
 	assert.deepEqual(result.messages[0].content, [{ type: "text", text: PLACEHOLDER_TEXT }, { type: "image", source: { data: "KEEP" } }]);
 	assert.deepEqual(result.input[0].content, [{ type: "input_text", text: UNSEEN_PLACEHOLDER_TEXT }]);
 	assert.deepEqual(result.chat, [{ type: "text", text: PLACEHOLDER_TEXT }]);
-	assert.equal(prunePayload(payload, new Map([["NONE", true]])), payload);
+	assert.equal(prunePayload(payload, new Map([["NONE", once(true)]])), payload);
 	assert.equal(payload.messages[0].content[0].type, "image", "input untouched");
+});
+
+test("re-reading a pruned image keeps the new copy", async () => {
+	const { droppedImageData, prunePayload } = await import("../trim.ts");
+	const same = "S".repeat(4_000);
+	const messages = [
+		{ role: "user", content: [{ type: "image", data: same, mimeType: "image/png" }], timestamp: 1 },
+		{ role: "assistant", content: [{ type: "text", text: "seen" }], timestamp: 2 },
+		{ role: "user", content: [{ type: "image", data: same, mimeType: "image/png" }], timestamp: 3 },
+	] as AgentMessage[];
+	const p = policy({ maxBytes: 6_000, targetBytes: 4_500, countText: true });
+	const { dropped, unseen } = selectImages(toItems(messages), p);
+	assert.deepEqual([...dropped], [0], "the older copy goes, the re-read stays");
+	const data = droppedImageData(messages, dropped, unseen);
+	const image = (d: string) => ({ type: "image", source: { type: "base64", media_type: "image/png", data: d } });
+
+	// The context hook already replaced the older copy: the payload holds only the kept one.
+	const pruned = { messages: [{ content: [{ type: "text", text: PLACEHOLDER_TEXT }] }, { content: [image(same)] }] };
+	assert.equal(prunePayload(pruned, data), pruned);
+
+	// A rebuilt payload carries both raw copies: only the older one is replaced.
+	const rebuilt = { messages: [{ content: [image(same)] }, { content: [image(same)] }] };
+	const result = prunePayload(rebuilt, data) as typeof rebuilt;
+	assert.deepEqual(result.messages[0].content, [{ type: "text", text: PLACEHOLDER_TEXT }]);
+	assert.deepEqual(result.messages[1].content, [image(same)]);
 });

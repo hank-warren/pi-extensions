@@ -1,6 +1,15 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadConfig, matchRule, type PruneConfig } from "./config.ts";
-import { applyDrops, droppedImageData, estimateBytes, prunePayload, selectImages, toItems, type TrimPolicy } from "./trim.ts";
+import {
+	applyDrops,
+	droppedImageData,
+	estimateBytes,
+	type Occurrence,
+	prunePayload,
+	selectImages,
+	toItems,
+	type TrimPolicy,
+} from "./trim.ts";
 
 // Claude Code 2.1.282 limits for the Anthropic Messages API, applied to models no rule matches.
 const MIB = 1024 * 1024;
@@ -66,7 +75,7 @@ export default function imagePrune(pi: ExtensionAPI): void {
 	let loaded = false;
 	let lastDropped = 0;
 	// Drops from the latest context pass, re-applied to the finished payload.
-	let droppedData = new Map<string, boolean>();
+	let droppedData = new Map<string, Occurrence[]>();
 
 	const ensureConfig = (ctx: ExtensionContext) => {
 		if (loaded) return;
