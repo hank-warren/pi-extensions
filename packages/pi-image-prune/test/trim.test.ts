@@ -5,10 +5,13 @@ import {
 	applyDrops,
 	estimateBytes,
 	type Item,
+	PLACEHOLDER_BYTES,
 	PLACEHOLDER_TEXT,
 	selectDroppedImages,
+	selectImages,
 	toItems,
 	type TrimPolicy,
+	UNSEEN_PLACEHOLDER_TEXT,
 } from "../trim.ts";
 
 const policy = (overrides: Partial<TrimPolicy> = {}): TrimPolicy => ({
@@ -47,9 +50,12 @@ test("whole-request policy counts text and the prompt toward the limit", () => {
 	const items = [fixed(4_000), ...images(3_000, 3_000), fixed(500)];
 	const p = policy({ maxBytes: 10_600, targetBytes: 9_500, countText: true });
 	// 2 000 base + 4 000 + 3 000 + 3 000 = 12 000 > 10 600: the oldest image goes, leaving a placeholder.
+	for (const text of [PLACEHOLDER_TEXT, UNSEEN_PLACEHOLDER_TEXT]) {
+		assert.ok(Buffer.byteLength(JSON.stringify({ type: "text", text })) <= PLACEHOLDER_BYTES);
+	}
 	const dropped = selectDroppedImages(items, p, 2_000);
 	assert.deepEqual([...dropped], [0]);
-	assert.equal(estimateBytes(items, dropped, 2_000), 2_000 + 4_000 + 64 + 3_000 + 500);
+	assert.equal(estimateBytes(items, dropped, 2_000), 2_000 + 4_000 + PLACEHOLDER_BYTES + 3_000 + 500);
 	// Without the prompt bytes the same conversation fits.
 	assert.equal(selectDroppedImages(items, p, 0).size, 0);
 });
@@ -111,7 +117,27 @@ test("applyDrops returns the same array when nothing is dropped", () => {
 	assert.equal(applyDrops(messages, new Set()), messages);
 });
 
-test("applyDrops removes user images, replaces tool result images, and leaves the input untouched", () => {
+test("an image dropped after a reply was seen; one dropped in its first request was not", () => {
+	const p = policy({ maxBytes: 10_000, targetBytes: 6_000, countText: true });
+	// Image 0 goes out alone and gets a reply; images 1 and 2 arrive together and overflow the first request they are in.
+	const items: Item[] = [...images(4_000), { kind: "sent" }, fixed(100), ...images(4_000, 4_000)];
+	const { dropped, unseen } = selectImages(items, p);
+	assert.deepEqual([...dropped], [0, 1]);
+	assert.deepEqual([...unseen], [1]);
+});
+
+test("toItems marks each assistant reply", () => {
+	const messages = [
+		{ role: "user", content: [image(10)], timestamp: 1 },
+		{ role: "assistant", content: [{ type: "text", text: "red" }], timestamp: 2 },
+	] as AgentMessage[];
+	assert.deepEqual(
+		toItems(messages).map((item) => item.kind),
+		["fixed", "image", "sent", "fixed"],
+	);
+});
+
+test("applyDrops replaces dropped images with placeholders and leaves the input untouched", () => {
 	const user: AgentMessage = { role: "user", content: [{ type: "text", text: "look" }, image(60)], timestamp: 1 };
 	const imageOnlyUser: AgentMessage = { role: "user", content: [image(60)], timestamp: 2 };
 	const toolResult: AgentMessage = {
@@ -124,10 +150,10 @@ test("applyDrops removes user images, replaces tool result images, and leaves th
 	};
 	const latest: AgentMessage = { role: "user", content: [image(60)], timestamp: 4 };
 
-	const result = applyDrops([user, imageOnlyUser, toolResult, latest], new Set([0, 1, 2]));
+	const result = applyDrops([user, imageOnlyUser, toolResult, latest], new Set([0, 1, 2]), new Set([1]));
 
-	assert.deepEqual(result[0], { ...user, content: [{ type: "text", text: "look" }] });
-	assert.deepEqual(result[1], { ...imageOnlyUser, content: [{ type: "text", text: PLACEHOLDER_TEXT }] });
+	assert.deepEqual(result[0], { ...user, content: [{ type: "text", text: "look" }, { type: "text", text: PLACEHOLDER_TEXT }] });
+	assert.deepEqual(result[1], { ...imageOnlyUser, content: [{ type: "text", text: UNSEEN_PLACEHOLDER_TEXT }] });
 	assert.deepEqual(result[2], { ...toolResult, content: [{ type: "text", text: PLACEHOLDER_TEXT }] });
 	assert.equal(result[3], latest);
 	assert.equal((user.content as unknown[]).length, 2);

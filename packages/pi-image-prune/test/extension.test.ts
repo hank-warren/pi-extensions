@@ -5,7 +5,7 @@ import test from "node:test";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { CONFIG_FILENAME } from "../config.ts";
 import imagePrune, { IMAGE_BYTE_CAP, resolvePolicy } from "../index.ts";
-import { type AgentMessage, PLACEHOLDER_TEXT } from "../trim.ts";
+import { type AgentMessage, UNSEEN_PLACEHOLDER_TEXT } from "../trim.ts";
 
 type Handler = (event: { messages: AgentMessage[] }, ctx: unknown) => { messages: AgentMessage[] } | undefined;
 
@@ -71,9 +71,10 @@ test("context hook prunes for a configured model and notifies once per new batch
 	const messages: AgentMessage[] = [];
 	for (let i = 0; i < 5; i++) messages.push({ role: "user", content: [image(30_000)], timestamp: i });
 
+	// No assistant reply yet, so the pruned images were never seen.
 	const first = context(messages, devin);
 	assert.ok(first);
-	assert.deepEqual((first.messages[0] as { content: unknown }).content, [{ type: "text", text: PLACEHOLDER_TEXT }]);
+	assert.deepEqual((first.messages[0] as { content: unknown }).content, [{ type: "text", text: UNSEEN_PLACEHOLDER_TEXT }]);
 	assert.equal(notes.length, 1);
 	assert.match(notes[0], /limit 0\.1 MB/);
 

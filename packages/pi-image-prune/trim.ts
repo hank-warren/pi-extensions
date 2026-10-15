@@ -5,9 +5,12 @@ type MediaMessage = Extract<AgentMessage, { role: "user" | "toolResult" | "custo
 type Block = Exclude<MediaMessage["content"], string>[number];
 type TextContent = Extract<Block, { type: "text" }>;
 
-export const PLACEHOLDER_TEXT = "[media removed: request limit]";
-// Rough wire cost of a placeholder block, counted when a dropped image leaves one behind.
-const PLACEHOLDER_BYTES = 64;
+// A bare "media removed" led Opus to retract correct earlier answers about the image as made up, so say it was seen.
+export const PLACEHOLDER_TEXT =
+	"[image no longer included, to keep the request under the size limit. You saw it when this result first came back, so what you said about it then was based on the actual image.]";
+export const UNSEEN_PLACEHOLDER_TEXT = "[image left out to keep the request under the size limit; you have not seen it]";
+// Upper bound on the wire cost of a placeholder block, counted when a dropped image leaves one behind.
+export const PLACEHOLDER_BYTES = 224;
 // Per-message wire overhead (role, wrapper keys) that block sizes do not include.
 const MESSAGE_OVERHEAD_BYTES = 64;
 
@@ -27,15 +30,25 @@ export interface TrimPolicy {
 	countText: boolean;
 }
 
-export type Item = { kind: "image"; bytes: number } | { kind: "fixed"; bytes: number };
+/** `sent` marks an assistant reply: every image kept at that point was in the request that produced it. */
+export type Item = { kind: "image"; bytes: number } | { kind: "fixed"; bytes: number } | { kind: "sent" };
+
+export interface Selection {
+	/** Ordinals (among images only) of images to leave out. */
+	dropped: Set<number>;
+	/** The dropped images that never reached the model, because they went out in their first request. */
+	unseen: Set<number>;
+}
 
 /**
- * Returns the ordinals (among images only) of images to drop. The walk is
- * oldest-first and depends only on what came before each point, so an
- * unchanged conversation prefix always gets the same decisions.
+ * Chooses the images to leave out. The walk is oldest-first and depends only on
+ * what came before each point, so an unchanged conversation prefix always gets
+ * the same decisions.
  */
-export function selectDroppedImages(items: readonly Item[], policy: TrimPolicy, baseBytes = 0): Set<number> {
+export function selectImages(items: readonly Item[], policy: TrimPolicy, baseBytes = 0): Selection {
 	const dropped = new Set<number>();
+	const unseen = new Set<number>();
+	const seen = new Set<number>();
 	const kept: Array<{ ordinal: number; bytes: number }> = [];
 	const keepAfterCountTrim = Math.max(0, policy.maxImages - policy.dropBatch);
 	const leftBehind = policy.countText ? PLACEHOLDER_BYTES : 0;
@@ -44,10 +57,15 @@ export function selectDroppedImages(items: readonly Item[], policy: TrimPolicy, 
 
 	const drop = (image: { ordinal: number; bytes: number }) => {
 		dropped.add(image.ordinal);
+		if (!seen.has(image.ordinal)) unseen.add(image.ordinal);
 		bytes -= image.bytes - leftBehind;
 	};
 
 	for (const item of items) {
+		if (item.kind === "sent") {
+			for (const image of kept) seen.add(image.ordinal);
+			continue;
+		}
 		if (item.kind === "fixed") {
 			if (policy.countText) bytes += item.bytes;
 		} else {
@@ -70,7 +88,11 @@ export function selectDroppedImages(items: readonly Item[], policy: TrimPolicy, 
 		}
 	}
 
-	return dropped;
+	return { dropped, unseen };
+}
+
+export function selectDroppedImages(items: readonly Item[], policy: TrimPolicy, baseBytes = 0): Set<number> {
+	return selectImages(items, policy, baseBytes).dropped;
 }
 
 function contentBlocks(message: AgentMessage): Block[] | undefined {
@@ -102,6 +124,7 @@ function fixedBytes(message: AgentMessage): number {
 export function toItems(messages: readonly AgentMessage[]): Item[] {
 	const items: Item[] = [];
 	for (const message of messages) {
+		if (message.role === "assistant") items.push({ kind: "sent" });
 		items.push({ kind: "fixed", bytes: fixedBytes(message) });
 		for (const block of contentBlocks(message) ?? []) {
 			if (block.type === "image") items.push({ kind: "image", bytes: block.data.length });
@@ -116,15 +139,26 @@ export function estimateBytes(items: readonly Item[], dropped: ReadonlySet<numbe
 	let ordinal = 0;
 	for (const item of items) {
 		if (item.kind === "fixed") total += item.bytes;
-		else total += dropped.has(ordinal++) ? PLACEHOLDER_BYTES : item.bytes;
+		else if (item.kind === "image") total += dropped.has(ordinal++) ? PLACEHOLDER_BYTES : item.bytes;
 	}
 	return total;
 }
 
-const placeholder = (): TextContent => ({ type: "text", text: PLACEHOLDER_TEXT });
+const placeholder = (seen: boolean): TextContent => ({
+	type: "text",
+	text: seen ? PLACEHOLDER_TEXT : UNSEEN_PLACEHOLDER_TEXT,
+});
 
-/** Returns the same array when nothing is dropped. Never mutates the input messages. */
-export function applyDrops(messages: AgentMessage[], dropped: ReadonlySet<number>): AgentMessage[] {
+/**
+ * Replaces each dropped image with a placeholder, in tool results and user
+ * messages alike. Returns the same array when nothing is dropped and never
+ * mutates the input messages.
+ */
+export function applyDrops(
+	messages: AgentMessage[],
+	dropped: ReadonlySet<number>,
+	unseen: ReadonlySet<number> = new Set(),
+): AgentMessage[] {
 	if (dropped.size === 0) return messages;
 	let imageIndex = 0;
 	return messages.map((message) => {
@@ -134,16 +168,21 @@ export function applyDrops(messages: AgentMessage[], dropped: ReadonlySet<number
 		let changed = false;
 		const content: Block[] = [];
 		for (const block of blocks) {
-			if (block.type !== "image" || !dropped.has(imageIndex++)) {
+			if (block.type !== "image") {
+				content.push(block);
+				continue;
+			}
+			const ordinal = imageIndex++;
+			if (!dropped.has(ordinal)) {
 				content.push(block);
 				continue;
 			}
 			changed = true;
-			// Claude Code removes loose images outright and replaces images inside tool results.
-			if (message.role === "toolResult") content.push(placeholder());
+			// Unlike Claude Code, user images get a placeholder too: a silently vanished image invites the same doubt.
+			content.push(placeholder(!unseen.has(ordinal)));
 		}
 
 		if (!changed) return message;
-		return { ...message, content: content.length > 0 ? content : [placeholder()] } as AgentMessage;
+		return { ...message, content } as AgentMessage;
 	});
 }
