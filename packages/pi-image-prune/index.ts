@@ -118,10 +118,10 @@ export default function imagePrune(pi: ExtensionAPI): void {
 	pi.on("before_provider_request", (event, ctx) => {
 		let payload = prunePayload(event.payload, occurrences);
 		const policy = resolvePolicy(config, ctx.model);
-		if (policy?.countText) {
+		if (policy) {
 			const enforced = enforcePayloadLimit(payload, policy, occurrences);
 			if (enforced.dropped > lastPayloadDropped && ctx.hasUI) {
-				ctx.ui.notify(`pi-image-prune: ${enforced.dropped} more image(s) left out to fit the finished request (limit ${mb(policy.maxBytes)})`, "info");
+				ctx.ui.notify(`pi-image-prune: ${enforced.dropped} more image(s) left out to fit the finished request`, "info");
 			}
 			lastPayloadDropped = enforced.dropped;
 			payload = enforced.payload;

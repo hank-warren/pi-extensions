@@ -24,10 +24,10 @@ function entry(message: Record<string, unknown>, parentId: string | null): Sessi
 	return { type: "message", id: `e${++id}`, parentId, timestamp: at(), message: { timestamp: Date.now(), ...message } } as SessionEntry;
 }
 
-async function scenario(replacementHistory: unknown[], tailTurns: number) {
+async function scenario(replacementHistory: unknown[], tailTurns: number, rule: Record<string, unknown> = {}) {
 	mkdirSync(getAgentDir(), { recursive: true });
 	writeFileSync(join(getAgentDir(), "pi-image-prune.json"), JSON.stringify({
-		rules: [{ models: ["cpa/gpt-6-*"], maxRequestBytes: 100_000, trimToBytes: 60_000 }],
+		rules: [{ models: ["cpa/gpt-6-*"], maxRequestBytes: 100_000, trimToBytes: 60_000, ...rule }],
 	}));
 	const first = entry({ role: "user", content: [{ type: "text", text: "start" }] }, null);
 	const checkpoint: SessionEntry = {
@@ -92,4 +92,15 @@ test("the limit covers images and encrypted state carried in the checkpoint", as
 	assert.ok(serialized.length <= 100_000, `payload ${serialized.length} bytes`);
 	assert.ok(!serialized.includes("X".repeat(30_000)), "the oldest checkpoint image went first");
 	assert.ok(serialized.includes(PLACEHOLDER_TEXT));
+});
+
+test("the image count limit covers images carried in the checkpoint", async () => {
+	const retained = (c: string) => ({ type: "message", role: "user", content: [{ type: "input_image", detail: "auto", image_url: `data:image/png;base64,${c.repeat(100)}` }] });
+	const { keptInContext, serialized } = await scenario(
+		[...["P", "Q", "R", "S", "T"].map(retained), compactionItem],
+		1,
+		{ maxImages: 4, maxRequestBytes: 10_000_000, trimToBytes: 5_000_000 },
+	);
+	assert.equal(keptInContext, 1, "the context pass alone saw 1 image");
+	assert.ok((serialized.match(/"input_image"/g) ?? []).length <= 4);
 });

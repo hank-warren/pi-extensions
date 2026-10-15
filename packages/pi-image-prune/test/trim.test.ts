@@ -221,3 +221,17 @@ test("enforcePayloadLimit drops images the context pass never saw, oldest first"
 	assert.equal(enforcePayloadLimit(result, p, new Map()).dropped, 0, "a pruned payload stays put");
 	assert.equal(enforcePayloadLimit(payload, policy({ maxBytes: 200_000, targetBytes: 100_000, countText: true }), new Map()).payload, payload);
 });
+
+test("enforcePayloadLimit enforces the image count too, for image-only policies as well", async () => {
+	const { enforcePayloadLimit } = await import("../trim.ts");
+	const img = (d: string) => ({ type: "image", source: { type: "base64", media_type: "image/png", data: d } });
+	const payload = { messages: [{ role: "user", content: Array.from({ length: 6 }, (_, i) => img(String(i).repeat(10))) }] };
+	for (const countText of [false, true]) {
+		const p = policy({ maxImages: 4, dropBatch: 2, maxBytes: 1_000_000, targetBytes: 500_000, countText });
+		const { payload: result, dropped } = enforcePayloadLimit(payload, p, new Map()) as { payload: typeof payload; dropped: number };
+		// The 5th image crosses 4 and drops down to 2 (4 - batch of 2); the 6th leaves 3.
+		assert.equal(dropped, 3, `countText ${countText}`);
+		assert.equal(result.messages[0].content.filter((b) => b.type === "image").length, 3);
+	}
+	assert.equal(enforcePayloadLimit(payload, policy({ maxImages: 6 }), new Map()).payload, payload);
+});

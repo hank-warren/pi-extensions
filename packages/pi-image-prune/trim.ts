@@ -314,36 +314,43 @@ export function prunePayload(payload: Json, occurrences: ReadonlyMap<string, rea
 const SLOT = "__pi_image_prune_slot__";
 
 /**
- * Enforces a whole-request byte limit on the finished payload, which can hold
- * more than the `context` hook saw (a compaction checkpoint's retained history
- * and encrypted state). Same oldest-first batch walk as the context pass, over
- * the payload's own bytes, so an unchanged payload prefix gets the same drops.
- * Returns the payload and how many more images it left out.
+ * Enforces a policy's limits on the finished payload, which can hold more than
+ * the `context` hook saw (a compaction checkpoint's retained history and
+ * encrypted state). Same oldest-first batch walk as the context pass, over the
+ * payload itself, so an unchanged payload prefix gets the same drops. Returns
+ * the payload and how many more images it left out.
  */
 export function enforcePayloadLimit(
 	payload: Json,
 	policy: TrimPolicy,
 	occurrences: ReadonlyMap<string, readonly Occurrence[]>,
 ): { payload: Json; dropped: number } {
+	const unchanged = { payload, dropped: 0 };
 	const images = payloadImages(payload);
-	if (images.length === 0) return { payload, dropped: 0 };
-	const sizes: number[] = [];
-	const slotted = replaceImages(payload, (index) => {
-		sizes.push(Buffer.byteLength(JSON.stringify({ type: "image", data: images[index] }), "utf8"));
-		return SLOT;
-	});
-	const segments = JSON.stringify(slotted).split(new RegExp(`\\{"type":"(?:input_)?text","text":"${SLOT}"\\}`));
-	if (segments.length !== images.length + 1) return { payload, dropped: 0 };
+	if (images.length === 0) return unchanged;
+	const overCount = images.length > policy.maxImages;
 
 	const items: Item[] = [];
-	segments.forEach((segment, index) => {
-		items.push({ kind: "fixed", bytes: Buffer.byteLength(segment, "utf8") });
-		if (index < images.length) items.push({ kind: "image", bytes: sizes[index] });
-	});
-	if (estimateBytes(items, new Set(), 0) <= policy.maxBytes) return { payload, dropped: 0 };
+	if (policy.countText) {
+		const sizes: number[] = [];
+		const slotted = replaceImages(payload, (index) => {
+			sizes.push(Buffer.byteLength(JSON.stringify({ type: "image", data: images[index] }), "utf8"));
+			return SLOT;
+		});
+		const segments = JSON.stringify(slotted).split(new RegExp(`\\{"type":"(?:input_)?text","text":"${SLOT}"\\}`));
+		if (segments.length !== images.length + 1) return unchanged;
+		segments.forEach((segment, index) => {
+			items.push({ kind: "fixed", bytes: Buffer.byteLength(segment, "utf8") });
+			if (index < images.length) items.push({ kind: "image", bytes: sizes[index] });
+		});
+	} else {
+		// Image-only policies size images by their data, as the context pass does.
+		for (const data of images) items.push({ kind: "image", bytes: data.length });
+	}
+	if (!overCount && estimateBytes(items, new Set(), 0) <= policy.maxBytes) return unchanged;
 
-	const { dropped } = selectImages(items, { ...policy, maxImages: Number.POSITIVE_INFINITY });
-	if (dropped.size === 0) return { payload, dropped: 0 };
+	const { dropped } = selectImages(items, policy);
+	if (dropped.size === 0) return unchanged;
 	const matched = matchOccurrences(images, occurrences);
 	const next = replaceImages(payload, (index) => {
 		if (!dropped.has(index)) return undefined;
