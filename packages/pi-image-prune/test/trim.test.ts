@@ -230,3 +230,28 @@ test("identical image data is pruned per copy, so a re-read survives", async () 
 	assert.deepEqual(result.messages[0].content, [{ type: "text", text: PLACEHOLDER_TEXT }]);
 	assert.deepEqual(result.messages[2].content, [same]);
 });
+
+test("request-wide fields count up front, so a growing conversation keeps its earlier drops", async () => {
+	const { enforcePayloadLimit } = await import("../trim.ts");
+	const user = (c: string, n: number) => ({ role: "user", content: [{ type: "input_image", image_url: `data:image/png;base64,${c.repeat(n)}` }] });
+	const p = policy({ maxBytes: 100_000, targetBytes: 60_000, countText: true });
+	const kept = (payload: unknown) => {
+		const s = JSON.stringify(enforcePayloadLimit(payload, p).payload);
+		return ["X", "Y"].filter((c) => s.includes(c.repeat(40_000)));
+	};
+	const history = [user("X", 50_000), user("Y", 45_000), { type: "compaction", encrypted_content: "e" }];
+	const tools = [{ type: "function", name: "t", description: "T".repeat(20_000) }];
+	assert.deepEqual(kept({ input: history, tools }), kept({ input: [...history, user("Z", 10_000)], tools }));
+});
+
+test("an image whose reply crosses the limit is still marked seen", async () => {
+	const { enforcePayloadLimit } = await import("../trim.ts");
+	const payload = {
+		messages: [
+			{ role: "user", content: [{ type: "image", source: { data: "A".repeat(50_000) } }] },
+			{ role: "assistant", content: [{ type: "text", text: "R".repeat(55_000) }] },
+		],
+	};
+	const { payload: result } = enforcePayloadLimit(payload, policy({ maxBytes: 100_000, targetBytes: 60_000, countText: true })) as { payload: typeof payload };
+	assert.deepEqual(result.messages[0].content, [{ type: "text", text: PLACEHOLDER_TEXT }]);
+});

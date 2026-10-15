@@ -236,56 +236,65 @@ function replaceImages(payload: Json, replacement: (index: number) => string | u
 	return walk(payload);
 }
 
-const SLOT = "__pi_image_prune_slot__";
+/** The conversation array of a payload, in each supported provider shape. */
+function conversationKey(payload: Json): "input" | "messages" | undefined {
+	if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
+	const record = payload as Record<string, Json>;
+	if (Array.isArray(record.input)) return "input";
+	if (Array.isArray(record.messages)) return "messages";
+	return undefined;
+}
 
 /**
  * Enforces a policy's limits on the finished provider payload, exactly as it
  * will be sent. The `context` pass can be undone or undercounted: another
  * extension may rebuild the request from the session afterwards, as
  * pi-codex-compaction does after a native checkpoint, adding retained history
- * and encrypted state. This pass selects over the payload alone with the same
- * oldest-first batch walk, so an unchanged payload prefix always gets the same
- * drops, and reads whether an image was seen from the replies that follow it.
- * Returns the payload and how many images it left out.
+ * and encrypted state. This pass selects over the payload's conversation with
+ * the same oldest-first batch walk. Everything outside the conversation (tools,
+ * instructions, settings) counts up front, so an unchanged conversation prefix
+ * always gets the same drops. Whether an image was seen is read from the
+ * replies that follow it. Returns the payload and how many images it left out.
  */
 export function enforcePayloadLimit(payload: Json, policy: TrimPolicy): { payload: Json; dropped: number } {
 	const unchanged = { payload, dropped: 0 };
+	const key = conversationKey(payload);
+	if (!key) return unchanged;
+	const conversation = (payload as Record<string, Json[]>)[key];
+
 	const items: Item[] = [];
-	const visit = (node: Json) => {
-		if (Array.isArray(node)) return node.forEach(visit);
-		if (!node || typeof node !== "object") return;
-		const record = node as Record<string, Json>;
-		const data = base64Of(record);
-		if (data !== undefined) {
-			const bytes = policy.countText ? Buffer.byteLength(JSON.stringify(record), "utf8") : data.length;
-			return void items.push({ kind: "image", bytes });
-		}
-		if (isSent(record)) items.push({ kind: "sent" });
-		Object.values(record).forEach(visit);
-	};
-	visit(payload);
+	let elementBytes = 0;
+	for (const element of conversation) {
+		// A reply is generated after everything before it was delivered, so mark it before its own bytes.
+		if (element && typeof element === "object" && isSent(element as Record<string, Json>)) items.push({ kind: "sent" });
+		const size = policy.countText ? Buffer.byteLength(JSON.stringify(element) ?? "", "utf8") : 0;
+		elementBytes += size;
+		const images: Item[] = [];
+		let imageBytes = 0;
+		const visit = (node: Json) => {
+			if (Array.isArray(node)) return node.forEach(visit);
+			if (!node || typeof node !== "object") return;
+			const record = node as Record<string, Json>;
+			const data = base64Of(record);
+			if (data !== undefined) {
+				const bytes = policy.countText ? Buffer.byteLength(JSON.stringify(record), "utf8") : data.length;
+				imageBytes += bytes;
+				return void images.push({ kind: "image", bytes });
+			}
+			Object.values(record).forEach(visit);
+		};
+		visit(element);
+		items.push({ kind: "fixed", bytes: Math.max(0, size - imageBytes) }, ...images);
+	}
 	const imageCount = items.filter((item) => item.kind === "image").length;
 	if (imageCount === 0) return unchanged;
+	const baseBytes = policy.countText ? Math.max(0, Buffer.byteLength(JSON.stringify(payload), "utf8") - elementBytes) : 0;
+	if (imageCount <= policy.maxImages && estimateBytes(items, new Set(), baseBytes) <= policy.maxBytes) return unchanged;
 
-	if (policy.countText) {
-		// Interleave the bytes between images, so the walk sees where each image sits.
-		const slotted = replaceImages(payload, () => SLOT);
-		const segments = JSON.stringify(slotted).split(new RegExp(`\\{"type":"(?:input_)?text","text":"${SLOT}"\\}`));
-		if (segments.length !== imageCount + 1) return unchanged;
-		const withText: Item[] = [{ kind: "fixed", bytes: Buffer.byteLength(segments[0], "utf8") }];
-		let segment = 1;
-		for (const item of items) {
-			withText.push(item);
-			if (item.kind === "image") withText.push({ kind: "fixed", bytes: Buffer.byteLength(segments[segment++], "utf8") });
-		}
-		items.splice(0, items.length, ...withText);
-	}
-	if (imageCount <= policy.maxImages && estimateBytes(items, new Set(), 0) <= policy.maxBytes) return unchanged;
-
-	const { dropped, unseen } = selectImages(items, policy);
+	const { dropped, unseen } = selectImages(items, policy, baseBytes);
 	if (dropped.size === 0) return unchanged;
-	const next = replaceImages(payload, (index) =>
+	const next = replaceImages(conversation, (index) =>
 		dropped.has(index) ? (unseen.has(index) ? UNSEEN_PLACEHOLDER_TEXT : PLACEHOLDER_TEXT) : undefined,
 	);
-	return { payload: next, dropped: dropped.size };
+	return { payload: { ...(payload as Record<string, Json>), [key]: next }, dropped: dropped.size };
 }
