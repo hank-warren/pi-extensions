@@ -159,46 +159,31 @@ test("applyDrops replaces dropped images with placeholders and leaves the input 
 	assert.equal((user.content as unknown[]).length, 2);
 });
 
-test("prunePayload replaces dropped images in every provider shape and keeps the rest", async () => {
-	const { prunePayload } = await import("../trim.ts");
-	const once = (seen: boolean) => [{ dropped: true, seen }];
-	const dropped = new Map([["AAAA", once(true)], ["BBBB", once(false)], ["CCCC", once(true)]]);
-	const payload = {
-		messages: [{ role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } }, { type: "image", source: { data: "KEEP" } }] }],
-		input: [{ role: "user", content: [{ type: "input_image", detail: "auto", image_url: "data:image/png;base64,BBBB" }] }],
-		chat: [{ type: "image_url", image_url: { url: "data:image/png;base64,CCCC" } }],
-	};
-	const result = prunePayload(payload, dropped) as typeof payload;
-	assert.deepEqual(result.messages[0].content, [{ type: "text", text: PLACEHOLDER_TEXT }, { type: "image", source: { data: "KEEP" } }]);
-	assert.deepEqual(result.input[0].content, [{ type: "input_text", text: UNSEEN_PLACEHOLDER_TEXT }]);
-	assert.deepEqual(result.chat, [{ type: "text", text: PLACEHOLDER_TEXT }]);
-	assert.equal(prunePayload(payload, new Map([["NONE", once(true)]])), payload);
-	assert.equal(payload.messages[0].content[0].type, "image", "input untouched");
+test("enforcePayloadLimit replaces images in every provider shape", async () => {
+	const { enforcePayloadLimit } = await import("../trim.ts");
+	const p = policy({ maxImages: 1, dropBatch: 1 });
+	const anthropic = { messages: [{ role: "user", content: [{ type: "image", source: { data: "A" } }, { type: "image", source: { data: "B" } }] }] };
+	const responses = { input: [{ role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,A" }, { type: "input_image", image_url: "data:image/png;base64,B" }] }] };
+	const chat = { messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "data:image/png;base64,A" } }, { type: "image_url", image_url: { url: "data:image/png;base64,B" } }] }] };
+	assert.deepEqual((enforcePayloadLimit(anthropic, p).payload as typeof anthropic).messages[0].content[0], { type: "text", text: UNSEEN_PLACEHOLDER_TEXT });
+	assert.deepEqual((enforcePayloadLimit(responses, p).payload as typeof responses).input[0].content[0], { type: "input_text", text: UNSEEN_PLACEHOLDER_TEXT });
+	assert.deepEqual((enforcePayloadLimit(chat, p).payload as typeof chat).messages[0].content[0], { type: "text", text: UNSEEN_PLACEHOLDER_TEXT });
+	assert.equal(anthropic.messages[0].content[0].type, "image", "input untouched");
 });
 
-test("re-reading a pruned image keeps the new copy", async () => {
-	const { imageOccurrences, prunePayload } = await import("../trim.ts");
-	const same = "S".repeat(4_000);
-	const messages = [
-		{ role: "user", content: [{ type: "image", data: same, mimeType: "image/png" }], timestamp: 1 },
-		{ role: "assistant", content: [{ type: "text", text: "seen" }], timestamp: 2 },
-		{ role: "user", content: [{ type: "image", data: same, mimeType: "image/png" }], timestamp: 3 },
-	] as AgentMessage[];
-	const p = policy({ maxBytes: 6_000, targetBytes: 4_500, countText: true });
-	const { dropped, unseen } = selectImages(toItems(messages), p);
-	assert.deepEqual([...dropped], [0], "the older copy goes, the re-read stays");
-	const data = imageOccurrences(messages, dropped, unseen);
-	const image = (d: string) => ({ type: "image", source: { type: "base64", media_type: "image/png", data: d } });
-
-	// The context hook already replaced the older copy: the payload holds only the kept one.
-	const pruned = { messages: [{ content: [{ type: "text", text: PLACEHOLDER_TEXT }] }, { content: [image(same)] }] };
-	assert.equal(prunePayload(pruned, data), pruned);
-
-	// A rebuilt payload carries both raw copies: only the older one is replaced.
-	const rebuilt = { messages: [{ content: [image(same)] }, { content: [image(same)] }] };
-	const result = prunePayload(rebuilt, data) as typeof rebuilt;
-	assert.deepEqual(result.messages[0].content, [{ type: "text", text: PLACEHOLDER_TEXT }]);
-	assert.deepEqual(result.messages[1].content, [image(same)]);
+test("enforcePayloadLimit reads seen from the replies after each image", async () => {
+	const { enforcePayloadLimit } = await import("../trim.ts");
+	const img = (d: string) => ({ type: "input_image", image_url: `data:image/png;base64,${d}` });
+	const payload = {
+		input: [
+			{ role: "user", content: [img("A".repeat(40_000))] },
+			{ type: "message", role: "assistant", content: [{ type: "output_text", text: "red" }] },
+			{ role: "user", content: [img("B".repeat(40_000)), img("C".repeat(40_000))] },
+		],
+	};
+	const { payload: result } = enforcePayloadLimit(payload, policy({ maxBytes: 100_000, targetBytes: 50_000, countText: true })) as { payload: typeof payload };
+	assert.deepEqual(result.input[0].content, [{ type: "input_text", text: PLACEHOLDER_TEXT }]);
+	assert.deepEqual((result.input[2] as { content: unknown[] }).content[0], { type: "input_text", text: UNSEEN_PLACEHOLDER_TEXT });
 });
 
 test("enforcePayloadLimit drops images the context pass never saw, oldest first", async () => {
@@ -213,13 +198,14 @@ test("enforcePayloadLimit drops images the context pass never saw, oldest first"
 		],
 	};
 	const p = policy({ maxBytes: 100_000, targetBytes: 60_000, countText: true });
-	const { payload: result, dropped } = enforcePayloadLimit(payload, p, new Map()) as { payload: typeof payload; dropped: number };
+	const { payload: result, dropped } = enforcePayloadLimit(payload, p) as { payload: typeof payload; dropped: number };
 	assert.equal(dropped, 2);
 	assert.ok(JSON.stringify(result).length <= 60_000);
-	assert.deepEqual(result.input[1].content, [{ type: "input_text", text: PLACEHOLDER_TEXT }]);
+	// Nothing replied after these images, so none was seen.
+	assert.deepEqual(result.input[1].content, [{ type: "input_text", text: UNSEEN_PLACEHOLDER_TEXT }]);
 	assert.equal((result.input[3] as { content: unknown[] }).content[0], (payload.input[3] as { content: unknown[] }).content[0]);
-	assert.equal(enforcePayloadLimit(result, p, new Map()).dropped, 0, "a pruned payload stays put");
-	assert.equal(enforcePayloadLimit(payload, policy({ maxBytes: 200_000, targetBytes: 100_000, countText: true }), new Map()).payload, payload);
+	assert.equal(enforcePayloadLimit(result, p).dropped, 0, "a pruned payload stays put");
+	assert.equal(enforcePayloadLimit(payload, policy({ maxBytes: 200_000, targetBytes: 100_000, countText: true })).payload, payload);
 });
 
 test("enforcePayloadLimit enforces the image count too, for image-only policies as well", async () => {
@@ -228,10 +214,19 @@ test("enforcePayloadLimit enforces the image count too, for image-only policies 
 	const payload = { messages: [{ role: "user", content: Array.from({ length: 6 }, (_, i) => img(String(i).repeat(10))) }] };
 	for (const countText of [false, true]) {
 		const p = policy({ maxImages: 4, dropBatch: 2, maxBytes: 1_000_000, targetBytes: 500_000, countText });
-		const { payload: result, dropped } = enforcePayloadLimit(payload, p, new Map()) as { payload: typeof payload; dropped: number };
+		const { payload: result, dropped } = enforcePayloadLimit(payload, p) as { payload: typeof payload; dropped: number };
 		// The 5th image crosses 4 and drops down to 2 (4 - batch of 2); the 6th leaves 3.
 		assert.equal(dropped, 3, `countText ${countText}`);
 		assert.equal(result.messages[0].content.filter((b) => b.type === "image").length, 3);
 	}
-	assert.equal(enforcePayloadLimit(payload, policy({ maxImages: 6 }), new Map()).payload, payload);
+	assert.equal(enforcePayloadLimit(payload, policy({ maxImages: 6 })).payload, payload);
+});
+
+test("identical image data is pruned per copy, so a re-read survives", async () => {
+	const { enforcePayloadLimit } = await import("../trim.ts");
+	const same = { type: "image", source: { data: "S".repeat(40_000) } };
+	const payload = { messages: [{ role: "user", content: [same] }, { role: "assistant", content: "red" }, { role: "user", content: [same] }] };
+	const { payload: result } = enforcePayloadLimit(payload, policy({ maxBytes: 60_000, targetBytes: 45_000, countText: true })) as { payload: typeof payload };
+	assert.deepEqual(result.messages[0].content, [{ type: "text", text: PLACEHOLDER_TEXT }]);
+	assert.deepEqual(result.messages[2].content, [same]);
 });

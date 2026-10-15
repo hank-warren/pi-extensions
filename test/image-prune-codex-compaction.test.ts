@@ -9,7 +9,7 @@ import type { Model } from "@earendil-works/pi-ai";
 import { registerCodexCompactionExtension } from "../packages/pi-codex-compaction/index.ts";
 import { modelKey, NATIVE_COMPACTION_KIND } from "../packages/pi-codex-compaction/native-compaction.ts";
 import imagePrune from "../packages/pi-image-prune/index.ts";
-import { PLACEHOLDER_TEXT } from "../packages/pi-image-prune/trim.ts";
+import { PLACEHOLDER_TEXT, UNSEEN_PLACEHOLDER_TEXT } from "../packages/pi-image-prune/trim.ts";
 import { createMockContext, createMockPi } from "./support/mock-pi.ts";
 
 const model: Model<"openai-responses"> = {
@@ -72,13 +72,29 @@ async function scenario(replacementHistory: unknown[], tailTurns: number, rule: 
 
 const compactionItem = { type: "compaction", encrypted_content: "opaque" };
 
-test("images pruned by the context hook stay out of a payload rebuilt after a native checkpoint", async () => {
+test("a payload rebuilt after a native checkpoint stays under the limit", async () => {
 	const { keptInContext, serialized } = await scenario([compactionItem], 4);
 	assert.ok(keptInContext < 4, "the context hook pruned something");
 	assert.ok(serialized.includes("opaque"), "codex-compaction rebuilt the request from its checkpoint");
-	assert.equal((serialized.match(/"input_image"/g) ?? []).length, keptInContext);
+	assert.ok(serialized.length <= 100_000, `payload ${serialized.length} bytes`);
 	assert.ok(serialized.includes(PLACEHOLDER_TEXT));
-	assert.ok(serialized.length < 100_000);
+});
+
+test("decisions on a rebuilt payload's prefix hold as the conversation grows", async () => {
+	const retained = (c: string) => ({ type: "message", role: "user", content: [{ type: "input_image", detail: "auto", image_url: `data:image/png;base64,${c.repeat(30_000)}` }] });
+	const history = [retained("X"), retained("Y"), compactionItem];
+	const imagesKept = (serialized: string) => [..."XYAB CD"].filter((c) => c !== " " && serialized.includes(c.repeat(30_000)));
+	const before = imagesKept((await scenario(history, 2)).serialized);
+	const after = imagesKept((await scenario(history, 4)).serialized);
+	for (const gone of ["X", "Y", "A", "B"].filter((c) => !before.includes(c))) {
+		assert.ok(!after.includes(gone), `${gone} came back after the conversation grew (before ${before}, after ${after})`);
+	}
+});
+
+test("a new image pruned only by the payload pass is marked unseen", async () => {
+	const { serialized } = await scenario([{ type: "compaction", encrypted_content: "E".repeat(75_000) }], 1);
+	assert.ok(!serialized.includes("A".repeat(30_000)));
+	assert.ok(serialized.includes(UNSEEN_PLACEHOLDER_TEXT));
 });
 
 test("the limit covers images and encrypted state carried in the checkpoint", async () => {

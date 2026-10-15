@@ -1,16 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadConfig, matchRule, type PruneConfig } from "./config.ts";
-import {
-	applyDrops,
-	enforcePayloadLimit,
-	estimateBytes,
-	imageOccurrences,
-	type Occurrence,
-	prunePayload,
-	selectImages,
-	toItems,
-	type TrimPolicy,
-} from "./trim.ts";
+import { applyDrops, enforcePayloadLimit, estimateBytes, selectImages, toItems, type TrimPolicy } from "./trim.ts";
 
 // Claude Code 2.1.282 limits for the Anthropic Messages API, applied to models no rule matches.
 const MIB = 1024 * 1024;
@@ -75,8 +65,6 @@ export default function imagePrune(pi: ExtensionAPI): void {
 	let config: PruneConfig = { rules: [] };
 	let loaded = false;
 	let lastDropped = 0;
-	// Image occurrences from the latest context pass, for the finished payload.
-	let occurrences = new Map<string, Occurrence[]>();
 	let lastPayloadDropped = 0;
 
 	const ensureConfig = (ctx: ExtensionContext) => {
@@ -90,14 +78,12 @@ export default function imagePrune(pi: ExtensionAPI): void {
 		loaded = false;
 		lastDropped = 0;
 		lastPayloadDropped = 0;
-		occurrences = new Map();
 		ensureConfig(ctx);
 	});
 
 	pi.on("context", (event, ctx) => {
 		ensureConfig(ctx);
 		const policy = resolvePolicy(config, ctx.model);
-		occurrences = new Map();
 		if (!policy) return;
 
 		const items = toItems(event.messages);
@@ -110,22 +96,18 @@ export default function imagePrune(pi: ExtensionAPI): void {
 		}
 		lastDropped = dropped.size;
 
-		occurrences = imageOccurrences(event.messages, dropped, unseen);
 		const messages = applyDrops(event.messages, dropped, unseen);
 		if (messages !== event.messages) return { messages };
 	});
 
 	pi.on("before_provider_request", (event, ctx) => {
-		let payload = prunePayload(event.payload, occurrences);
 		const policy = resolvePolicy(config, ctx.model);
-		if (policy) {
-			const enforced = enforcePayloadLimit(payload, policy, occurrences);
-			if (enforced.dropped > lastPayloadDropped && ctx.hasUI) {
-				ctx.ui.notify(`pi-image-prune: ${enforced.dropped} more image(s) left out to fit the finished request`, "info");
-			}
-			lastPayloadDropped = enforced.dropped;
-			payload = enforced.payload;
+		if (!policy) return;
+		const enforced = enforcePayloadLimit(event.payload, policy);
+		if (enforced.dropped > lastPayloadDropped && ctx.hasUI) {
+			ctx.ui.notify(`pi-image-prune: ${enforced.dropped} more image(s) left out to fit the finished request`, "info");
 		}
-		if (payload !== event.payload) return payload;
+		lastPayloadDropped = enforced.dropped;
+		if (enforced.payload !== event.payload) return enforced.payload;
 	});
 }
