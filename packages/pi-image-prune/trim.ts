@@ -100,24 +100,19 @@ function contentBlocks(message: AgentMessage): Block[] | undefined {
 	return Array.isArray(message.content) ? message.content : undefined;
 }
 
-const fixedBytesCache = new WeakMap<object, number>();
-
 function byteLength(value: unknown): number {
 	return Buffer.byteLength(JSON.stringify(value) ?? "", "utf8");
 }
 
-/** Wire-size estimate of everything in a message except its images. Messages are immutable, so it is cached. */
+/** Wire-size estimate of everything in a message except its images. Pi clones messages per request, so this is not cached. */
 function fixedBytes(message: AgentMessage): number {
-	const cached = fixedBytesCache.get(message);
-	if (cached !== undefined) return cached;
 	const blocks = contentBlocks(message);
-	const size =
+	return (
 		MESSAGE_OVERHEAD_BYTES +
 		(blocks
 			? blocks.reduce((sum, block) => sum + (block.type === "image" ? 0 : byteLength(block)), 0)
-			: byteLength(message));
-	fixedBytesCache.set(message, size);
-	return size;
+			: byteLength(message))
+	);
 }
 
 /** Flattens messages into the oldest-first sequence the selector walks. */
@@ -185,4 +180,77 @@ export function applyDrops(
 		if (!changed) return message;
 		return { ...message, content } as AgentMessage;
 	});
+}
+
+/** Base64 data of each dropped image, mapped to whether the model had seen it. */
+export function droppedImageData(
+	messages: readonly AgentMessage[],
+	dropped: ReadonlySet<number>,
+	unseen: ReadonlySet<number>,
+): Map<string, boolean> {
+	const data = new Map<string, boolean>();
+	if (dropped.size === 0) return data;
+	let ordinal = 0;
+	for (const message of messages) {
+		for (const block of contentBlocks(message) ?? []) {
+			if (block.type !== "image") continue;
+			if (dropped.has(ordinal)) data.set(block.data, !unseen.has(ordinal));
+			ordinal++;
+		}
+	}
+	return data;
+}
+
+type Json = unknown;
+
+function base64Of(part: Record<string, Json>): string | undefined {
+	// Anthropic Messages: { type: "image", source: { data } }
+	const source = part.source as Record<string, Json> | undefined;
+	if (part.type === "image" && typeof source?.data === "string") return source.data;
+	// OpenAI Responses: { type: "input_image", image_url: "data:...;base64,X" }
+	if (part.type === "input_image" && typeof part.image_url === "string") return part.image_url.split(";base64,")[1];
+	// OpenAI Chat Completions: { type: "image_url", image_url: { url } }
+	const imageUrl = part.image_url as Record<string, Json> | undefined;
+	if (part.type === "image_url" && typeof imageUrl?.url === "string") return imageUrl.url.split(";base64,")[1];
+	return undefined;
+}
+
+function textPart(original: Record<string, Json>, text: string): Record<string, Json> {
+	return { type: original.type === "input_image" ? "input_text" : "text", text };
+}
+
+/**
+ * Re-applies drops to a finished provider payload. Needed when another
+ * extension rebuilds the request from the session after the `context` hook ran
+ * (pi-codex-compaction does, after a native checkpoint), which would otherwise
+ * restore every pruned image. Returns the input unchanged when nothing matches.
+ */
+export function prunePayload(payload: Json, dropped: ReadonlyMap<string, boolean>): Json {
+	if (dropped.size === 0) return payload;
+	const walk = (node: Json): Json => {
+		if (Array.isArray(node)) {
+			let changed = false;
+			const next = node.map((child) => {
+				const replaced = walk(child);
+				if (replaced !== child) changed = true;
+				return replaced;
+			});
+			return changed ? next : node;
+		}
+		if (!node || typeof node !== "object") return node;
+		const record = node as Record<string, Json>;
+		const data = base64Of(record);
+		if (data !== undefined && dropped.has(data)) {
+			return textPart(record, dropped.get(data) ? PLACEHOLDER_TEXT : UNSEEN_PLACEHOLDER_TEXT);
+		}
+		let changed = false;
+		const next: Record<string, Json> = {};
+		for (const [key, value] of Object.entries(record)) {
+			const replaced = walk(value);
+			if (replaced !== value) changed = true;
+			next[key] = replaced;
+		}
+		return changed ? next : node;
+	};
+	return walk(payload);
 }

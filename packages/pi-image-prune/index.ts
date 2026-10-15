@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadConfig, matchRule, type PruneConfig } from "./config.ts";
-import { applyDrops, estimateBytes, selectImages, toItems, type TrimPolicy } from "./trim.ts";
+import { applyDrops, droppedImageData, estimateBytes, prunePayload, selectImages, toItems, type TrimPolicy } from "./trim.ts";
 
 // Claude Code 2.1.282 limits for the Anthropic Messages API, applied to models no rule matches.
 const MIB = 1024 * 1024;
@@ -65,6 +65,8 @@ export default function imagePrune(pi: ExtensionAPI): void {
 	let config: PruneConfig = { rules: [] };
 	let loaded = false;
 	let lastDropped = 0;
+	// Drops from the latest context pass, re-applied to the finished payload.
+	let droppedData = new Map<string, boolean>();
 
 	const ensureConfig = (ctx: ExtensionContext) => {
 		if (loaded) return;
@@ -76,12 +78,14 @@ export default function imagePrune(pi: ExtensionAPI): void {
 	pi.on("session_start", (_event, ctx) => {
 		loaded = false;
 		lastDropped = 0;
+		droppedData = new Map();
 		ensureConfig(ctx);
 	});
 
 	pi.on("context", (event, ctx) => {
 		ensureConfig(ctx);
 		const policy = resolvePolicy(config, ctx.model);
+		droppedData = new Map();
 		if (!policy) return;
 
 		const items = toItems(event.messages);
@@ -94,7 +98,13 @@ export default function imagePrune(pi: ExtensionAPI): void {
 		}
 		lastDropped = dropped.size;
 
+		droppedData = droppedImageData(event.messages, dropped, unseen);
 		const messages = applyDrops(event.messages, dropped, unseen);
 		if (messages !== event.messages) return { messages };
+	});
+
+	pi.on("before_provider_request", (event) => {
+		const payload = prunePayload(event.payload, droppedData);
+		if (payload !== event.payload) return payload;
 	});
 }

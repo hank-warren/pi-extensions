@@ -158,3 +158,19 @@ test("applyDrops replaces dropped images with placeholders and leaves the input 
 	assert.equal(result[3], latest);
 	assert.equal((user.content as unknown[]).length, 2);
 });
+
+test("prunePayload replaces dropped images in every provider shape and keeps the rest", async () => {
+	const { prunePayload } = await import("../trim.ts");
+	const dropped = new Map([["AAAA", true], ["BBBB", false]]);
+	const payload = {
+		messages: [{ role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } }, { type: "image", source: { data: "KEEP" } }] }],
+		input: [{ role: "user", content: [{ type: "input_image", detail: "auto", image_url: "data:image/png;base64,BBBB" }] }],
+		chat: [{ type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }],
+	};
+	const result = prunePayload(payload, dropped) as typeof payload;
+	assert.deepEqual(result.messages[0].content, [{ type: "text", text: PLACEHOLDER_TEXT }, { type: "image", source: { data: "KEEP" } }]);
+	assert.deepEqual(result.input[0].content, [{ type: "input_text", text: UNSEEN_PLACEHOLDER_TEXT }]);
+	assert.deepEqual(result.chat, [{ type: "text", text: PLACEHOLDER_TEXT }]);
+	assert.equal(prunePayload(payload, new Map([["NONE", true]])), payload);
+	assert.equal(payload.messages[0].content[0].type, "image", "input untouched");
+});

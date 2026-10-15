@@ -23,6 +23,8 @@ Images go in batches, not one per turn. Each batch changes the start of the requ
 
 When a new batch is left out, Pi shows a one-line notice with the estimated request size and the limit.
 
+The drops are also re-applied to the finished provider payload, because another extension may rebuild the request from the session after the context hook: `@hank-warren/pi-codex-compaction` does after a native checkpoint. Load this package after it (the repository's manifest already does) so its payload hook runs last.
+
 ## Configuration
 
 `~/.pi/agent/pi-image-prune.json` (under `PI_CODING_AGENT_DIR` when set):
@@ -30,7 +32,7 @@ When a new batch is left out, Pi shows a one-line notice with the estimated requ
 ```json
 {
   "rules": [
-    { "models": ["cpa/devin/*", "cpa/claude-opus-5-5"], "maxRequestBytes": 9500000, "trimToBytes": 6500000 }
+    { "models": ["cpa/devin/*"], "maxRequestBytes": 9500000, "trimToBytes": 6500000 }
   ]
 }
 ```
@@ -46,7 +48,7 @@ Unknown fields are errors. A malformed file is ignored with a warning, leaving t
 
 ### CLIProxyAPI and Devin
 
-Devin accepts at most 10,485,760 bytes per request, enforced before any model runs, and CLIProxyAPI's translation adds about 0.35% to a real Pi request. Cover every model id that can reach Devin: the `devin/` ids, and any bare id CLIProxyAPI forks onto Devin as a fallback through `oauth.model-alias` (`claude-opus-5-5` in the example above). A fallback id gets the smaller limit even when the request ends up at Anthropic, because Pi cannot see which backend will answer.
+Devin accepts at most 10,485,760 bytes per request, enforced before any model runs, and CLIProxyAPI's translation adds about 0.35% to a real Pi request. Cover every model id that can reach Devin: the `devin/` ids, plus any bare id CLIProxyAPI forks onto Devin as a fallback through `oauth.model-alias`. A fallback id needs the smaller limit even when the request ends up at Anthropic, because Pi cannot see which backend will answer; dropping the alias and choosing `devin/…` explicitly keeps the bare id on Anthropic's limit.
 
 ## Install
 

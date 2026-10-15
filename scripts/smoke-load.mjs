@@ -131,9 +131,10 @@ const EXPECTED_SURFACES = {
 		commands: ["agents"],
 		handlers: ["before_agent_start", "session_shutdown", "session_start"],
 	},
-	// context: prunes images per request. session_start: (re)loads pi-image-prune.json.
+	// context: prunes images per request. before_provider_request: re-applies the
+	// drops to a payload rebuilt after the context hook. session_start: loads config.
 	"./packages/pi-image-prune/index.ts": {
-		handlers: ["context", "session_start"],
+		handlers: ["before_provider_request", "context", "session_start"],
 	},
 };
 
