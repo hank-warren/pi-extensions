@@ -1,0 +1,45 @@
+{
+  "name": "@hank-warren/pi-image-prune",
+  "version": "0.1.0",
+  "description": "Prune old images from Pi requests so image-heavy sessions stay under a provider's request size limit, with per-model limits for proxies such as CLIProxyAPI.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "coding-agent",
+    "images",
+    "anthropic",
+    "cliproxyapi",
+    "request-too-large"
+  ],
+  "author": "Hank Warren",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hank-warren/pi-extensions.git",
+    "directory": "packages/pi-image-prune"
+  },
+  "bugs": {
+    "url": "https://github.com/hank-warren/pi-extensions/issues"
+  },
+  "homepage": "https://github.com/hank-warren/pi-extensions/tree/main/packages/pi-image-prune#readme",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "config.ts",
+    "trim.ts",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
