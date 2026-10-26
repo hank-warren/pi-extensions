@@ -169,15 +169,16 @@ test("keys inside an in-progress paste are text, not commands", () => {
 	assert.equal(h.results.length, 0);
 	h.dialog.handleInput("\x1b[201~");
 	h.dialog.handleInput(KITTY.enter);
-	assert.equal(h.results[0].answers[0].answer, "not yet done", "control chars flattened, nothing executed");
+	// pi's Editor keeps the pasted line break and drops the bell; nothing executed.
+	assert.equal(h.results[0].answers[0].answer, "not\nyet done");
 });
 
-test("multi-line pastes are flattened to a single-line answer", () => {
+test("multi-line pastes keep their lines", () => {
 	const h = harness();
 	h.openCustom();
 	h.dialog.handleInput("\x1b[200~line1\nline2\x1b[201~");
 	h.dialog.handleInput(KITTY.enter);
-	assert.equal(h.results[0].answers[0].answer, "line1 line2");
+	assert.equal(h.results[0].answers[0].answer, "line1\nline2");
 });
 
 test("input arriving after the paste end marker is handled as keys", () => {

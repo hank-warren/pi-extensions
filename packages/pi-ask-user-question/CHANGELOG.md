@@ -1,5 +1,11 @@
 # @hank-warren/pi-ask-user-question
 
+## 0.7.0
+
+### Minor Changes
+
+- Type custom answers and notes in pi's own input-box editor: multi-line (shift+enter), pastes kept whole with their line breaks, word motion and undo, and `@`/Tab path completion from the session's cwd. A multi-select note is kept on the question until the checked rows are submitted. Another extension in the same pi can now answer the open questionnaire by id through `hank:ask-user:answer`, with exactly the result a terminal answer produces; the prompt and blocked events carry that `id`, and the close event says whether the answer was `remote`.
+
 ## 0.6.1
 
 ### Patch Changes

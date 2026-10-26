@@ -124,12 +124,13 @@ test("the custom field stays rectangular as it grows character by character", ()
 	}
 });
 
-test("an empty custom field still renders a caret row", () => {
+test("an empty custom field still renders the editor", () => {
 	const { d } = dialog();
 	d.handleInput("3");
 	const lines = d.render(80).map(strip);
 	assertRectangular(d.render(80), 80, "empty field");
-	assert.ok(lines.some((l) => l.includes("▌")), "caret must be visible when the field is empty");
+	assert.ok(lines.some((l) => /^│ ─{10,}/.test(l)), "the editor's frame must show while the field is empty");
+	assert.ok(lines.some((l) => l.includes("enter submit")), "and its key hint");
 });
 
 test("narrow terminals still produce a valid box", () => {

@@ -6,7 +6,11 @@
  * package replays cleanly. Only one of the two may be installed at a time.
  */
 
-import { type ExtensionAPI, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
+import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { delimiter, join } from "node:path";
+import { type ExtensionAPI, getAgentDir, getMarkdownTheme, getSelectListTheme } from "@earendil-works/pi-coding-agent";
+import { CombinedAutocompleteProvider, type EditorTheme } from "@earendil-works/pi-tui";
 import {
 	ASK_USER_BLOCKED_EVENT,
 	ASK_USER_PROMPT_EVENT,
@@ -14,6 +18,7 @@ import {
 	type AskUserPromptEventPayload,
 } from "./events.ts";
 import { QuestionnaireSession } from "./questionnaire.ts";
+import { RemoteQuestionnaires } from "./remote.ts";
 import { buildResponse, buildToolResult } from "./tool/envelope.ts";
 import {
 	type AskUserParams,
@@ -52,8 +57,9 @@ Usage notes:
 - If you recommend a specific option, make it the first option and add "(Recommended)" at the end of the label.
 - Ask 1-4 questions per call, each with 2-4 options (2-6 when \`multiSelect\` is true). Multiple questions render as tabs the user cycles with Tab; every question must be answered before the call returns. Group questions that belong to one decision rather than asking them in separate calls, but do not pad a single decision into several questions.`;
 
-function emitPrompt(pi: ExtensionAPI, params: AskUserParams): void {
+function emitPrompt(pi: ExtensionAPI, id: string, params: AskUserParams): void {
 	const payload: AskUserPromptEventPayload = {
+		id,
 		questions: params.questions.map((q) => ({
 			question: q.question,
 			header: q.header,
@@ -72,8 +78,8 @@ function emitPrompt(pi: ExtensionAPI, params: AskUserParams): void {
  */
 export const HERDR_BLOCKED_LABEL = "question";
 
-function emitBlocked(pi: ExtensionAPI, active: boolean): void {
-	const payload: AskUserBlockedEventPayload = { active };
+function emitBlocked(pi: ExtensionAPI, active: boolean, id: string, remote?: boolean): void {
+	const payload: AskUserBlockedEventPayload = { active, id, ...(remote ? { remote: true } : {}) };
 	pi.events.emit(ASK_USER_BLOCKED_EVENT, payload);
 	// Herdr's pi integration turns `herdr:blocked` into `agent_status: "blocked"`,
 	// which is how an orchestrator in another pane learns this session is
@@ -84,7 +90,38 @@ function emitBlocked(pi: ExtensionAPI, active: boolean): void {
 	pi.events.emit("herdr:blocked", active ? { active: true, label: HERDR_BLOCKED_LABEL } : { active: false });
 }
 
+/**
+ * `fd`, for `@` file completion: pi's bundled copy, else one on PATH (Debian
+ * names it `fdfind`). Without it, `@` finds nothing but Tab path completion
+ * still works.
+ */
+function fdPath(): string | null {
+	const exe = process.platform === "win32" ? ".exe" : "";
+	const candidates: string[] = [];
+	try {
+		candidates.push(join(getAgentDir(), "bin", `fd${exe}`));
+	} catch {
+		// no agent dir; PATH only
+	}
+	for (const dir of (process.env.PATH ?? "").split(delimiter).filter(Boolean)) {
+		candidates.push(join(dir, `fd${exe}`), join(dir, `fdfind${exe}`));
+	}
+	return candidates.find((path) => existsSync(path)) ?? null;
+}
+
+/** pi's input-box chrome; the select-list theme can throw before pi's theme is initialised. */
+function editorTheme(theme: { fg(role: string, text: string): string }): EditorTheme | undefined {
+	try {
+		return { borderColor: (text) => theme.fg("dim", text), selectList: getSelectListTheme() };
+	} catch {
+		return undefined;
+	}
+}
+
 export function registerTool(pi: ExtensionAPI): void {
+	const remote = new RemoteQuestionnaires();
+	remote.listen(pi.events);
+
 	pi.registerTool({
 		name: TOOL_NAME,
 		label: "Ask User Question",
@@ -113,10 +150,22 @@ export function registerTool(pi: ExtensionAPI): void {
 			if (signal?.aborted) return buildResponse(session.cancelledResult(), typed);
 
 			let dialog: QuestionnaireDialog | undefined;
+			let settled = false;
+			let answeredRemotely = false;
 			const cancel = () => dialog?.cancel();
 			signal?.addEventListener("abort", cancel, { once: true });
-			emitPrompt(pi, typed);
-			emitBlocked(pi, true);
+			const id = randomUUID();
+			const end = remote.begin(id, {
+				params: typed,
+				settle: (result) => {
+					if (settled || !dialog) return false;
+					answeredRemotely = true;
+					dialog.settle(result);
+					return true;
+				},
+			});
+			emitPrompt(pi, id, typed);
+			emitBlocked(pi, true, id);
 			try {
 				// NOT an overlay. An overlay is composited over the bottom rows of the
 				// viewport, so the transcript underneath it is unreachable: the user is
@@ -136,8 +185,16 @@ export function registerTool(pi: ExtensionAPI): void {
 							// Reuse pi's own markdown theme so previews match the
 							// transcript rather than inventing a second code style.
 							markdownTheme: getMarkdownTheme(),
-							done,
+							done: (result) => {
+								settled = true;
+								done(result);
+							},
 							requestRender: () => tui.requestRender(),
+							tui,
+							// The text fields are pi's input-box editor, themed and
+							// completing paths like it.
+							editorTheme: editorTheme(theme),
+							autocomplete: new CombinedAutocompleteProvider([], ctx.cwd, fdPath()),
 						});
 						if (signal?.aborted) queueMicrotask(() => dialog?.cancel());
 						return dialog;
@@ -155,10 +212,11 @@ export function registerTool(pi: ExtensionAPI): void {
 				}
 				return buildResponse(result, typed);
 			} finally {
+				end();
 				signal?.removeEventListener("abort", cancel);
 				// In `finally` so listeners are never left believing we are still
 				// blocked on a human after a throw.
-				emitBlocked(pi, false);
+				emitBlocked(pi, false, id, answeredRemotely);
 			}
 		},
 	});

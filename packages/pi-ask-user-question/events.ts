@@ -14,8 +14,9 @@
  *      Set/Map/Date/class instances — payloads must survive JSON
  *      serialization when listeners forward them across process boundaries.
  *
- * Intended consumers: pi-statusline (blocked-on-human indicator) and
- * pi-auto-permissions (suppress guardian nags while a human is being asked).
+ * Intended consumers: pi-statusline (blocked-on-human indicator),
+ * pi-auto-permissions (suppress guardian nags while a human is being asked),
+ * and relays that answer from elsewhere (ASK_USER_ANSWER_EVENT).
  */
 
 /** Emitted once when a questionnaire is presented. */
@@ -39,6 +40,8 @@ export interface AskUserPromptQuestion {
 }
 
 export interface AskUserPromptEventPayload {
+	/** Names this questionnaire for ASK_USER_ANSWER_EVENT; unique per prompt. */
+	id?: string;
 	questions: ReadonlyArray<AskUserPromptQuestion>;
 }
 
@@ -52,6 +55,34 @@ export const ASK_USER_BLOCKED_EVENT = "hank:ask-user:blocked" as const;
 export interface AskUserBlockedEventPayload {
 	/** True while input is awaited; false when the wait ends (answer, cancel, or error). */
 	active: boolean;
+	/** The questionnaire's id, as in its prompt event. */
+	id?: string;
+	/** On `active: false`: true when the answer came through ASK_USER_ANSWER_EVENT. */
+	remote?: boolean;
+}
+
+/**
+ * Listened on: answers the open questionnaire `id` from outside the terminal,
+ * with the same result a terminal answer produces. The terminal dialog stays
+ * live and the first answer wins. `answers` holds one entry per question, in
+ * order; `cancelled: true` declines instead, like Esc.
+ */
+export const ASK_USER_ANSWER_EVENT = "hank:ask-user:answer" as const;
+
+export interface AskUserRemoteQuestionAnswer {
+	/** Single-select: one of the option labels. Omit when answering with `text`. */
+	choice?: string;
+	/** Multi-select: option labels to check (any order). */
+	choices?: ReadonlyArray<string>;
+	/** Typed answer (the "Type something." row); on multi-select, appended to the checks. */
+	text?: string;
+	notes?: string;
+}
+
+export interface AskUserRemoteAnswer {
+	id: string;
+	answers?: ReadonlyArray<AskUserRemoteQuestionAnswer>;
+	cancelled?: boolean;
 }
 
 /** Emitted after the active tool set has been reconciled for the current run. */

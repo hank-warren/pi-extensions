@@ -152,6 +152,10 @@ test("the note key attaches a note to the whole multi-select answer", () => {
 	h.dialog.handleInput("1");
 	h.dialog.handleInput("n");
 	h.type("stats first");
+	// Enter keeps the note on the question; the next Enter submits the ticks.
+	h.dialog.handleInput("\r");
+	assert.equal(h.results.length, 0);
+	assert.match(h.dialog.render(80).join("\n"), /note: stats first/);
 	h.dialog.handleInput("\r");
 	const [answer] = h.results[0].answers;
 	assert.equal(answer.answer, "pi-stats");

@@ -8,13 +8,21 @@
  * `bundledDependencies` — AGENTS.md §Structure). See
  * docs/specs/pi-ask-user-question.md §9.
  *
+ * TEXT ENTRY uses pi-tui's own `Editor` — the component behind pi's input box —
+ * for both the custom answer and notes, so typing there behaves like typing a
+ * prompt: multi-line (shift+enter), bracketed paste of any size, word motion,
+ * undo, and `@` / path autocomplete from the session's working directory. The
+ * hand-rolled single-line field it replaces dropped or flattened pastes and had
+ * no cursor movement at all.
+ *
  * KEY MAP (matches @juicesharp/rpiv-ask-user-question):
  *
  *   1-9         select an option (toggle it, on a multiSelect question)
  *   space       toggle the highlighted option    (multiSelect only)
  *   ↑ / ↓       move the highlight
  *   enter       confirm the highlight, or submit the checked options
- *   n           open the note editor for the highlighted option
+ *   n           open the note editor (single-select: enter answers with the
+ *               highlighted option; multi-select: enter keeps the note for submit)
  *   tab / →     next question      shift+tab / ←   previous question
  *   esc         decline the questionnaire
  *
@@ -39,22 +47,20 @@
  */
 
 import {
-	consumePasteChunk,
-	isBackspaceKey,
 	isCharKey,
-	isEnterKey,
 	isEscapeKey,
 	isLeftKey,
-	isPrintable,
 	isRightKey,
 	isShiftTabKey,
 	isTabKey,
-	removeLastCharacter,
 } from "@hank-warren/pi-permission-selector/keys.ts";
 import { OptionSelector, type SelectorOption } from "@hank-warren/pi-permission-selector/selector.ts";
 import {
-	CURSOR_MARKER,
-	decodeKittyPrintable,
+	type AutocompleteProvider,
+	Editor,
+	type EditorTheme,
+	type SelectListTheme,
+	type TUI,
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
@@ -85,30 +91,55 @@ interface DialogOptions {
 	 * component unit-testable without constructing a 14-function theme.
 	 */
 	markdownTheme?: MarkdownTheme;
+	/**
+	 * The host TUI, for the text editors (repaint and terminal height). Tests
+	 * omit it and get a fixed-size stand-in.
+	 */
+	tui?: TUI;
+	/** Editor chrome; hosts pass pi's select-list theme so autocomplete matches the input box. */
+	editorTheme?: EditorTheme;
+	/** Path and `@` completion for the text editors, rooted at the session's cwd. */
+	autocomplete?: AutocompleteProvider;
 }
 
 /** Left/right border plus one space of padding on each side. */
 const CHROME_COLUMNS = 4;
-/** Indent for the custom-answer field, in columns. */
-const FIELD_INDENT = "  ";
 /** Opens the note editor. Tab is taken by question cycling. */
 const NOTE_KEY = "n";
 const isNoteKey = isCharKey(NOTE_KEY);
+/** The selector never opens its own inline note: the dialog intercepts `n` and opens an Editor. */
+const never = () => false;
+
+/** Unstyled select-list theme for hosts (tests) that pass none. */
+const plainSelectList: SelectListTheme = {
+	selectedPrefix: (text) => text,
+	selectedText: (text) => text,
+	description: (text) => text,
+	scrollInfo: (text) => text,
+	noMatch: (text) => text,
+};
+
+/** Enough of a TUI for an Editor outside a terminal. */
+const standInTui = { requestRender() {}, terminal: { rows: 40, columns: 100 } } as unknown as TUI;
+
+/** An open text field: the custom answer, or a note on the highlighted option. */
+interface Field {
+	kind: "answer" | "note";
+	editor: Editor;
+}
 /** Maximum rows the preview pane may occupy before it is clipped. */
 const PREVIEW_MAX_ROWS = 12;
 
 /** Per-question UI state, preserved while cycling between tabs. */
 interface TabState {
 	selector: OptionSelector;
-	customText?: string;
+	field?: Field;
 	/**
-	 * In-progress bracketed paste aimed at the custom-answer field. pi-tui wraps
-	 * pastes in `\x1b[200~ … \x1b[201~` and the markers can span input chunks;
-	 * a paste chunk fails every key predicate, so without this buffer pasting
-	 * into the field was silently dropped (the note editor was unaffected —
-	 * handleCommentKey buffers its own pastes).
+	 * A note kept on a multi-select question until it is submitted (a
+	 * single-select note answers straight away).
 	 */
-	pasteBuffer?: string;
+	note?: string;
+	/** Note carried into the custom-answer field from the option list. */
 	pendingNotes?: string;
 	/**
 	 * Labels checked alongside the sentinel row on a multi-select question, held
@@ -120,8 +151,18 @@ interface TabState {
 }
 
 export class QuestionnaireDialog {
-	/** Focusable — set by the TUI when focus changes. Drives CURSOR_MARKER. */
-	focused = false;
+	private isFocused = false;
+
+	/** Focusable — set by the TUI when focus changes; passed on to an open editor (cursor, IME). */
+	get focused(): boolean {
+		return this.isFocused;
+	}
+
+	set focused(value: boolean) {
+		this.isFocused = value;
+		const field = this.tabs[this.session.questionIndex]?.field;
+		if (field) field.editor.focused = value;
+	}
 
 	private readonly opts: DialogOptions;
 	private readonly tabs: TabState[] = [];
@@ -162,41 +203,111 @@ export class QuestionnaireDialog {
 		return new OptionSelector({
 			options,
 			theme: this.opts.theme,
-			// `n` instead of Tab; Tab must stay free for question cycling. Tab is
-			// left unconsumed by the selector so this dialog can intercept it.
-			commentTrigger: isNoteKey,
+			// The selector only advertises the note key; the dialog intercepts `n`
+			// and opens an Editor instead of the selector's one-line note. Tab is
+			// left unconsumed so this dialog can cycle questions with it.
+			commentTrigger: never,
 			commentKeyHint: NOTE_KEY,
 			multiSelect,
-			onSubmit: (checked, comment) => {
-				session.goTo(index);
-				const labels = checked.filter((o) => !session.isCustomRow(o.value)).map((o) => o.label);
-				if (checked.some((o) => session.isCustomRow(o.value))) {
-					// Free-text mode with the other ticks held; Esc restores them.
-					this.tabs[index].pendingNotes = comment;
-					this.tabs[index].pendingSelected = labels;
-					this.tabs[index].customText = "";
-					this.repaint();
-					return;
-				}
-				session.recordMultiAnswer(labels, { notes: comment });
-				this.afterAnswer();
-			},
-			onSelect: (option, comment) => {
-				session.goTo(index);
-				if (session.isCustomRow(option.value)) {
-					// Enter free-text mode. A note typed on the sentinel row is
-					// carried across so it is not silently lost.
-					this.tabs[index].pendingNotes = comment;
-					this.tabs[index].customText = "";
-					this.repaint();
-					return;
-				}
-				session.recordAnswer(option.value, { notes: comment });
-				this.afterAnswer();
-			},
+			onSubmit: (checked) => this.submitChecked(index, checked),
+			onSelect: (option) => this.select(index, option, this.tabs[index].note),
 			onCancel: () => this.finish(session.cancelledResult()),
 			requestRender: () => this.repaint(),
 		});
+	}
+
+	/** A single-select pick, with the note typed for it, if any. */
+	private select(index: number, option: SelectorOption, note?: string): void {
+		const session = this.session;
+		session.goTo(index);
+		const tab = this.tabs[index];
+		if (session.isCustomRow(option.value)) {
+			// Enter free-text mode. A note typed on the sentinel row is carried
+			// across so it is not silently lost.
+			tab.pendingNotes = note;
+			this.openField(tab, "answer");
+			return;
+		}
+		session.recordAnswer(option.value, { notes: note });
+		tab.note = undefined;
+		this.afterAnswer();
+	}
+
+	/** A multi-select submit: the checked rows, plus the note kept on this question. */
+	private submitChecked(index: number, checked: SelectorOption[]): void {
+		const session = this.session;
+		session.goTo(index);
+		const tab = this.tabs[index];
+		const labels = checked.filter((o) => !session.isCustomRow(o.value)).map((o) => o.label);
+		if (checked.some((o) => session.isCustomRow(o.value))) {
+			// Free-text mode with the other ticks held; Esc restores them.
+			tab.pendingNotes = tab.note;
+			tab.pendingSelected = labels;
+			this.openField(tab, "answer");
+			return;
+		}
+		session.recordMultiAnswer(labels, { notes: tab.note });
+		tab.note = undefined;
+		this.afterAnswer();
+	}
+
+	private openField(tab: TabState, kind: Field["kind"], text = ""): void {
+		const editor = new Editor(this.opts.tui ?? standInTui, this.opts.editorTheme ?? { borderColor: (t) => this.style("dim", t), selectList: plainSelectList });
+		if (this.opts.autocomplete) editor.setAutocompleteProvider(this.opts.autocomplete);
+		if (text) editor.setText(text);
+		editor.focused = this.isFocused;
+		editor.onSubmit = (value) => this.commitField(tab, kind, value);
+		tab.field = { kind, editor };
+		this.repaint();
+	}
+
+	private closeField(tab: TabState): void {
+		tab.field = undefined;
+		tab.pendingNotes = undefined;
+		tab.pendingSelected = undefined;
+		this.repaint();
+	}
+
+	/** Enter in an open field. */
+	private commitField(tab: TabState, kind: Field["kind"], value: string): void {
+		const text = value.trim();
+		const index = this.session.questionIndex;
+		if (kind === "note") {
+			tab.field = undefined;
+			tab.note = text || undefined;
+			// Single-select keeps the one-step "note, then enter answers" flow;
+			// multi-select keeps the note until the checked rows are submitted.
+			const selected = tab.selector.getSelected();
+			if (!this.session.isMultiSelect() && selected) {
+				this.select(index, selected, tab.note);
+				return;
+			}
+			this.repaint();
+			return;
+		}
+		if (text.length === 0) {
+			// Empty custom answers are not submittable; keep the field open.
+			tab.field?.editor.setText("");
+			this.repaint();
+			return;
+		}
+		if (tab.pendingSelected !== undefined) {
+			// Append, never replace: the ticks the user left standing are part of
+			// the answer, and the typed value goes last.
+			this.session.recordMultiAnswer([...tab.pendingSelected, text], { custom: true, notes: tab.pendingNotes });
+		} else {
+			this.session.recordAnswer(text, { custom: true, notes: tab.pendingNotes });
+		}
+		tab.note = undefined;
+		tab.field = undefined;
+		tab.pendingNotes = undefined;
+		tab.pendingSelected = undefined;
+		this.afterAnswer();
+	}
+
+	/** Settle with an answer that came from outside the terminal (see remote.ts). */
+	settle(result: QuestionnaireResult): void {
+		this.finish(result);
 	}
 
 	/** Submit when everything is answered, else jump to the next gap. */
@@ -222,16 +333,19 @@ export class QuestionnaireDialog {
 
 	/** True while the free-text custom-answer editor is open. */
 	isTypingCustom(): boolean {
-		return this.tab?.customText !== undefined;
+		return this.tab?.field?.kind === "answer";
 	}
 
-	/** True while any text-entry mode owns the keyboard. */
+	/** True while any text field owns the keyboard. */
 	private isTyping(): boolean {
-		return this.isTypingCustom() || this.tab.selector.isCommenting();
+		return this.tab.field !== undefined;
 	}
 
 	invalidate(): void {
-		for (const tab of this.tabs) tab.selector.invalidate();
+		for (const tab of this.tabs) {
+			tab.selector.invalidate();
+			tab.field?.editor.invalidate();
+		}
 	}
 
 	private style(role: string, text: string): string {
@@ -261,31 +375,36 @@ export class QuestionnaireDialog {
 		lines.push("");
 
 		const tab = this.tab;
-		if (tab.customText !== undefined) {
-			// Wrap the typed answer. Without this a long answer ran past the right
-			// border and off the screen forever, because an input field renders as
-			// one line unless something breaks it up.
-			const avail = Math.max(1, inner - FIELD_INDENT.length - 1); // -1 reserves the caret cell
-			const wrapped = wrapTextWithAnsi(tab.customText, avail);
-			// CURSOR_MARKER is a zero-width APC sequence: the TUI strips it and
-			// parks the hardware cursor there, so the caret lands in the field
-			// instead of at the bottom of the screen.
-			const caret = `${this.focused ? CURSOR_MARKER : ""}▌`;
-			for (let i = 0; i < wrapped.length; i++) {
-				const last = i === wrapped.length - 1;
-				lines.push(`${FIELD_INDENT}${wrapped[i]}${last ? caret : ""}`);
-			}
-			lines.push("");
-			lines.push(this.style("dim", "  enter submit · esc back to options"));
+		if (tab.field?.kind === "answer") {
+			// The Editor wraps, scrolls and places the hardware cursor itself.
+			lines.push(...tab.field.editor.render(inner));
+			lines.push(...this.hint("enter submit · shift+enter new line · tab or @ paths · esc back to options", inner));
+			return lines;
+		}
+		if (tab.field?.kind === "note") {
+			const option = tab.selector.getSelected();
+			const label = this.session.isMultiSelect() ? "Note for this question" : `Note on ${option?.label ?? "this option"}`;
+			lines.push(this.style("accent", label));
+			lines.push(...tab.field.editor.render(inner));
+			const enter = this.session.isMultiSelect() ? "enter keep note" : "enter answer with note";
+			lines.push(...this.hint(`${enter} · shift+enter new line · tab or @ paths · esc discard`, inner));
 			return lines;
 		}
 
 		lines.push(...tab.selector.render(inner));
+		if (tab.note) {
+			for (const row of wrapTextWithAnsi(`note: ${tab.note}`, Math.max(1, inner - 2))) lines.push(this.style("dim", `  ${row}`));
+		}
 		lines.push(...this.previewLines(inner));
 		if (session.total > 1 && !tab.selector.isCommenting()) {
 			lines.push(this.style("dim", "  tab next · shift+tab prev question"));
 		}
 		return lines;
+	}
+
+	/** A dim key hint, wrapped so a narrow pane never truncates it. */
+	private hint(text: string, inner: number): string[] {
+		return wrapTextWithAnsi(text, Math.max(1, inner - 2)).map((row) => this.style("dim", `  ${row}`));
 	}
 
 	/** Preview markdown for the highlighted row, if it carries any. */
@@ -378,78 +497,25 @@ export class QuestionnaireDialog {
 			}
 		}
 
-		if (tab.customText === undefined) {
+		const field = tab.field;
+		if (!field) {
+			if (isNoteKey(keyData)) {
+				this.openField(tab, "note", tab.note ?? "");
+				return;
+			}
 			tab.selector.handleInput(keyData);
 			return;
 		}
 
-		// Free-text mode. Every check below MUST use a shared predicate — see
-		// rule 1. Esc unwinds to the option list rather than cancelling the
-		// dialog: one Esc never discards more than one layer.
-		//
-		// Bracketed pastes come first: a paste chunk contains ESC, so it would
-		// otherwise fall through every predicate into the inert branch and vanish.
-		const paste = consumePasteChunk(tab.pasteBuffer, keyData);
-		if (paste !== undefined) {
-			tab.pasteBuffer = paste.buffer;
-			if (paste.text !== undefined) {
-				tab.customText += paste.text;
-				this.repaint();
-			}
-			// Ordinary input after the end marker (e.g. a trailing Enter) goes back
-			// through normal key handling.
-			if (paste.rest) this.handleInput(paste.rest);
+		// A field is open. Esc unwinds one layer: it closes autocomplete first,
+		// then the field (back to the option list, every tick intact) — never
+		// the whole dialog. Everything else is the Editor's, which handles
+		// pastes, multi-line input, motion and completion like pi's input box.
+		if (isEscapeKey(keyData) && !field.editor.isShowingAutocomplete()) {
+			this.closeField(tab);
 			return;
 		}
-		if (isEscapeKey(keyData)) {
-			// Back to the option list. The selector still holds every tick, so a
-			// multi-select question is exactly as the user left it.
-			tab.customText = undefined;
-			tab.pasteBuffer = undefined;
-			tab.pendingNotes = undefined;
-			tab.pendingSelected = undefined;
-			this.repaint();
-			return;
-		}
-		if (isEnterKey(keyData)) {
-			const text = tab.customText.trim();
-			if (text.length === 0) return; // Empty custom answers are not submittable.
-			if (tab.pendingSelected !== undefined) {
-				// Append, never replace: the ticks the user left standing are part of
-				// the answer, and the typed value goes last.
-				this.session.recordMultiAnswer([...tab.pendingSelected, text], {
-					custom: true,
-					notes: tab.pendingNotes,
-				});
-			} else {
-				this.session.recordAnswer(text, { custom: true, notes: tab.pendingNotes });
-			}
-			tab.customText = undefined;
-			tab.pasteBuffer = undefined;
-			tab.pendingNotes = undefined;
-			tab.pendingSelected = undefined;
-			this.afterAnswer();
-			return;
-		}
-		if (isBackspaceKey(keyData)) {
-			// Code-point aware: a UTF-16 slice would split a surrogate pair and
-			// leave a lone surrogate in the answer that reaches the model.
-			tab.customText = removeLastCharacter(tab.customText);
-			this.repaint();
-			return;
-		}
-		if (isPrintable(keyData)) {
-			tab.customText += keyData;
-			this.repaint();
-			return;
-		}
-		// Kitty/modifyOtherKeys terminals encode plain printables as CSI-u.
-		const decoded = decodeKittyPrintable(keyData);
-		if (decoded !== undefined && isPrintable(decoded)) {
-			tab.customText += decoded;
-			this.repaint();
-		}
-		// Anything else (arrows, unhandled chords) is inert — never inserted
-		// into the field as literal escape-sequence garbage.
+		field.editor.handleInput(keyData);
+		this.repaint();
 	}
 }

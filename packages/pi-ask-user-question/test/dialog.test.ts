@@ -147,6 +147,24 @@ test("render switches to the free-text prompt after choosing the sentinel", () =
 	h.dialog.handleInput("3");
 	h.type("Duck");
 	const out = h.dialog.render(80).join("\n");
-	assert.match(out, /Duck▌/);
+	assert.match(out, /Duck/);
 	assert.match(out, /esc back to options/);
+});
+
+test("esc in the note editor discards the note and keeps the question open", () => {
+	const h = harness();
+	h.dialog.handleInput("n");
+	h.type("never mind");
+	h.dialog.handleInput("\x1b");
+	assert.equal(h.results.length, 0);
+	h.dialog.handleInput("1");
+	assert.equal(h.results[0].answers[0].notes, undefined);
+});
+
+test("a note can span lines", () => {
+	const h = harness();
+	h.dialog.handleInput("n");
+	h.dialog.handleInput("\x1b[200~first\nsecond\x1b[201~");
+	h.dialog.handleInput("\r");
+	assert.equal(h.results[0].answers[0].notes, "first\nsecond");
 });
