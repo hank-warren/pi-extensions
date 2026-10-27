@@ -214,7 +214,7 @@ test("SessionWorktreeTracker resolves PRs, caches lookups, hides terminal PRs, a
 			}
 			assert.equal(command, "gh");
 			ghCalls++;
-			return { stdout: JSON.stringify({ number: 7, state: prState }), stderr: "", code: 0, killed: false };
+			return { stdout: JSON.stringify({ number: 7, state: prState, url: "https://github.com/hank-warren/pi-extensions/pull/7" }), stderr: "", code: 0, killed: false };
 		},
 	});
 
@@ -228,6 +228,7 @@ test("SessionWorktreeTracker resolves PRs, caches lookups, hides terminal PRs, a
 			behind: 0,
 			pr: 7,
 			prState: "OPEN",
+			prUrl: "https://github.com/hank-warren/pi-extensions/pull/7",
 		},
 	]);
 	assert.equal(ghCalls, 1);
@@ -245,6 +246,7 @@ test("SessionWorktreeTracker resolves PRs, caches lookups, hides terminal PRs, a
 		behind: 2,
 		pr: 7,
 		prState: "OPEN",
+		prUrl: "https://github.com/hank-warren/pi-extensions/pull/7",
 	});
 
 	now += PR_TTL_MS + 1;

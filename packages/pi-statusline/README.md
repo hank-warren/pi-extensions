@@ -11,7 +11,7 @@ gpt-5.6-sol | pi-extensions:main* ⇣1 | 40k/1.0m |  97·54  80
 ## What it shows
 
 - **Line 1** — active model ID, optionally its thinking level and provider, current directory basename and Git branch, current context usage/window, subscription usage headroom (see below), and any [custom items](#custom-items) you configure. A yellow `*` marks a dirty checkout and `⇣N` shows how many commits it is behind its locally known upstream ref. Unknown context usage is rendered as `?/<window>` until Pi can provide an estimate. Exceptional prompt-cache hits trigger the celebration described below.
-- **Worktree lines** — when the session works in or sends tool calls into linked worktrees, one line shows the same branch/dirty/behind state for each worktree plus its associated PR number.
+- **Worktree lines** — when the session works in or sends tool calls into linked worktrees, one line shows the same branch/dirty/behind state for each worktree plus its associated PR number, underlined and clickable when the terminal supports hyperlinks.
 - **Final line** — the full Pi session ID.
 
 Colors come from a selectable [theme](#themes), with context warning thresholds. Every element can be turned off from [`/statusline`](#statusline).
@@ -376,6 +376,8 @@ Output and reasoning tokens are excluded because they are not prompt-cache candi
 - Git state refreshes after each turn; branches without a PR are rechecked every five seconds; existing PR metadata is cached for five minutes.
 
 PR lookups use the `gh` CLI when available and degrade gracefully without it.
+
+When Pi detects OSC 8 hyperlink support (Herdr, Kitty, Ghostty, WezTerm, iTerm2, and others; override with `PI_HYPERLINKS` or the `terminal.hyperlinks` setting), the PR number is underlined and links to the pull request, so Ctrl/Cmd+click opens it. Without hyperlink support it renders as plain colored text.
 
 ## Fullscreen TUI mode
 
