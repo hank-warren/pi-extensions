@@ -5,6 +5,8 @@ import type { ExecResult } from "@earendil-works/pi-coding-agent";
 
 export const PR_TTL_MS = 5 * 60_000;
 export const PR_ABSENT_TTL_MS = 5_000;
+// The URL is embedded in an OSC 8 sequence, so control characters must never reach it.
+const SAFE_URL = /^https?:\/\/[^\s\x00-\x1f\x7f]+$/;
 
 export interface GitRepositoryStatus {
 	branch: string;
@@ -17,6 +19,7 @@ export interface SessionWorktree extends GitRepositoryStatus {
 	repo: string;
 	pr?: number;
 	prState?: string;
+	prUrl?: string;
 }
 
 interface CachedWorktree extends SessionWorktree {
@@ -242,7 +245,8 @@ function sameDisplay(a: CachedWorktree | undefined, b: CachedWorktree): boolean 
 			a.dirty === b.dirty &&
 			a.behind === b.behind &&
 			a.pr === b.pr &&
-			a.prState === b.prState,
+			a.prState === b.prState &&
+			a.prUrl === b.prUrl,
 	);
 }
 
@@ -350,6 +354,7 @@ export class SessionWorktreeTracker {
 			behind: status?.behind ?? (branchChanged ? 0 : (previous?.behind ?? 0)),
 			pr: branchChanged ? undefined : previous?.pr,
 			prState: branchChanged ? undefined : previous?.prState,
+			prUrl: branchChanged ? undefined : previous?.prUrl,
 			prCheckedAt: branchChanged ? 0 : (previous?.prCheckedAt ?? 0),
 		};
 		if (!sameDisplay(previous, next)) {
@@ -361,7 +366,7 @@ export class SessionWorktreeTracker {
 		const ttl = next.pr === undefined ? PR_ABSENT_TTL_MS : PR_TTL_MS;
 		if (now - next.prCheckedAt < ttl) return;
 
-		const result = await this.host.exec("gh", ["pr", "view", "--json", "number,state"], {
+		const result = await this.host.exec("gh", ["pr", "view", "--json", "number,state,url"], {
 			cwd: path,
 			timeout: 8_000,
 			signal: this.abortController.signal,
@@ -370,9 +375,10 @@ export class SessionWorktreeTracker {
 
 		if (result.code === 0) {
 			try {
-				const value = JSON.parse(result.stdout) as { number?: unknown; state?: unknown };
+				const value = JSON.parse(result.stdout) as { number?: unknown; state?: unknown; url?: unknown };
 				if (typeof value.number === "number") next = { ...next, pr: value.number };
 				if (typeof value.state === "string") next = { ...next, prState: value.state };
+				if (typeof value.url === "string" && SAFE_URL.test(value.url)) next = { ...next, prUrl: value.url };
 			} catch {
 				// Keep the last known PR when gh returns malformed output.
 			}

@@ -197,6 +197,36 @@ test("renderStatusline inserts touched worktrees and pull requests before the se
 	);
 });
 
+test("renderStatusline links PR numbers with underlined OSC 8 hyperlinks only when the terminal supports them", () => {
+	const url = "https://github.com/hank-warren/pi-extensions/pull/7";
+	const data: StatuslineData = {
+		model: "gpt-5.6-sol",
+		cwd: "pi-extensions",
+		cwdGit: null,
+		contextTokens: 40_000,
+		contextWindow: 1_000_000,
+		worktrees: [
+			{ path: "/wt", repo: "pi-extensions", branch: "feat/x", dirty: false, behind: 0, pr: 7, prState: "OPEN", prUrl: url },
+		],
+		sessionId: "session",
+	};
+
+	const linked = renderStatusline({ ...data, hyperlinks: true }, 160)[1];
+	assert.ok(
+		linked.includes(`\x1b]8;;${url}\x1b\\\x1b[38;2;0;175;80m\x1b[4m#7\x1b[0m\x1b]8;;\x1b\\`),
+		"the underlined PR number is wrapped in an OSC 8 link to the PR",
+	);
+	assert.equal(visibleWidth(linked), visibleWidth(renderStatusline(data, 160)[1]));
+
+	for (const plain of [renderStatusline(data, 160)[1], renderStatusline({ ...data, hyperlinks: false }, 160)[1]]) {
+		assert.ok(!plain.includes("\x1b]8;"), "no OSC 8 sequence without hyperlink support");
+		assert.ok(!plain.includes("\x1b[4m"), "no underline when the number is not clickable");
+	}
+
+	const { prUrl: _prUrl, ...noUrl } = data.worktrees[0];
+	assert.ok(!renderStatusline({ ...data, worktrees: [noUrl], hyperlinks: true }, 160)[1].includes("\x1b]8;"));
+});
+
 test("renderStatusline marks unknown context usage and respects narrow widths", () => {
 	for (const width of [0, 1, 8, 20]) {
 		const lines = renderStatusline(

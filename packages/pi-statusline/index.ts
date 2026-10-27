@@ -6,7 +6,7 @@ import {
 	getSelectListTheme,
 	getSettingsListTheme,
 } from "@earendil-works/pi-coding-agent";
-import { SettingsList, truncateToWidth } from "@earendil-works/pi-tui";
+import { getCapabilities, hyperlink, SettingsList, truncateToWidth } from "@earendil-works/pi-tui";
 import {
 	CacheCelebrationController,
 	type CacheCelebrationSnapshot,
@@ -63,9 +63,12 @@ export interface StatuslineData {
 	usage?: UsageSnapshot;
 	/** Rendered output of each enabled custom item, in configuration order. */
 	customValues?: string[];
+	/** Whether the terminal renders OSC 8 hyperlinks; PR numbers link to their PR when true. */
+	hyperlinks?: boolean;
 }
 
 const RESET = "\x1b[0m";
+const UNDERLINE = "\x1b[4m";
 const DEFAULT_PALETTE = STATUSLINE_THEMES.default;
 
 function styled(style: string, text: string): string {
@@ -151,6 +154,7 @@ function renderWorktreeLine(
 	worktrees: SessionWorktree[],
 	settings: StatuslineSettings,
 	palette: StatuslinePalette,
+	hyperlinks: boolean,
 ): string {
 	const separator = styled(palette.dim, " | ");
 	const parts = worktrees.map((worktree) => {
@@ -165,7 +169,12 @@ function renderWorktreeLine(
 						: state === "CLOSED"
 							? palette.danger
 							: palette.dim;
-			part += ` ${styled(color, `#${worktree.pr}`)}`;
+			const label = `#${worktree.pr}`;
+			part += " ";
+			part +=
+				hyperlinks && worktree.prUrl
+					? hyperlink(styled(`${color}${UNDERLINE}`, label), worktree.prUrl)
+					: styled(color, label);
 		}
 		return part;
 	});
@@ -238,7 +247,8 @@ export function renderStatusline(
 		);
 	}
 	if (showWorktreeLine) {
-		lines.push(truncateToWidth(renderWorktreeLine(data.worktrees, settings, palette), width, "…"));
+		const worktreeLine = renderWorktreeLine(data.worktrees, settings, palette, data.hyperlinks ?? false);
+		lines.push(truncateToWidth(worktreeLine, width, "…"));
 	}
 	if (settings.showSessionId) lines.push(truncateToWidth(styled(palette.dim, data.sessionId), width));
 	return lines;
@@ -603,6 +613,7 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 								cacheCelebration: celebrationPreview.snapshot() ?? cacheCelebration.snapshot(),
 								usage: usageTracker.snapshot(),
 								customValues: customItems.values(),
+								hyperlinks: getCapabilities().hyperlinks,
 							},
 							width,
 							settings,

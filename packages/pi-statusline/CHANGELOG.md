@@ -1,5 +1,11 @@
 # @hank-warren/pi-statusline
 
+## 0.11.0
+
+### Minor Changes
+
+- Worktree PR numbers are underlined and link to their pull request (Ctrl/Cmd+click) when Pi detects OSC 8 hyperlink support, e.g. in Herdr. Without hyperlink support they render as before.
+
 ## 0.10.0
 
 ### Minor Changes
