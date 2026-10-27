@@ -124,6 +124,7 @@ function cancellableHarness() {
 	registerTool(pi as never);
 
 	let opened = 0;
+	let component: unknown;
 	const ctx = {
 		hasUI: true,
 		ui: {
@@ -132,7 +133,7 @@ function cancellableHarness() {
 				// Drive the real dialog: `done` is what the tool awaits, and the
 				// abort path has to reach it through the component itself.
 				return new Promise((resolve) => {
-					(factory as (...args: unknown[]) => unknown)(
+					component = (factory as (...args: unknown[]) => unknown)(
 						{ terminal: { rows: 24 }, requestRender() {} },
 						{ fg: (_c: string, text: string) => text, bold: (text: string) => text },
 						{ matches: () => false, getKeys: () => [] },
@@ -142,7 +143,7 @@ function cancellableHarness() {
 			},
 		},
 	};
-	return { execute: execute as Execute, ctx, emitted, pi, get opened() { return opened; } };
+	return { execute: execute as Execute, ctx, emitted, pi, get opened() { return opened; }, get dialog() { return component as { handleInput(k: string): void }; } };
 }
 
 test("an already-aborted call declines without ever opening the dialog", async () => {
@@ -272,3 +273,31 @@ test("a remote decline cancels like Esc", async () => {
 function answer(h: ReturnType<typeof cancellableHarness>, payload: unknown): void {
 	h.pi.events.emit("hank:ask-user:answer", payload);
 }
+
+test("a listener that answers synchronously from the prompt event is not dropped", async () => {
+	const h = cancellableHarness();
+	h.pi.events.on("hank:ask-user:prompt", (p: unknown) => {
+		h.pi.events.emit("hank:ask-user:answer", { id: (p as { id: string }).id, answers: [{ choice: "Postgres" }] });
+	});
+	const result = await h.execute("call", params, undefined, undefined, h.ctx);
+	assert.equal(result.details.cancelled, false);
+	assert.equal(result.details.answers[0].answer, "Postgres");
+});
+
+test("a remote decline keeps answers already given in the terminal, like Esc", async () => {
+	const two: AskUserParams = {
+		questions: [
+			params.questions[0],
+			{ question: "Which cache?", header: "Cache", options: [{ label: "Redis", description: "" }, { label: "None", description: "" }] },
+		],
+	};
+	const h = cancellableHarness();
+	const pending = h.execute("call", two, undefined, undefined, h.ctx);
+	await Promise.resolve();
+	h.dialog.handleInput("2");
+	const prompt = h.emitted.find((e) => e.channel === "hank:ask-user:prompt")?.payload as { id: string };
+	answer(h, { id: prompt.id, cancelled: true });
+	const result = await pending;
+	assert.equal(result.details.cancelled, true);
+	assert.deepEqual(result.details.answers.map((a) => a.answer), ["SQLite"]);
+});

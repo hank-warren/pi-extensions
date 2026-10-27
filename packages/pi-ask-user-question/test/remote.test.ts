@@ -75,6 +75,7 @@ test("only an open questionnaire is answered, once", () => {
 			settled.push(result);
 			return true;
 		},
+		cancel: () => false,
 	});
 	const answer = { id: "q1", answers: [{ choice: "SQLite" }, { choice: "pi-stats" }] };
 	assert.equal(remote.answer({ ...answer, id: "q2" }), false);

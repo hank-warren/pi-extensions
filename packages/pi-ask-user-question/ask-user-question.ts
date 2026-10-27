@@ -155,14 +155,21 @@ export function registerTool(pi: ExtensionAPI): void {
 			const cancel = () => dialog?.cancel();
 			signal?.addEventListener("abort", cancel, { once: true });
 			const id = randomUUID();
+			// A remote reply can arrive before the dialog exists (a listener that
+			// answers synchronously from the prompt event): hold it until mount.
+			let early: ((d: QuestionnaireDialog) => void) | undefined;
+			const apply = (act: (d: QuestionnaireDialog) => void): boolean => {
+				if (settled || early) return false;
+				answeredRemotely = true;
+				if (dialog) act(dialog);
+				else early = act;
+				return true;
+			};
 			const end = remote.begin(id, {
 				params: typed,
-				settle: (result) => {
-					if (settled || !dialog) return false;
-					answeredRemotely = true;
-					dialog.settle(result);
-					return true;
-				},
+				settle: (result) => apply((d) => d.settle(result)),
+				// Through the dialog, so answers already given in the terminal are kept, as with Esc.
+				cancel: () => apply((d) => d.cancel()),
 			});
 			emitPrompt(pi, id, typed);
 			emitBlocked(pi, true, id);
@@ -197,6 +204,10 @@ export function registerTool(pi: ExtensionAPI): void {
 							autocomplete: new CombinedAutocompleteProvider([], ctx.cwd, fdPath()),
 						});
 						if (signal?.aborted) queueMicrotask(() => dialog?.cancel());
+						else if (early) {
+							const act = early;
+							queueMicrotask(() => dialog && act(dialog));
+						}
 						return dialog;
 					},
 				);

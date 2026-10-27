@@ -23,6 +23,8 @@ interface OpenQuestionnaire {
 	params: AskUserParams;
 	/** Settles the dialog; false when it had already settled. */
 	settle(result: QuestionnaireResult): boolean;
+	/** Declines through the dialog, keeping answers already given there; false when already settled. */
+	cancel(): boolean;
 }
 
 export class RemoteQuestionnaires {
@@ -47,16 +49,17 @@ export class RemoteQuestionnaires {
 		if (!isRecord(data) || typeof data.id !== "string") return false;
 		const entry = this.open.get(data.id);
 		if (!entry) return false;
-		const result = data.cancelled === true ? cancelled(entry.params) : resultFrom(entry.params, data as unknown as AskUserRemoteAnswer);
+		if (data.cancelled === true) {
+			if (!entry.cancel()) return false;
+			this.open.delete(data.id);
+			return true;
+		}
+		const result = resultFrom(entry.params, data as unknown as AskUserRemoteAnswer);
 		if (!result) return false;
 		if (!entry.settle(result)) return false;
 		this.open.delete(data.id);
 		return true;
 	}
-}
-
-function cancelled(params: AskUserParams): QuestionnaireResult {
-	return new QuestionnaireSession(params).cancelledResult();
 }
 
 /** The result a terminal user would produce with these answers, or undefined when they don't fit. */
