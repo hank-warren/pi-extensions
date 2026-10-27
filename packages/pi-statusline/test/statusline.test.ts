@@ -21,7 +21,7 @@ test("renderStatusline renders the requested two-line layout in the Claude HUD p
 		{
 			model: "gpt-5.6-sol",
 			cwd: "pi-extensions",
-			cwdGit: { branch: "main", dirty: false, behind: 0 },
+			cwdGit: { branch: "main", dirty: false, ahead: 0, behind: 0 },
 			contextTokens: 40_000,
 			contextWindow: 1_000_000,
 			worktrees: [],
@@ -48,7 +48,7 @@ test("renderStatusline appends the neon cache module and animates only its badge
 	const data = {
 		model: "gpt-5.6-sol",
 		cwd: "pi-extensions",
-		cwdGit: { branch: "main", dirty: false, behind: 0 },
+		cwdGit: { branch: "main", dirty: false, ahead: 0, behind: 0 },
 		contextTokens: 40_000,
 		contextWindow: 1_000_000,
 		worktrees: [
@@ -57,6 +57,7 @@ test("renderStatusline appends the neon cache module and animates only its badge
 				repo: "pi-extensions",
 				branch: "feat/cache-wave",
 				dirty: false,
+				ahead: 0,
 				behind: 0,
 				pr: 45,
 				prState: "OPEN" as const,
@@ -99,7 +100,7 @@ test("cache celebration rendering remains ANSI-width safe at narrow widths", () 
 			{
 				model: "model",
 				cwd: "repo",
-				cwdGit: { branch: "main", dirty: false, behind: 0 },
+				cwdGit: { branch: "main", dirty: false, ahead: 0, behind: 0 },
 				contextTokens: 1_000,
 				contextWindow: 10_000,
 				worktrees: [],
@@ -141,7 +142,7 @@ test("renderStatusline uses Claude HUD context warning thresholds", () => {
 			{
 				model: "model",
 				cwd: "repo",
-				cwdGit: { branch: "main", dirty: false, behind: 0 },
+				cwdGit: { branch: "main", dirty: false, ahead: 0, behind: 0 },
 				contextTokens,
 				contextWindow: 1_000_000,
 				worktrees: [],
@@ -158,7 +159,7 @@ test("renderStatusline inserts touched worktrees and pull requests before the se
 		{
 			model: "gpt-5.6-sol",
 			cwd: "pi-extensions",
-			cwdGit: { branch: "main", dirty: true, behind: 1 },
+			cwdGit: { branch: "main", dirty: true, ahead: 0, behind: 1 },
 			contextTokens: 40_000,
 			contextWindow: 1_000_000,
 			worktrees: [
@@ -167,6 +168,7 @@ test("renderStatusline inserts touched worktrees and pull requests before the se
 					repo: "pi-extensions",
 					branch: "feature/statusline",
 					dirty: true,
+					ahead: 0,
 					behind: 2,
 					pr: 7,
 					prState: "OPEN",
@@ -176,6 +178,7 @@ test("renderStatusline inserts touched worktrees and pull requests before the se
 					repo: "infrastructure",
 					branch: "fix/alerts",
 					dirty: false,
+					ahead: 0,
 					behind: 0,
 					pr: 168,
 					prState: "OPEN",
@@ -197,6 +200,48 @@ test("renderStatusline inserts touched worktrees and pull requests before the se
 	);
 });
 
+test("renderStatusline shows ahead/behind together and CI state only for open PRs", () => {
+	const worktree = (pr: number, prState: string, prChecks?: "pending" | "success" | "failure") => ({
+		path: `/wt/${pr}`,
+		repo: "r",
+		branch: `b${pr}`,
+		dirty: false,
+		ahead: 0,
+		behind: 0,
+		pr,
+		prState,
+		...(prChecks ? { prChecks } : {}),
+	});
+	const lines = renderStatusline(
+		{
+			model: "m",
+			cwd: "pi-extensions",
+			cwdGit: { branch: "main", dirty: true, ahead: 3, behind: 1 },
+			contextTokens: 1,
+			contextWindow: 100,
+			worktrees: [
+				{ ...worktree(1, "OPEN", "success"), ahead: 2 },
+				worktree(2, "OPEN", "failure"),
+				worktree(3, "OPEN", "pending"),
+				worktree(4, "OPEN"),
+				worktree(5, "DRAFT", "failure"),
+			],
+			sessionId: "s",
+		},
+		200,
+	);
+
+	assert.deepEqual(lines.map(stripAnsi).slice(0, 2), [
+		"m | pi-extensions:main* ⇡3⇣1 | 1/100",
+		"⑂ r:b1 ⇡2 #1 ✓ | r:b2 #2 ✗ | r:b3 #3 ● | r:b4 #4 | r:b5 #5",
+	]);
+	const palette = STATUSLINE_THEMES.default;
+	assert.ok(lines[0].includes(`${palette.ok}⇡3\x1b[0m${palette.caution}⇣1`));
+	assert.ok(lines[1].includes(`${palette.ok}✓`));
+	assert.ok(lines[1].includes(`${palette.danger}✗`));
+	assert.ok(lines[1].includes(`${palette.caution}●`));
+});
+
 test("renderStatusline links PR numbers with underlined OSC 8 hyperlinks only when the terminal supports them", () => {
 	const url = "https://github.com/hank-warren/pi-extensions/pull/7";
 	const data: StatuslineData = {
@@ -206,7 +251,7 @@ test("renderStatusline links PR numbers with underlined OSC 8 hyperlinks only wh
 		contextTokens: 40_000,
 		contextWindow: 1_000_000,
 		worktrees: [
-			{ path: "/wt", repo: "pi-extensions", branch: "feat/x", dirty: false, behind: 0, pr: 7, prState: "OPEN", prUrl: url },
+			{ path: "/wt", repo: "pi-extensions", branch: "feat/x", dirty: false, ahead: 0, behind: 0, pr: 7, prState: "OPEN", prUrl: url },
 		],
 		sessionId: "session",
 	};
@@ -233,7 +278,7 @@ test("renderStatusline marks unknown context usage and respects narrow widths", 
 			{
 				model: "gpt-5.6-sol",
 				cwd: "pi-extensions",
-				cwdGit: { branch: "feature/a-very-long-main-branch", dirty: true, behind: 123 },
+				cwdGit: { branch: "feature/a-very-long-main-branch", dirty: true, ahead: 0, behind: 123 },
 				contextTokens: null,
 				contextWindow: 1_000_000,
 				worktrees: [
@@ -242,6 +287,7 @@ test("renderStatusline marks unknown context usage and respects narrow widths", 
 						repo: "repository",
 						branch: "feature/a-very-long-branch",
 						dirty: true,
+						ahead: 0,
 						behind: 99,
 						pr: 123,
 						prState: "OPEN",
@@ -276,11 +322,11 @@ const GATED_DATA: StatuslineData = {
 	thinkingLevel: "high",
 	provider: "anthropic-team",
 	cwd: "pi-extensions",
-	cwdGit: { branch: "main", dirty: false, behind: 0 },
+	cwdGit: { branch: "main", dirty: false, ahead: 0, behind: 0 },
 	contextTokens: 40_000,
 	contextWindow: 1_000_000,
 	worktrees: [
-		{ path: "/wt", repo: "infrastructure", branch: "fix/alerts", dirty: false, behind: 0, pr: 9, prState: "OPEN" },
+		{ path: "/wt", repo: "infrastructure", branch: "fix/alerts", dirty: false, ahead: 0, behind: 0, pr: 9, prState: "OPEN" },
 	],
 	sessionId: "session-id",
 	usage: { codex: { weekly: 80 } },

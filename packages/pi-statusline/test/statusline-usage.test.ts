@@ -230,7 +230,7 @@ test("renderUsageSegment drops a codex entry carrying no percents", () => {
 const baseData = {
 	model: "gpt-5.6-sol",
 	cwd: "pi-extensions",
-	cwdGit: { branch: "main", dirty: false, behind: 0 },
+	cwdGit: { branch: "main", dirty: false, ahead: 0, behind: 0 },
 	contextTokens: 40_000,
 	contextWindow: 1_000_000,
 	worktrees: [],

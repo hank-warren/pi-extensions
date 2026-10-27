@@ -136,7 +136,10 @@ function renderRepository(
 	part += styled(palette.dim, ":");
 	part += styled(palette.branch, status.branch);
 	if (status.dirty) part += styled(palette.warn, "*");
-	if (status.behind > 0) part += ` ${styled(palette.caution, `⇣${status.behind}`)}`;
+	let sync = "";
+	if (status.ahead > 0) sync += styled(palette.ok, `⇡${status.ahead}`);
+	if (status.behind > 0) sync += styled(palette.caution, `⇣${status.behind}`);
+	if (sync) part += ` ${sync}`;
 	return part;
 }
 
@@ -175,6 +178,14 @@ function renderWorktreeLine(
 				hyperlinks && worktree.prUrl
 					? hyperlink(styled(`${color}${UNDERLINE}`, label), worktree.prUrl)
 					: styled(color, label);
+			if (state === "OPEN" && worktree.prChecks) {
+				const [mark, markColor] = {
+					success: ["✓", palette.ok],
+					failure: ["✗", palette.danger],
+					pending: ["●", palette.caution],
+				}[worktree.prChecks];
+				part += ` ${styled(markColor, mark)}`;
+			}
 		}
 		return part;
 	});
@@ -336,6 +347,7 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 			if (
 				cwdGit?.branch === next?.branch &&
 				cwdGit?.dirty === next?.dirty &&
+				cwdGit?.ahead === next?.ahead &&
 				cwdGit?.behind === next?.behind
 			) {
 				return;
@@ -369,7 +381,7 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 			cwd: ctx.cwd,
 			model: { id: ctx.model?.id ?? null, provider: ctx.model?.provider ?? null },
 			git: cwdGit
-				? { branch: cwdGit.branch, dirty: cwdGit.dirty, behind: cwdGit.behind }
+				? { branch: cwdGit.branch, dirty: cwdGit.dirty, ahead: cwdGit.ahead, behind: cwdGit.behind }
 				: null,
 			context_window: {
 				used_tokens: tokens,
@@ -415,6 +427,7 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 			onChange: () => requestRender?.(),
 		});
 		tracker = next;
+		if (ctx.mode === "tui") next.start();
 		runInBackground(next.seedFromEntries(ctx.sessionManager.getBranch()));
 		runInBackground(next.includeCurrentWorktree(ctx.cwd));
 	};
