@@ -25,7 +25,7 @@ register a tool named `ask_user_question`.
 | `Space` | Toggle the highlighted option (multi-select only) |
 | `↑` / `↓` | Move the highlight |
 | `Enter` | Confirm the highlighted option, or submit the checked ones |
-| `n` | Attach a note to your choice, then `Enter` to send both |
+| `n` | Write a note: `Enter` answers with the highlighted option and the note (multi-select: keeps the note for the submit) |
 | `Tab` / `→` | Next question |
 | `Shift+Tab` / `←` | Previous question |
 | `Esc` | Decline the questionnaire (or leave note/typed-answer mode) |
@@ -79,6 +79,15 @@ Every question gets an appended **`Type something.`** row for a free-text
 answer. The model is not allowed to author that row itself — reserved labels
 are rejected at runtime.
 
+## Typing answers and notes
+
+The custom answer and notes are typed in pi's own input-box editor, so they
+behave like writing a prompt: `Shift+Enter` for a new line, pastes of any size
+with their line breaks kept, word motion and undo, and `@` or `Tab` path
+completion from the session's working directory — the way to point the model
+at a screenshot or file (`@/tmp/screenshot.png`). `Esc` closes completion
+first, then the field, back to the options.
+
 ## Where the dialog renders
 
 The questionnaire renders **in the editor area**, exactly where `ctx.ui.select`
@@ -115,10 +124,32 @@ Other extensions can observe the questionnaire without touching this one:
 pi.events.on("hank:ask-user:blocked", ({ active }) => {
   // active === true while a human is being asked
 });
-pi.events.on("hank:ask-user:prompt", ({ questions }) => {
+pi.events.on("hank:ask-user:prompt", ({ id, questions }) => {
   // questions[].question / .header / .multiSelect / .options[].label
 });
 ```
+
+### Answering from outside the terminal
+
+An extension in the same pi process (a relay to a phone, say) can answer the
+open questionnaire by the `id` its prompt event carried. The terminal dialog
+stays live, the first answer wins, and the tool returns exactly what the same
+answer typed in the terminal would. One entry per question, in order:
+
+```ts
+pi.events.emit("hank:ask-user:answer", {
+  id,
+  answers: [
+    { choice: "Postgres", notes: "see @docs/db.md" },        // single-select
+    { choices: ["pi-stats", "pi-stash"], text: "pi-agents" }, // multi-select, plus typed text
+  ],
+});
+pi.events.emit("hank:ask-user:answer", { id, cancelled: true }); // decline, like Esc
+```
+
+An answer that does not fit — wrong count, a label that is not an option, both
+a `choice` and `text` on a single-select question — is dropped whole. When the
+dialog closes, `hank:ask-user:blocked` reports `{ active: false, id, remote }`.
 
 Channel names are immutable and payloads are append-only — see
 [`events.ts`](./events.ts) for the full stability policy.

@@ -41,6 +41,7 @@ const params: AskUserParams = {
 function harness() {
 	let execute: Execute | undefined;
 	const emitted: Array<{ channel: string; payload: unknown }> = [];
+	const handlers = new Map<string, Array<(data: unknown) => void>>();
 	const pi = {
 		registerTool(tool: { execute: Execute }) {
 			execute = tool.execute;
@@ -48,6 +49,11 @@ function harness() {
 		events: {
 			emit(channel: string, payload: unknown) {
 				emitted.push({ channel, payload });
+				for (const handler of handlers.get(channel) ?? []) handler(payload);
+			},
+			on(channel: string, handler: (data: unknown) => void) {
+				handlers.set(channel, [...(handlers.get(channel) ?? []), handler]);
+				return () => {};
 			},
 		},
 	};
@@ -99,6 +105,7 @@ test("the blocked event is still cleared once the dialog closes", async () => {
 function cancellableHarness() {
 	let execute: Execute | undefined;
 	const emitted: Array<{ channel: string; payload: unknown }> = [];
+	const handlers = new Map<string, Array<(data: unknown) => void>>();
 	const pi = {
 		registerTool(tool: { execute: Execute }) {
 			execute = tool.execute;
@@ -106,12 +113,18 @@ function cancellableHarness() {
 		events: {
 			emit(channel: string, payload: unknown) {
 				emitted.push({ channel, payload });
+				for (const handler of handlers.get(channel) ?? []) handler(payload);
+			},
+			on(channel: string, handler: (data: unknown) => void) {
+				handlers.set(channel, [...(handlers.get(channel) ?? []), handler]);
+				return () => {};
 			},
 		},
 	};
 	registerTool(pi as never);
 
 	let opened = 0;
+	let component: unknown;
 	const ctx = {
 		hasUI: true,
 		ui: {
@@ -120,7 +133,7 @@ function cancellableHarness() {
 				// Drive the real dialog: `done` is what the tool awaits, and the
 				// abort path has to reach it through the component itself.
 				return new Promise((resolve) => {
-					(factory as (...args: unknown[]) => unknown)(
+					component = (factory as (...args: unknown[]) => unknown)(
 						{ terminal: { rows: 24 }, requestRender() {} },
 						{ fg: (_c: string, text: string) => text, bold: (text: string) => text },
 						{ matches: () => false, getKeys: () => [] },
@@ -130,7 +143,7 @@ function cancellableHarness() {
 			},
 		},
 	};
-	return { execute: execute as Execute, ctx, emitted, get opened() { return opened; } };
+	return { execute: execute as Execute, ctx, emitted, pi, get opened() { return opened; }, get dialog() { return component as { handleInput(k: string): void }; } };
 }
 
 test("an already-aborted call declines without ever opening the dialog", async () => {
@@ -218,4 +231,73 @@ test("outside herdr, no herdr signal is emitted", async () => {
 	assert.equal(h.emitted.filter((e) => e.channel === "herdr:blocked").length, 0);
 	// The package's own event still fires either way.
 	assert.equal(h.emitted.filter((e) => e.channel === "hank:ask-user:blocked").length, 2);
+});
+
+/**
+ * Remote answers: a relay in the same pi process answers the open dialog by the
+ * id its prompt event carried, and the tool returns what a terminal answer would.
+ */
+test("a remote answer settles the open dialog with the terminal's result", async () => {
+	const h = cancellableHarness();
+	const pending = h.execute("call", params, undefined, undefined, h.ctx);
+	await Promise.resolve();
+
+	const prompt = h.emitted.find((e) => e.channel === "hank:ask-user:prompt")?.payload as { id?: string };
+	assert.ok(prompt?.id, "the prompt event names the questionnaire");
+
+	// Wrong labels and unknown ids are dropped, never half-applied.
+	answer(h, { id: prompt.id, answers: [{ choice: "MySQL" }] });
+	answer(h, { id: "someone-else", answers: [{ choice: "SQLite" }] });
+	answer(h, { id: prompt.id, answers: [{ choice: "SQLite", notes: " embedded is fine " }] });
+
+	const result = await pending;
+	assert.equal(result.details.cancelled, false);
+	assert.deepEqual(result.details.answers, [
+		{ questionIndex: 0, question: "Which database?", answer: "SQLite", custom: false, notes: "embedded is fine" },
+	]);
+	const closed = h.emitted.filter((e) => e.channel === "hank:ask-user:blocked").at(-1)?.payload;
+	assert.deepEqual(closed, { active: false, id: prompt.id, remote: true });
+});
+
+test("a remote decline cancels like Esc", async () => {
+	const h = cancellableHarness();
+	const pending = h.execute("call", params, undefined, undefined, h.ctx);
+	await Promise.resolve();
+	const prompt = h.emitted.find((e) => e.channel === "hank:ask-user:prompt")?.payload as { id: string };
+	answer(h, { id: prompt.id, cancelled: true });
+	const result = await pending;
+	assert.equal(result.details.cancelled, true);
+});
+
+/** Deliver a remote answer the way a relay extension would. */
+function answer(h: ReturnType<typeof cancellableHarness>, payload: unknown): void {
+	h.pi.events.emit("hank:ask-user:answer", payload);
+}
+
+test("a listener that answers synchronously from the prompt event is not dropped", async () => {
+	const h = cancellableHarness();
+	h.pi.events.on("hank:ask-user:prompt", (p: unknown) => {
+		h.pi.events.emit("hank:ask-user:answer", { id: (p as { id: string }).id, answers: [{ choice: "Postgres" }] });
+	});
+	const result = await h.execute("call", params, undefined, undefined, h.ctx);
+	assert.equal(result.details.cancelled, false);
+	assert.equal(result.details.answers[0].answer, "Postgres");
+});
+
+test("a remote decline keeps answers already given in the terminal, like Esc", async () => {
+	const two: AskUserParams = {
+		questions: [
+			params.questions[0],
+			{ question: "Which cache?", header: "Cache", options: [{ label: "Redis", description: "" }, { label: "None", description: "" }] },
+		],
+	};
+	const h = cancellableHarness();
+	const pending = h.execute("call", two, undefined, undefined, h.ctx);
+	await Promise.resolve();
+	h.dialog.handleInput("2");
+	const prompt = h.emitted.find((e) => e.channel === "hank:ask-user:prompt")?.payload as { id: string };
+	answer(h, { id: prompt.id, cancelled: true });
+	const result = await pending;
+	assert.equal(result.details.cancelled, true);
+	assert.deepEqual(result.details.answers.map((a) => a.answer), ["SQLite"]);
 });
