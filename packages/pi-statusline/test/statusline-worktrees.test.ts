@@ -439,7 +439,11 @@ test("SessionWorktreeTracker re-checks soon after a commit or push, and slows do
 	assert.equal(github.calls.length, 1);
 	assert.equal(tracker.getWorktrees()[0]?.ahead, 1);
 
+	// `git push -u`: the upstream switches and the remote-tracking ref appears.
 	status = { ahead: 0, head: HEAD_OID, upstream: "origin/feature/statusline" };
+	const pushed = join(fixture.root, "pi-extensions", ".git", "refs", "remotes", "origin", "feature");
+	await mkdir(pushed, { recursive: true });
+	await writeFile(join(pushed, "statusline"), `${HEAD_OID}\n`);
 	now += PR_MIN_INTERVAL_MS - 1;
 	await tracker.refresh();
 	assert.equal(github.calls.length, 1, "local changes still respect the floor");
@@ -844,4 +848,78 @@ test("a rerun or merge from this session is looked at within seconds, not at the
 	const calls = github.calls.length;
 	await tick(now + PR_SETTLED_INTERVAL_MS * 2);
 	assert.equal(github.calls.length, calls, "an answered nudge is not repeated");
+});
+
+test("sessions on different branches of one repository share one lookup per interval", async (t) => {
+	const alpha = await fixtureWorktree("alpha", "feat/alpha");
+	t.after(() => rm(alpha.root, { recursive: true, force: true }));
+	const beta = await fixtureWorktree("beta", "feat/beta", alpha.root);
+	const remotes = join(alpha.root, "pi-extensions", ".git", "refs", "remotes", "origin", "feat");
+	await mkdir(remotes, { recursive: true });
+	await writeFile(join(remotes, "alpha"), `${HEAD_OID}\n`);
+	await writeFile(join(remotes, "beta"), `${HEAD_OID}\n`);
+	const start = 1_000_000;
+	let now = start;
+	const github = fakeGitHub(new Map([["feat/beta", [{ number: 2, state: "OPEN", rollup: "SUCCESS" }]]]));
+	const asked: string[] = [];
+	const tracker = (name: string) =>
+		new SessionWorktreeTracker({
+			worktreeRoot: join(alpha.root, "home", "repos", "worktrees"),
+			home: join(alpha.root, "home"),
+			cacheDir: join(alpha.root, "cache"),
+			now: () => now,
+			exec: async (command, args) => {
+				if (command === "git") {
+					const branch = args[2] === alpha.path ? "feat/alpha" : "feat/beta";
+					return { stdout: gitStatusOutput(branch), stderr: "", code: 0, killed: false };
+				}
+				asked.push(name);
+				return github.respond(args);
+			},
+		});
+	const first = tracker("first");
+	const second = tracker("second");
+	t.after(() => {
+		first.dispose();
+		second.dispose();
+	});
+
+	await first.observeToolInput("read", { path: join(alpha.path, "README.md") });
+	now += PR_POLL_TICK_MS;
+	await second.observeToolInput("read", { path: join(beta.path, "README.md") });
+	assert.deepEqual(github.calls, [["feat/alpha"], ["feat/beta", "feat/alpha"]], "the other session's branch rides along");
+
+	while (now < start + 30 * 60_000) {
+		now += PR_POLL_TICK_MS;
+		await first.pollPullRequests();
+		await second.pollPullRequests();
+	}
+	assert.ok(github.calls.length <= 32, `one lookup per minute for the repository, saw ${github.calls.length} in 30 min`);
+	assert.ok(
+		github.calls.slice(1).every((branches) => branches.includes("feat/alpha") && branches.includes("feat/beta")),
+		"every lookup refreshes both sessions' branches",
+	);
+	assert.equal(asked.filter((name) => name === "second").length, 1, "the settled session never has to ask again");
+	assert.equal(second.getWorktrees()[0]?.pr, 2);
+	assert.equal(first.getWorktrees()[0]?.pr, undefined);
+});
+
+test("a local commit on a reused branch name re-selects from the held answer without a lookup", async (t) => {
+	const fixture = await fixtureWorktree();
+	t.after(() => rm(fixture.root, { recursive: true, force: true }));
+	let now = 1_000_000;
+	let status: Status = { ahead: 0, head: HEAD_OID, upstream: "origin/main" };
+	const github = fakeGitHub(new Map([["feature/statusline", [{ number: 5, state: "MERGED", headRefOid: HEAD_OID }]]]));
+	const tracker = session(fixture, github, { now: () => now, status: () => status });
+	t.after(() => tracker.dispose());
+
+	await tracker.observeToolInput("read", { path: join(fixture.path, "README.md") });
+	assert.deepEqual(tracker.getWorktrees(), [], "the merged PR holds exactly this commit");
+
+	status = { ahead: 1, head: NEXT_OID, upstream: "origin/main" };
+	now += PR_MIN_INTERVAL_MS;
+	await tracker.refresh();
+	assert.equal(github.calls.length, 1, "nothing new to ask GitHub");
+	assert.equal(tracker.getWorktrees()[0]?.branch, "feature/statusline", "new work on the old name is visible again");
+	assert.equal(tracker.getWorktrees()[0]?.pr, undefined);
 });

@@ -38,6 +38,8 @@ export const PR_DORMANT_AFTER_MS = 60 * 60_000;
 export const PR_MIN_INTERVAL_MS = 15_000;
 /** After this session runs a command that changes a PR or starts CI, GitHub gets this long to register it. */
 export const PR_NUDGE_DELAY_MS = 10_000;
+/** Branches per query: this session's own first, then other sessions' in the same repository, most recently tracked first. */
+export const PR_MAX_BRANCHES_PER_QUERY = 40;
 /** A poll lock older than this belongs to a process that died mid-lookup (gh itself times out at 8 s). */
 const PR_LOCK_STALE_MS = 30_000;
 /** Shared answers for branches nobody has asked about in this long are dropped from the cache. */
@@ -90,6 +92,8 @@ interface CachedWorktree extends SessionWorktree {
 	/** When the open PR's current head started reporting running checks. */
 	pendingSince?: number;
 	pendingRef?: string;
+	/** The answer the held PR was selected from, kept so a local commit can re-select without asking GitHub. */
+	candidates?: PullRequestCandidate[];
 }
 
 interface WorktreeMetadata {
@@ -469,9 +473,16 @@ export function failureBackoff(failure: LookupFailure, failures: number): number
 	return Math.min(PR_FAILURE_MAX_INTERVAL_MS, PR_FAILURE_INTERVAL_MS * 2 ** Math.max(0, failures - 1));
 }
 
-/** A push or branch switch changes this; a local commit does not, because GitHub cannot see it yet. */
+/**
+ * A push or branch switch changes this; a local commit does not, because GitHub cannot see it yet.
+ * Built only from ref files, so any process on the host computes the same key for any branch.
+ */
+function branchKey(branch: string, remoteHead: string | undefined): string {
+	return `${branch}\n${remoteHead ?? ""}`;
+}
+
 function pollKey(worktree: CachedWorktree): string {
-	return `${worktree.branch}\n${worktree.remoteHead ?? (worktree.published ? "published" : "")}`;
+	return branchKey(worktree.branch, worktree.remoteHead);
 }
 
 function isPublished(worktree: Pick<CachedWorktree, "branch" | "upstream">, remoteHead: string | undefined): boolean {
@@ -536,6 +547,8 @@ interface SharedBranch {
 	pendingSince?: number;
 	/** `number:headRefOid` of the open PR whose checks have been running since pendingSince. */
 	pendingRef?: string;
+	/** Last time a session tracking this branch asked for it; other sessions' lookups include it until it goes quiet. */
+	trackedAt?: number;
 }
 
 interface SharedRepository {
@@ -581,6 +594,7 @@ function parseSharedRepository(json: unknown): SharedRepository {
 			parsed.pendingSince = entry.pendingSince;
 			parsed.pendingRef = entry.pendingRef;
 		}
+		if (isFiniteNumber(entry.trackedAt)) parsed.trackedAt = entry.trackedAt;
 		repository.branches.set(branch, parsed);
 	}
 	return repository;
@@ -671,14 +685,28 @@ class PullRequestStore {
 	}
 }
 
-function withPullRequest(worktree: CachedWorktree, entry: SharedBranch): CachedWorktree {
-	const pr = selectPullRequest(entry.candidates, worktree);
+/** Picks this worktree's PR from an answer using its current local state; no lookup involved. */
+function withSelection(worktree: CachedWorktree, candidates: PullRequestCandidate[]): CachedWorktree {
+	const pr = selectPullRequest(candidates, worktree);
 	return {
 		...worktree,
+		candidates,
 		pr: pr?.number,
 		prState: pr?.state,
 		prUrl: pr?.url,
 		prChecks: pr?.state === "OPEN" ? pr.checks : undefined,
+	};
+}
+
+/** A finished branch needs no riding along for other sessions; its own session asks if it has new work. */
+function isSettledTerminal(entry: SharedBranch): boolean {
+	const newest = entry.candidates[0];
+	return newest !== undefined && newest.state !== "OPEN" && !entry.candidates.some((c) => c.state === "OPEN");
+}
+
+function withPullRequest(worktree: CachedWorktree, entry: SharedBranch): CachedWorktree {
+	return {
+		...withSelection(worktree, entry.candidates),
 		prCheckedAt: entry.fetchedAt,
 		prCheckedKey: entry.key,
 		pendingSince: entry.pendingSince,
@@ -894,7 +922,27 @@ export class SessionWorktreeTracker {
 		const included = this.worktreesOf(commonDir).filter((worktree) => !isTerminal(worktree) || this.isDue(worktree, now));
 		const first = included[0];
 		if (!first) return;
-		const branches = [...new Set(included.map((worktree) => worktree.branch))];
+		const own = [...new Set(included.map((worktree) => worktree.branch))];
+		const keys = new Map(included.map((worktree) => [worktree.branch, pollKey(worktree)]));
+		// Other sessions' branches in this repository ride along, so a host full of sessions on separate
+		// worktrees still costs one lookup per interval for the repository, not one per session.
+		const others = [...shared.branches]
+			.filter(
+				([branch, entry]) =>
+					!keys.has(branch) && now - (entry.trackedAt ?? 0) < PR_DORMANT_AFTER_MS && !isSettledTerminal(entry),
+			)
+			.sort(([, a], [, b]) => (b.trackedAt ?? 0) - (a.trackedAt ?? 0))
+			.slice(0, Math.max(0, PR_MAX_BRANCHES_PER_QUERY - own.length));
+		const riders: string[] = [];
+		for (const [branch] of others) {
+			const remoteHead = await readRemoteBranch(commonDir, branch);
+			// Never pushed (or deleted since): its own session checks it on the slow unpublished cadence.
+			if (remoteHead === undefined) continue;
+			keys.set(branch, branchKey(branch, remoteHead));
+			riders.push(branch);
+		}
+		if (this.disposed) return;
+		const branches = [...own, ...riders];
 		const args = ["api", "graphql", "-F", "owner={owner}", "-F", "name={repo}"];
 		branches.forEach((branch, index) => args.push("-f", `b${index}=${branch}`));
 		args.push("-f", `query=${buildPullRequestQuery(branches.length)}`);
@@ -930,18 +978,21 @@ export class SessionWorktreeTracker {
 		this.retryAt.delete(commonDir);
 		const answered = new Map(shared.branches);
 		branches.forEach((branch, index) => {
-			const local = included.find((worktree) => worktree.branch === branch) as CachedWorktree;
+			const local = included.find((worktree) => worktree.branch === branch);
+			const previous = shared.branches.get(branch);
 			const list = candidates[index] ?? [];
-			const entry: SharedBranch = { fetchedAt: now, key: pollKey(local), candidates: list };
+			const entry: SharedBranch = { fetchedAt: now, key: keys.get(branch) ?? "", candidates: list };
+			// Only the session that tracks a branch keeps it in the host-wide batch.
+			const trackedAt = local ? now : previous?.trackedAt;
+			if (trackedAt !== undefined) entry.trackedAt = trackedAt;
 			const open = list.find((candidate) => candidate.state === "OPEN");
 			if (open?.checks === "pending") {
 				const ref = `${open.number}:${open.headRefOid ?? ""}`;
-				const previous = shared.branches.get(branch);
 				entry.pendingRef = ref;
 				entry.pendingSince =
 					previous?.pendingRef === ref
 						? (previous.pendingSince ?? now)
-						: local.pendingRef === ref
+						: local?.pendingRef === ref
 							? (local.pendingSince ?? now)
 							: now;
 			}
@@ -1014,6 +1065,16 @@ export class SessionWorktreeTracker {
 			pendingSince: kept?.pendingSince,
 			pendingRef: kept?.pendingRef,
 		};
+		// A local commit can turn a reused branch's merged PR into a stranger's; re-select from the
+		// answer already held rather than waiting for a push to make the branch due.
+		if (kept?.candidates) {
+			const reselected = withSelection(next, kept.candidates);
+			next.candidates = reselected.candidates;
+			next.pr = reselected.pr;
+			next.prState = reselected.prState;
+			next.prUrl = reselected.prUrl;
+			next.prChecks = reselected.prChecks;
+		}
 		this.cache.set(path, next);
 		if (!sameDisplay(previous, next)) this.host.onChange?.();
 	}
