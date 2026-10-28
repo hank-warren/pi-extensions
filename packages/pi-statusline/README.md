@@ -384,7 +384,7 @@ Lookups run on a five-second timer that only checks whether anything is due — 
 | State | Rechecked after |
 |---|---|
 | pushed or switched branch since the last lookup | 15 s |
-| open PR with checks still running | 30 s, growing to a quarter of how long they have run, capped at 5 min |
+| open PR with checks still running | 20 s for their first 15 min, then 1 min until 30 min, then 5 min |
 | published branch, no PR yet | 60 s |
 | branch on no remote (never pushed) | 10 min |
 | open PR, checks settled or absent | 5 min |
@@ -392,7 +392,9 @@ Lookups run on a five-second timer that only checks whether anything is due — 
 
 "Pushed" means the same-named remote-tracking branch (`refs/remotes/*/<branch>`, read from git's ref files, no process) moved. A local commit does not count: GitHub cannot see it. A branch is published when that ref exists or the branch tracks a same-named upstream.
 
-Once no turn has ended for ten minutes, absent, settled and unpublished lookups slow to ten minutes; running checks keep their own backoff. After an hour with no turn the tracker stops asking GitHub anything until the next turn or tool call.
+Most CI finishes within 5-10 minutes, so the first 15 minutes of a head's checks are watched closely and a result shows up within about 20 seconds, keypress or not. Checks still running after that are long or stuck (a required check that never reports leaves the rollup `EXPECTED` forever), so they slow down rather than pin a fast poll. The clock starts when any session on the host first sees that head's checks running, and a new push restarts it.
+
+Once no turn has ended for ten minutes, absent, settled and unpublished lookups slow to ten minutes; running checks keep their own schedule. After an hour with no turn the tracker stops asking GitHub anything until the next turn or tool call.
 
 A failed lookup keeps the last known PR and backs off per repository: 1 min, doubling per consecutive failure up to 30 min. A repository `gh` cannot map to GitHub (no GitHub remote) is not asked again for six hours. A rate-limited answer pauses every repository on the host for fifteen minutes, because GitHub's limits belong to the account.
 

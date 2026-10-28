@@ -15,8 +15,11 @@ import {
 	PR_IDLE_AFTER_MS,
 	PR_IDLE_INTERVAL_MS,
 	PR_MIN_INTERVAL_MS,
+	PR_PENDING_FAST_FOR_MS,
 	PR_PENDING_INTERVAL_MS,
 	PR_PENDING_MAX_INTERVAL_MS,
+	PR_PENDING_SLOW_FOR_MS,
+	PR_PENDING_SLOW_INTERVAL_MS,
 	PR_POLL_TICK_MS,
 	PR_RATE_LIMIT_BACKOFF_MS,
 	PR_SETTLED_INTERVAL_MS,
@@ -623,6 +626,33 @@ test("an unpushed branch is checked rarely, a local commit asks nothing, and a p
 	assert.equal(github.calls.length, 4, "a published branch is watched for its PR");
 });
 
+test("CI finishing in the usual 5-10 minutes shows up within one fast interval, with no turn needed", async (t) => {
+	const fixture = await fixtureWorktree();
+	t.after(() => rm(fixture.root, { recursive: true, force: true }));
+	const prs = new Map([["feature/statusline", [{ number: 3, state: "OPEN", rollup: "PENDING" } as FakeNode]]]);
+	const github = fakeGitHub(prs);
+	for (const finishesAfter of [5 * 60_000 + 1_000, 7 * 60_000 + 3_000, 10 * 60_000 - 2_000, 14 * 60_000]) {
+		const start = 1_000_000;
+		let now = start;
+		prs.set("feature/statusline", [{ number: 3, state: "OPEN", rollup: "PENDING" }]);
+		const tracker = session(fixture, github, { now: () => now, cacheDir: join(fixture.root, `cache-${finishesAfter}`) });
+		await tracker.observeToolInput("read", { path: join(fixture.path, "README.md") });
+		let shownAt: number | undefined;
+		while (shownAt === undefined && now < start + 20 * 60_000) {
+			now += PR_POLL_TICK_MS;
+			if (now - start >= finishesAfter) prs.set("feature/statusline", [{ number: 3, state: "OPEN", rollup: "SUCCESS" }]);
+			await tracker.pollPullRequests();
+			if (tracker.getWorktrees()[0]?.prChecks === "success") shownAt = now;
+		}
+		tracker.dispose();
+		assert.ok(shownAt !== undefined, `never showed CI finishing at ${finishesAfter / 1000} s`);
+		assert.ok(
+			shownAt - start - finishesAfter <= PR_PENDING_INTERVAL_MS,
+			`CI finishing at ${finishesAfter / 1000} s showed ${(shownAt - start - finishesAfter) / 1000} s late`,
+		);
+	}
+});
+
 test("long-running checks back off, and a session nobody uses stops polling", async (t) => {
 	const fixture = await fixtureWorktree();
 	t.after(() => rm(fixture.root, { recursive: true, force: true }));
@@ -645,12 +675,19 @@ test("long-running checks back off, and a session nobody uses stops polling", as
 		await tracker.pollPullRequests();
 	}
 
-	const gaps = times.slice(1).map((time, index) => time - (times[index] as number));
-	assert.equal(gaps[0], PR_PENDING_INTERVAL_MS, "young checks are watched closely");
-	assert.ok(gaps.every((gap, index) => index === 0 || gap >= (gaps[index - 1] as number)), "never speeds up");
-	assert.equal(gaps.at(-1), PR_PENDING_MAX_INTERVAL_MS, "a check that never reports is capped, not pinned");
+	const gaps = times.slice(1).map((time, index) => [time - start, time - (times[index] as number)] as const);
+	for (const [at, gap] of gaps) {
+		const expected =
+			at <= PR_PENDING_FAST_FOR_MS
+				? PR_PENDING_INTERVAL_MS
+				: at <= PR_PENDING_SLOW_FOR_MS + PR_PENDING_SLOW_INTERVAL_MS
+					? PR_PENDING_SLOW_INTERVAL_MS
+					: PR_PENDING_MAX_INTERVAL_MS;
+		assert.equal(gap, expected, `lookup ${at / 1000} s after checks started`);
+	}
+	assert.equal(gaps.at(-1)?.[1], PR_PENDING_MAX_INTERVAL_MS, "a check that never reports is capped, not pinned");
 	assert.ok((times.at(-1) as number) - start < PR_DORMANT_AFTER_MS, "an hour without a turn stops polling");
-	assert.ok(times.length <= 20, `expected at most 20 lookups in three hours, saw ${times.length}`);
+	assert.ok(times.length <= 70, `expected at most 70 lookups in three hours, saw ${times.length}`);
 
 	const before = times.length;
 	await tracker.refresh();

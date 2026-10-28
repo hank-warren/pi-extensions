@@ -11,9 +11,14 @@ export const PR_POLL_TICK_MS = 5_000;
 export const PR_ABSENT_INTERVAL_MS = 60_000;
 /** A branch that exists on no remote cannot have a PR yet; it is still checked now and then for one pushed elsewhere. */
 export const PR_UNPUBLISHED_INTERVAL_MS = 10 * 60_000;
-/** Floor for running checks; the interval grows to a quarter of how long they have been running. */
-export const PR_PENDING_INTERVAL_MS = 30_000;
-/** Ceiling for running checks, so a required check that never reports cannot pin a fast poll. */
+/** Running checks are watched this closely while young, which is when most CI finishes. */
+export const PR_PENDING_INTERVAL_MS = 20_000;
+/** How long checks count as young: the usual 5-10 minute run with room to spare. */
+export const PR_PENDING_FAST_FOR_MS = 15 * 60_000;
+/** Checks still running past that are long or stuck, and are looked at once a minute... */
+export const PR_PENDING_SLOW_INTERVAL_MS = 60_000;
+/** ...until this, after which a required check that never reports cannot keep a fast poll alive. */
+export const PR_PENDING_SLOW_FOR_MS = 30 * 60_000;
 export const PR_PENDING_MAX_INTERVAL_MS = 5 * 60_000;
 /** An open PR whose checks have settled (or that has none). */
 export const PR_SETTLED_INTERVAL_MS = 5 * 60_000;
@@ -461,9 +466,10 @@ function isPublished(worktree: Pick<CachedWorktree, "branch" | "upstream">, remo
 
 function pollInterval(worktree: CachedWorktree, idle: boolean, now: number): number {
 	if (worktree.pr !== undefined && worktree.prChecks === "pending") {
-		// Fast while CI is young, then a quarter of its age, so a check that never reports cannot pin a 30 s poll.
+		// Age counts from the first sighting of this head's running checks, shared host-wide.
 		const running = now - (worktree.pendingSince ?? now);
-		return Math.min(PR_PENDING_MAX_INTERVAL_MS, Math.max(PR_PENDING_INTERVAL_MS, running / 4));
+		if (running < PR_PENDING_FAST_FOR_MS) return PR_PENDING_INTERVAL_MS;
+		return running < PR_PENDING_SLOW_FOR_MS ? PR_PENDING_SLOW_INTERVAL_MS : PR_PENDING_MAX_INTERVAL_MS;
 	}
 	if (idle) return PR_IDLE_INTERVAL_MS;
 	if (!worktree.published) return PR_UNPUBLISHED_INTERVAL_MS;
