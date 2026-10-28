@@ -81,10 +81,10 @@ const labelWidth = Math.max(...styles.map((name) => name.length), ...THEME_NAMES
 const data: StatuslineData = {
 	model: "claude-opus-4-6",
 	cwd: "pi-extensions",
-	cwdGit: { branch: "feat/statusline-celebration-styles", dirty: true, behind: 0 },
+	cwdGit: { branch: "feat/statusline-celebration-styles", dirty: true, ahead: 0, behind: 0 },
 	contextTokens: 168_000,
 	contextWindow: 1_000_000,
-	worktrees: [{ path: "/w", repo: "pi-extensions", branch: "feat/celebrations", dirty: true, behind: 0, pr: 106, prState: "OPEN" }],
+	worktrees: [{ path: "/w", repo: "pi-extensions", branch: "feat/celebrations", dirty: true, ahead: 0, behind: 0, pr: 106, prState: "OPEN" }],
 	sessionId: "019fafa7-29c0-7e99-9f82-5794d5721848",
 	usage: { claude: { fiveHour: 91, sevenDay: 53 }, codex: { weekly: 23 } },
 };

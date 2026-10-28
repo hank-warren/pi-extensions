@@ -24,7 +24,7 @@ if (!process.stdout.isTTY) {
 const data: StatuslineData = {
 	model: "gpt-5.6-sol",
 	cwd: "pi-extensions",
-	cwdGit: { branch: "feat/statusline-cache-wave", dirty: true, behind: 0 },
+	cwdGit: { branch: "feat/statusline-cache-wave", dirty: true, ahead: 0, behind: 0 },
 	contextTokens: 40_000,
 	contextWindow: 1_000_000,
 	worktrees: [
@@ -33,6 +33,7 @@ const data: StatuslineData = {
 			repo: "pi-extensions",
 			branch: "feat/statusline-cache-wave",
 			dirty: true,
+			ahead: 0,
 			behind: 0,
 			pr: 45,
 			prState: "OPEN",

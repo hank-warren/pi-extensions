@@ -7,37 +7,144 @@ import {
 	extractWorktreePaths,
 	extractWorktreePathsFromEntries,
 	extractWorktreePathsFromToolCall,
+	buildPullRequestQuery,
+	classifyLookupFailure,
+	isPullRequestAction,
+	PR_ABSENT_INTERVAL_MS,
+	PR_DORMANT_AFTER_MS,
+	PR_FAILURE_INTERVAL_MS,
+	PR_IDLE_AFTER_MS,
+	PR_IDLE_INTERVAL_MS,
+	PR_MIN_INTERVAL_MS,
+	PR_NUDGE_DELAY_MS,
+	PR_PENDING_FAST_FOR_MS,
+	PR_PENDING_INTERVAL_MS,
+	PR_PENDING_MAX_INTERVAL_MS,
+	PR_PENDING_SLOW_FOR_MS,
+	PR_PENDING_SLOW_INTERVAL_MS,
+	PR_POLL_TICK_MS,
+	PR_RATE_LIMIT_BACKOFF_MS,
+	PR_SETTLED_INTERVAL_MS,
+	PR_UNPUBLISHED_INTERVAL_MS,
+	PR_UNSUPPORTED_RETRY_MS,
 	parseGitStatus,
-	PR_ABSENT_TTL_MS,
-	PR_TTL_MS,
+	parsePullRequestResponse,
 	readWorktreeMetadata,
 	SessionWorktreeTracker,
+	selectPullRequest,
 	worktreeRootNeedles,
 } from "../worktrees.ts";
 
 const WORKTREE_ROOT = "/home/hank/repos/worktrees";
 const HOME = "/home/hank";
 
-function gitStatusOutput(branch: string, behind = 0, dirty = false): string {
+const HEAD_OID = "0123456789abcdef0123456789abcdef01234567";
+const NEXT_OID = "89abcdef0123456789abcdef0123456789abcdef";
+
+function gitStatusOutput(
+	branch: string,
+	behind = 0,
+	dirty = false,
+	options: { ahead?: number; head?: string; upstream?: string } = {},
+): string {
 	const lines = [
-		"# branch.oid 0123456789abcdef0123456789abcdef01234567",
+		`# branch.oid ${options.head ?? HEAD_OID}`,
 		`# branch.head ${branch}`,
-		`# branch.upstream origin/${branch}`,
-		`# branch.ab +0 -${behind}`,
+		`# branch.upstream ${options.upstream ?? `origin/${branch}`}`,
+		`# branch.ab +${options.ahead ?? 0} -${behind}`,
 	];
 	if (dirty) lines.push("? untracked.txt");
 	return `${lines.join("\n")}\n`;
 }
 
-async function fixtureWorktree(): Promise<{ root: string; path: string; gitDir: string }> {
-	const root = await mkdtemp(join(tmpdir(), "pi-statusline-worktrees-"));
-	const path = join(root, "home", "repos", "worktrees", "feature-statusline");
-	const gitDir = join(root, "pi-extensions", ".git", "worktrees", "feature-statusline");
+async function fixtureWorktree(
+	name = "feature-statusline",
+	branch = "feature/statusline",
+	existingRoot?: string,
+): Promise<{ root: string; path: string; gitDir: string }> {
+	const root = existingRoot ?? (await mkdtemp(join(tmpdir(), "pi-statusline-worktrees-")));
+	const path = join(root, "home", "repos", "worktrees", name);
+	const gitDir = join(root, "pi-extensions", ".git", "worktrees", name);
 	await mkdir(path, { recursive: true });
 	await mkdir(gitDir, { recursive: true });
 	await writeFile(join(path, ".git"), `gitdir: ${gitDir}\n`);
-	await writeFile(join(gitDir, "HEAD"), "ref: refs/heads/feature/statusline\n");
+	await writeFile(join(gitDir, "HEAD"), `ref: refs/heads/${branch}\n`);
 	return { root, path, gitDir };
+}
+
+interface FakeNode {
+	number: number;
+	state: string;
+	url?: string;
+	headRefOid?: string;
+	rollup?: string | null;
+}
+
+/** Serves `gh api graphql` from a branch -> PRs map, recording each call's branches. */
+function fakeGitHub(prs: Map<string, FakeNode[]>) {
+	const calls: string[][] = [];
+	let fail: boolean | string = false;
+	const respond = (args: string[]) => {
+		const branches = args.flatMap((arg) => /^b\d+=(.*)$/s.exec(arg)?.[1] ?? []);
+		calls.push(branches);
+		if (fail) return { stdout: "", stderr: fail === true ? "HTTP 502" : fail, code: 1, killed: false };
+		const repository = Object.fromEntries(
+			branches.map((branch, index) => [
+				`b${index}`,
+				{
+					nodes: (prs.get(branch) ?? []).map((node) => ({
+						number: node.number,
+						state: node.state,
+						url: node.url ?? `https://github.com/hank-warren/pi-extensions/pull/${node.number}`,
+						headRefOid: node.headRefOid ?? HEAD_OID,
+						commits: {
+							nodes: [{ commit: { statusCheckRollup: node.rollup ? { state: node.rollup } : null } }],
+						},
+					})),
+				},
+			]),
+		);
+		return { stdout: JSON.stringify({ data: { repository } }), stderr: "", code: 0, killed: false };
+	};
+	return {
+		calls,
+		respond,
+		/** True fails with a generic error; a string fails with that stderr. */
+		setFailing(value: boolean | string) {
+			fail = value;
+		},
+	};
+}
+
+type Status = { ahead?: number; head?: string; upstream?: string };
+
+/** A tracker as one pi process would build it, over a host cache directory shared with its siblings. */
+function session(
+	fixture: { root: string },
+	github: ReturnType<typeof fakeGitHub>,
+	options: { now: () => number; cacheDir?: string; status?: () => Status; beforeGh?: () => Promise<void> },
+): SessionWorktreeTracker {
+	return new SessionWorktreeTracker({
+		worktreeRoot: join(fixture.root, "home", "repos", "worktrees"),
+		home: join(fixture.root, "home"),
+		cacheDir: options.cacheDir ?? join(fixture.root, "cache"),
+		now: options.now,
+		exec: async (command, args) => {
+			if (command === "git") {
+				const status = options.status?.() ?? {};
+				return { stdout: gitStatusOutput("feature/statusline", 0, false, status), stderr: "", code: 0, killed: false };
+			}
+			await options.beforeGh?.();
+			return github.respond(args);
+		},
+	});
+}
+
+async function eventually(condition: () => boolean): Promise<void> {
+	for (let attempt = 0; attempt < 400 && !condition(); attempt++) {
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	}
+	assert.ok(condition(), "condition never became true");
 }
 
 test("extractWorktreePaths finds conventional worktrees in nested tool inputs", () => {
@@ -134,21 +241,30 @@ test("entry reconstruction counts targeted tool calls but ignores prose, heredoc
 	assert.deepEqual(extractWorktreePathsFromEntries(entries, WORKTREE_ROOT, HOME), [path]);
 });
 
-test("parseGitStatus derives branch, dirty state, and upstream-behind count", () => {
-	assert.deepEqual(parseGitStatus(gitStatusOutput("feature/statusline", 3, true)), {
+test("parseGitStatus derives branch, dirty state, ahead/behind, head, and upstream", () => {
+	assert.deepEqual(parseGitStatus(gitStatusOutput("feature/statusline", 3, true, { ahead: 2 })), {
 		branch: "feature/statusline",
 		dirty: true,
+		ahead: 2,
 		behind: 3,
+		head: HEAD_OID,
+		upstream: "origin/feature/statusline",
 	});
 	assert.deepEqual(
 		parseGitStatus(
 			"# branch.oid abcdef1234567890abcdef1234567890abcdef12\n# branch.head (detached)\n# branch.ab +0 -0\n",
 		),
-		{ branch: "abcdef12", dirty: false, behind: 0 },
+		{ branch: "abcdef12", dirty: false, ahead: 0, behind: 0, head: "abcdef1234567890abcdef1234567890abcdef12" },
 	);
+	assert.deepEqual(parseGitStatus("# branch.oid (initial)\n# branch.head main\n"), {
+		branch: "main",
+		dirty: false,
+		ahead: 0,
+		behind: 0,
+	});
 });
 
-test("readWorktreeMetadata derives repository and branch from linked-worktree metadata", async (t) => {
+test("readWorktreeMetadata derives repository, branch, and common git dir from linked-worktree metadata", async (t) => {
 	const fixture = await fixtureWorktree();
 	t.after(() => rm(fixture.root, { recursive: true, force: true }));
 
@@ -156,66 +272,214 @@ test("readWorktreeMetadata derives repository and branch from linked-worktree me
 		path: fixture.path,
 		repo: "pi-extensions",
 		branch: "feature/statusline",
+		commonDir: join(fixture.root, "pi-extensions", ".git"),
 	});
 });
 
-test("SessionWorktreeTracker quickly discovers a PR created after the worktree was tracked", async (t) => {
+test("the PR query passes branch names as variables and parses check rollups", () => {
+	const query = buildPullRequestQuery(2);
+	assert.match(query, /\$b0:String!,\$b1:String!/);
+	assert.match(query, /b1:pullRequests\(headRefName:\$b1,first:5,orderBy:\{field:CREATED_AT,direction:DESC\}\)/);
+
+	const node = (number: number, rollup: string | null, url = `https://github.com/o/r/pull/${number}`) => ({
+		number,
+		state: "open",
+		url,
+		headRefOid: HEAD_OID,
+		commits: { nodes: [{ commit: { statusCheckRollup: rollup ? { state: rollup } : null } }] },
+	});
+	const parsed = parsePullRequestResponse(
+		JSON.stringify({
+			data: {
+				repository: {
+					b0: { nodes: [node(1, "SUCCESS"), node(2, "ERROR"), node(3, "EXPECTED")] },
+					b1: { nodes: [node(4, null, "https://evil\u001b]8;;x"), { number: "bad" }] },
+				},
+			},
+		}),
+		2,
+	);
+	assert.deepEqual(parsed, [
+		[
+			{ number: 1, state: "OPEN", url: "https://github.com/o/r/pull/1", headRefOid: HEAD_OID, checks: "success" },
+			{ number: 2, state: "OPEN", url: "https://github.com/o/r/pull/2", headRefOid: HEAD_OID, checks: "failure" },
+			{ number: 3, state: "OPEN", url: "https://github.com/o/r/pull/3", headRefOid: HEAD_OID, checks: "pending" },
+		],
+		[{ number: 4, state: "OPEN", headRefOid: HEAD_OID }],
+	]);
+	assert.equal(parsePullRequestResponse("not json", 1), undefined);
+	assert.equal(parsePullRequestResponse(JSON.stringify({ data: { repository: null } }), 1), undefined);
+	assert.equal(parsePullRequestResponse(JSON.stringify({ data: { repository: {} } }), 1), undefined);
+});
+
+test("selectPullRequest ignores a finished PR that only shares a reused branch name", () => {
+	const merged = { number: 5, state: "MERGED", headRefOid: "old" };
+	const open = { number: 9, state: "OPEN", headRefOid: "other" };
+	const local = { branch: "fix/x", ahead: 0, head: HEAD_OID, upstream: "origin/main" };
+
+	assert.equal(selectPullRequest([merged, open], local), open, "an open PR always wins");
+	assert.equal(selectPullRequest([merged], local), undefined, "fresh work on a reused name stays visible");
+	assert.equal(selectPullRequest([merged], { ...local, ahead: 3 }), undefined);
+	assert.equal(selectPullRequest([{ ...merged, headRefOid: HEAD_OID }], local)?.number, 5, "same head is this PR");
+	assert.equal(
+		selectPullRequest([merged], { ...local, upstream: "origin/fix/x" })?.number,
+		5,
+		"everything pushed to the same-named branch belongs to the newest PR",
+	);
+	assert.equal(selectPullRequest([merged], { ...local, upstream: "origin/fix/x", ahead: 1 }), undefined);
+	assert.equal(selectPullRequest([], local), undefined);
+});
+
+test("SessionWorktreeTracker looks up every worktree of a repository in one gh call", async (t) => {
+	const first = await fixtureWorktree("alpha", "feat/alpha");
+	t.after(() => rm(first.root, { recursive: true, force: true }));
+	const second = await fixtureWorktree("beta", "feat/beta", first.root);
+	const github = fakeGitHub(new Map([["feat/beta", [{ number: 12, state: "OPEN", rollup: "SUCCESS" }]]]));
+	const ghArgs: string[][] = [];
+	const tracker = new SessionWorktreeTracker({
+		worktreeRoot: join(first.root, "home", "repos", "worktrees"),
+		home: join(first.root, "home"),
+		now: () => 1_000_000,
+		exec: async (command, args, options) => {
+			if (command === "git") {
+				const branch = args[2] === first.path ? "feat/alpha" : "feat/beta";
+				return { stdout: gitStatusOutput(branch, 0, false, { upstream: "origin/main" }), stderr: "", code: 0, killed: false };
+			}
+			ghArgs.push(args);
+			assert.equal(options.cwd, first.path);
+			return github.respond(args);
+		},
+	});
+
+	await tracker.observeToolInput("bash", { command: `ls ${first.path} ${second.path}` });
+	assert.deepEqual(github.calls, [["feat/alpha", "feat/beta"]]);
+	assert.deepEqual(ghArgs[0]?.slice(0, 6), ["api", "graphql", "-F", "owner={owner}", "-F", "name={repo}"]);
+	assert.deepEqual(
+		tracker.getWorktrees().map((worktree) => [worktree.branch, worktree.pr, worktree.prChecks]),
+		[
+			["feat/alpha", undefined, undefined],
+			["feat/beta", 12, "success"],
+		],
+	);
+});
+
+test("SessionWorktreeTracker polls on a cadence set by PR and CI state", async (t) => {
 	const fixture = await fixtureWorktree();
 	t.after(() => rm(fixture.root, { recursive: true, force: true }));
 	let now = 1_000_000;
-	let ghCalls = 0;
-	let prExists = false;
+	const prs = new Map<string, FakeNode[]>();
+	const github = fakeGitHub(prs);
 	const tracker = new SessionWorktreeTracker({
 		worktreeRoot: join(fixture.root, "home", "repos", "worktrees"),
 		home: join(fixture.root, "home"),
 		now: () => now,
-		exec: async (command) => {
-			if (command === "git") {
-				return { stdout: gitStatusOutput("feature/statusline"), stderr: "", code: 0, killed: false };
-			}
-			ghCalls++;
-			return prExists
-				? { stdout: '{"number":10,"state":"OPEN"}\n', stderr: "", code: 0, killed: false }
-				: { stdout: "", stderr: "no pull requests found", code: 1, killed: false };
-		},
+		exec: async (command, args) =>
+			command === "git"
+				? { stdout: gitStatusOutput("feature/statusline"), stderr: "", code: 0, killed: false }
+				: github.respond(args),
 	});
 
 	await tracker.observeToolInput("read", { path: join(fixture.path, "README.md") });
-	assert.equal(ghCalls, 1);
-	assert.equal(tracker.getWorktrees()[0]?.pr, undefined);
+	assert.equal(github.calls.length, 1);
 
+	// Turn ends no longer call GitHub on every turn.
+	now += PR_ABSENT_INTERVAL_MS - 1;
 	await tracker.refresh();
-	assert.equal(ghCalls, 1, "missing PR lookup should be briefly cached");
+	assert.equal(github.calls.length, 1, "a missing PR is not re-asked every turn");
 
-	now += PR_ABSENT_TTL_MS + 1;
-	prExists = true;
+	now += 1;
+	prs.set("feature/statusline", [{ number: 10, state: "OPEN", rollup: "PENDING" }]);
+	await tracker.pollPullRequests();
+	assert.equal(github.calls.length, 2);
+	assert.equal(tracker.getWorktrees()[0]?.prChecks, "pending");
+
+	now += PR_PENDING_INTERVAL_MS;
+	prs.set("feature/statusline", [{ number: 10, state: "OPEN", rollup: "FAILURE" }]);
+	await tracker.pollPullRequests();
+	assert.equal(github.calls.length, 3, "running checks are watched closely");
+	assert.equal(tracker.getWorktrees()[0]?.prChecks, "failure");
+
+	now += PR_PENDING_INTERVAL_MS;
+	await tracker.pollPullRequests();
+	assert.equal(github.calls.length, 3, "settled checks fall back to the slow interval");
+
+	now += PR_SETTLED_INTERVAL_MS;
+	prs.set("feature/statusline", [{ number: 10, state: "MERGED" }]);
 	await tracker.refresh();
-	assert.equal(ghCalls, 2);
-	assert.equal(tracker.getWorktrees()[0]?.pr, 10);
+	assert.equal(github.calls.length, 4);
+	assert.deepEqual(tracker.getWorktrees(), [], "merged PR worktrees are no longer active work");
+
+	now += PR_IDLE_INTERVAL_MS * 10;
+	await tracker.refresh();
+	assert.equal(github.calls.length, 4, "a merged PR is never polled again");
+
+	await rm(join(fixture.path, ".git"));
+	await tracker.refresh();
+	assert.deepEqual(tracker.getWorktrees(), []);
+	tracker.dispose();
 });
 
-test("SessionWorktreeTracker resolves PRs, caches lookups, hides terminal PRs, and prunes worktrees", async (t) => {
+test("SessionWorktreeTracker re-checks soon after a commit or push, and slows down while idle", async (t) => {
 	const fixture = await fixtureWorktree();
 	t.after(() => rm(fixture.root, { recursive: true, force: true }));
-	let ghCalls = 0;
-	let changes = 0;
 	let now = 1_000_000;
-	let prState = "OPEN";
-	let dirty = false;
-	let behind = 0;
+	let status = { ahead: 1, head: HEAD_OID, upstream: "origin/main" };
+	const github = fakeGitHub(new Map());
+	const tracker = new SessionWorktreeTracker({
+		worktreeRoot: join(fixture.root, "home", "repos", "worktrees"),
+		home: join(fixture.root, "home"),
+		now: () => now,
+		exec: async (command, args) =>
+			command === "git"
+				? { stdout: gitStatusOutput("feature/statusline", 0, false, status), stderr: "", code: 0, killed: false }
+				: github.respond(args),
+	});
+
+	await tracker.observeToolInput("read", { path: join(fixture.path, "README.md") });
+	assert.equal(github.calls.length, 1);
+	assert.equal(tracker.getWorktrees()[0]?.ahead, 1);
+
+	// `git push -u`: the upstream switches and the remote-tracking ref appears.
+	status = { ahead: 0, head: HEAD_OID, upstream: "origin/feature/statusline" };
+	const pushed = join(fixture.root, "pi-extensions", ".git", "refs", "remotes", "origin", "feature");
+	await mkdir(pushed, { recursive: true });
+	await writeFile(join(pushed, "statusline"), `${HEAD_OID}\n`);
+	now += PR_MIN_INTERVAL_MS - 1;
+	await tracker.refresh();
+	assert.equal(github.calls.length, 1, "local changes still respect the floor");
+	now += 1;
+	await tracker.refresh();
+	assert.equal(github.calls.length, 2, "a push is when a PR is likely to appear");
+
+	// The timer keeps polling between turns...
+	now += PR_ABSENT_INTERVAL_MS;
+	await tracker.pollPullRequests();
+	assert.equal(github.calls.length, 3, "an idle session still notices a new PR");
+	// ...but once no turn has ended for a while, the absent interval stretches.
+	now += PR_IDLE_AFTER_MS - PR_ABSENT_INTERVAL_MS;
+	await tracker.pollPullRequests();
+	assert.equal(github.calls.length, 3);
+	now += PR_IDLE_INTERVAL_MS - (PR_IDLE_AFTER_MS - PR_ABSENT_INTERVAL_MS);
+	await tracker.pollPullRequests();
+	assert.equal(github.calls.length, 4);
+	tracker.dispose();
+});
+
+test("SessionWorktreeTracker keeps the last known PR through failed lookups", async (t) => {
+	const fixture = await fixtureWorktree();
+	t.after(() => rm(fixture.root, { recursive: true, force: true }));
+	let now = 1_000_000;
+	const github = fakeGitHub(new Map([["feature/statusline", [{ number: 7, state: "OPEN", rollup: "SUCCESS" }]]]));
+	let changes = 0;
 	const tracker = new SessionWorktreeTracker({
 		worktreeRoot: join(fixture.root, "home", "repos", "worktrees"),
 		home: join(fixture.root, "home"),
 		now: () => now,
 		onChange: () => changes++,
-		exec: async (command) => {
-			if (command === "git") {
-				return { stdout: gitStatusOutput("feature/statusline", behind, dirty), stderr: "", code: 0, killed: false };
-			}
-			assert.equal(command, "gh");
-			ghCalls++;
-			return { stdout: JSON.stringify({ number: 7, state: prState, url: "https://github.com/hank-warren/pi-extensions/pull/7" }), stderr: "", code: 0, killed: false };
-		},
+		exec: async (command, args) =>
+			command === "git"
+				? { stdout: gitStatusOutput("feature/statusline"), stderr: "", code: 0, killed: false }
+				: github.respond(args),
 	});
 
 	await tracker.observeToolInput("read", { path: join(fixture.path, "README.md") });
@@ -225,37 +489,437 @@ test("SessionWorktreeTracker resolves PRs, caches lookups, hides terminal PRs, a
 			repo: "pi-extensions",
 			branch: "feature/statusline",
 			dirty: false,
+			ahead: 0,
 			behind: 0,
 			pr: 7,
 			prState: "OPEN",
 			prUrl: "https://github.com/hank-warren/pi-extensions/pull/7",
+			prChecks: "success",
 		},
 	]);
-	assert.equal(ghCalls, 1);
 	assert.ok(changes >= 1);
 
-	dirty = true;
-	behind = 2;
+	github.setFailing(true);
+	now += PR_SETTLED_INTERVAL_MS;
+	await tracker.pollPullRequests();
+	assert.equal(github.calls.length, 2);
+	assert.equal(tracker.getWorktrees()[0]?.pr, 7);
+
+	github.setFailing(false);
+	now += PR_FAILURE_INTERVAL_MS;
+	await tracker.pollPullRequests();
+	assert.equal(github.calls.length, 3, "a failure retries on the short interval");
+	tracker.dispose();
+});
+
+test("classifyLookupFailure separates rate limits and non-GitHub repositories from transient errors", () => {
+	assert.equal(classifyLookupFailure("GraphQL: API rate limit exceeded for user ID 1."), "rate-limited");
+	assert.equal(classifyLookupFailure("HTTP 403: You have exceeded a secondary rate limit."), "rate-limited");
+	assert.equal(classifyLookupFailure('error parsing "owner" value: no git remotes found'), "unsupported");
+	assert.equal(
+		classifyLookupFailure(
+			'error parsing "owner" value: none of the git remotes configured for this repository point to a known GitHub host.',
+		),
+		"unsupported",
+	);
+	assert.equal(classifyLookupFailure("HTTP 502: Bad Gateway"), "failed");
+	assert.equal(classifyLookupFailure(""), "failed");
+});
+
+test("sibling pi processes share one lookup per repository through the host cache", async (t) => {
+	const fixture = await fixtureWorktree();
+	t.after(() => rm(fixture.root, { recursive: true, force: true }));
+	let now = 1_000_000;
+	const github = fakeGitHub(new Map([["feature/statusline", [{ number: 7, state: "OPEN", rollup: "SUCCESS" }]]]));
+	const first = session(fixture, github, { now: () => now });
+	const second = session(fixture, github, { now: () => now });
+	t.after(() => {
+		first.dispose();
+		second.dispose();
+	});
+	const touch = { path: join(fixture.path, "README.md") };
+
+	await first.observeToolInput("read", touch);
+	await second.observeToolInput("read", touch);
+	assert.equal(github.calls.length, 1, "the second session adopts the first one's answer");
+	assert.equal(second.getWorktrees()[0]?.pr, 7);
+
+	now += PR_SETTLED_INTERVAL_MS;
+	await first.pollPullRequests();
+	now += PR_POLL_TICK_MS;
+	await second.pollPullRequests();
+	assert.equal(github.calls.length, 2, "one lookup per interval for the whole host");
+
+	// Tree navigation and reloads rebuild the tracker; the rebuilt one starts from the cache.
+	const rebuilt = session(fixture, github, { now: () => now });
+	t.after(() => rebuilt.dispose());
+	await rebuilt.observeToolInput("read", touch);
+	assert.equal(github.calls.length, 2);
+	assert.equal(rebuilt.getWorktrees()[0]?.pr, 7);
+});
+
+test("a sibling mid-lookup holds the repository and the others take its answer", async (t) => {
+	const fixture = await fixtureWorktree();
+	t.after(() => rm(fixture.root, { recursive: true, force: true }));
+	let now = 1_000_000;
+	const github = fakeGitHub(new Map([["feature/statusline", [{ number: 7, state: "OPEN", rollup: "SUCCESS" }]]]));
+	let started = 0;
+	let release: () => void = () => {};
+	const gate = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const beforeGh = async () => {
+		started++;
+		await gate;
+	};
+	const first = session(fixture, github, { now: () => now, beforeGh });
+	const second = session(fixture, github, { now: () => now, beforeGh });
+	t.after(() => {
+		release();
+		first.dispose();
+		second.dispose();
+	});
+	const touch = { path: join(fixture.path, "README.md") };
+
+	const firstLookup = first.observeToolInput("read", touch);
+	await eventually(() => started === 1);
+	await second.observeToolInput("read", touch);
+	assert.equal(started, 1, "only the lock holder asks GitHub");
+	assert.equal(second.getWorktrees()[0]?.pr, undefined);
+
+	release();
+	await firstLookup;
+	now += PR_POLL_TICK_MS;
+	await second.pollPullRequests();
+	assert.equal(started, 1);
+	assert.equal(second.getWorktrees()[0]?.pr, 7, "the next tick adopts the holder's answer");
+});
+
+test("an unpushed branch is checked rarely, a local commit asks nothing, and a push asks soon", async (t) => {
+	const fixture = await fixtureWorktree();
+	t.after(() => rm(fixture.root, { recursive: true, force: true }));
+	const start = 1_000_000;
+	let now = start;
+	let status: Status = { ahead: 0, head: HEAD_OID, upstream: "origin/main" };
+	const github = fakeGitHub(new Map());
+	const tracker = session(fixture, github, { now: () => now, status: () => status });
+	t.after(() => tracker.dispose());
+
+	await tracker.observeToolInput("read", { path: join(fixture.path, "README.md") });
+	assert.equal(github.calls.length, 1, "a new worktree is checked once, for a PR pushed from elsewhere");
+
+	now += PR_ABSENT_INTERVAL_MS;
 	await tracker.refresh();
-	assert.equal(ghCalls, 1, "PR lookup should remain cached within the TTL");
-	assert.deepEqual(tracker.getWorktrees()[0], {
-		path: fixture.path,
-		repo: "pi-extensions",
-		branch: "feature/statusline",
-		dirty: true,
-		behind: 2,
-		pr: 7,
-		prState: "OPEN",
-		prUrl: "https://github.com/hank-warren/pi-extensions/pull/7",
+	assert.equal(github.calls.length, 1, "no PR can exist for a branch on no remote");
+	now = start + PR_UNPUBLISHED_INTERVAL_MS;
+	await tracker.refresh();
+	assert.equal(github.calls.length, 2);
+
+	status = { ahead: 1, head: NEXT_OID, upstream: "origin/main" };
+	now += PR_MIN_INTERVAL_MS;
+	await tracker.refresh();
+	assert.equal(github.calls.length, 2, "GitHub cannot see a local commit");
+
+	// `git push` without -u: upstream unchanged, but the remote-tracking ref appears.
+	const remoteRef = join(fixture.root, "pi-extensions", ".git", "refs", "remotes", "origin", "feature");
+	await mkdir(remoteRef, { recursive: true });
+	await writeFile(join(remoteRef, "statusline"), `${NEXT_OID}\n`);
+	await tracker.refresh();
+	assert.equal(github.calls.length, 3, "a push is when a PR appears");
+
+	now += PR_ABSENT_INTERVAL_MS;
+	await tracker.pollPullRequests();
+	assert.equal(github.calls.length, 4, "a published branch is watched for its PR");
+});
+
+test("CI finishing in the usual 5-10 minutes shows up within one fast interval, with no turn needed", async (t) => {
+	const fixture = await fixtureWorktree();
+	t.after(() => rm(fixture.root, { recursive: true, force: true }));
+	const prs = new Map([["feature/statusline", [{ number: 3, state: "OPEN", rollup: "PENDING" } as FakeNode]]]);
+	const github = fakeGitHub(prs);
+	for (const finishesAfter of [5 * 60_000 + 1_000, 7 * 60_000 + 3_000, 10 * 60_000 - 2_000, 14 * 60_000]) {
+		const start = 1_000_000;
+		let now = start;
+		prs.set("feature/statusline", [{ number: 3, state: "OPEN", rollup: "PENDING" }]);
+		const tracker = session(fixture, github, { now: () => now, cacheDir: join(fixture.root, `cache-${finishesAfter}`) });
+		await tracker.observeToolInput("read", { path: join(fixture.path, "README.md") });
+		let shownAt: number | undefined;
+		while (shownAt === undefined && now < start + 20 * 60_000) {
+			now += PR_POLL_TICK_MS;
+			if (now - start >= finishesAfter) prs.set("feature/statusline", [{ number: 3, state: "OPEN", rollup: "SUCCESS" }]);
+			await tracker.pollPullRequests();
+			if (tracker.getWorktrees()[0]?.prChecks === "success") shownAt = now;
+		}
+		tracker.dispose();
+		assert.ok(shownAt !== undefined, `never showed CI finishing at ${finishesAfter / 1000} s`);
+		assert.ok(
+			shownAt - start - finishesAfter <= PR_PENDING_INTERVAL_MS,
+			`CI finishing at ${finishesAfter / 1000} s showed ${(shownAt - start - finishesAfter) / 1000} s late`,
+		);
+	}
+});
+
+test("long-running checks back off, and a session nobody uses stops polling", async (t) => {
+	const fixture = await fixtureWorktree();
+	t.after(() => rm(fixture.root, { recursive: true, force: true }));
+	const start = 1_000_000;
+	let now = start;
+	const times: number[] = [];
+	const github = fakeGitHub(new Map([["feature/statusline", [{ number: 3, state: "OPEN", rollup: "EXPECTED" }]]]));
+	const tracker = session(fixture, github, {
+		now: () => now,
+		beforeGh: async () => {
+			times.push(now);
+		},
+	});
+	t.after(() => tracker.dispose());
+
+	await tracker.observeToolInput("read", { path: join(fixture.path, "README.md") });
+	assert.equal(tracker.getWorktrees()[0]?.prChecks, "pending");
+	while (now < start + 3 * 60 * 60_000) {
+		now += PR_POLL_TICK_MS;
+		await tracker.pollPullRequests();
+	}
+
+	const gaps = times.slice(1).map((time, index) => [time - start, time - (times[index] as number)] as const);
+	for (const [at, gap] of gaps) {
+		const expected =
+			at <= PR_PENDING_FAST_FOR_MS
+				? PR_PENDING_INTERVAL_MS
+				: at <= PR_PENDING_SLOW_FOR_MS + PR_PENDING_SLOW_INTERVAL_MS
+					? PR_PENDING_SLOW_INTERVAL_MS
+					: PR_PENDING_MAX_INTERVAL_MS;
+		assert.equal(gap, expected, `lookup ${at / 1000} s after checks started`);
+	}
+	assert.equal(gaps.at(-1)?.[1], PR_PENDING_MAX_INTERVAL_MS, "a check that never reports is capped, not pinned");
+	assert.ok((times.at(-1) as number) - start < PR_DORMANT_AFTER_MS, "an hour without a turn stops polling");
+	assert.ok(times.length <= 70, `expected at most 70 lookups in three hours, saw ${times.length}`);
+
+	const before = times.length;
+	await tracker.refresh();
+	assert.equal(times.length, before + 1, "the next turn resumes");
+});
+
+test("a rate limit pauses every repository in every session on the host", async (t) => {
+	const limited = await fixtureWorktree();
+	const healthy = await fixtureWorktree();
+	t.after(() => rm(limited.root, { recursive: true, force: true }));
+	t.after(() => rm(healthy.root, { recursive: true, force: true }));
+	let now = 1_000_000;
+	const cacheDir = join(limited.root, "cache");
+	const limitedGitHub = fakeGitHub(new Map());
+	limitedGitHub.setFailing("GraphQL: API rate limit exceeded for user ID 1.");
+	const healthyGitHub = fakeGitHub(new Map());
+	const first = session(limited, limitedGitHub, { now: () => now, cacheDir });
+	const second = session(healthy, healthyGitHub, { now: () => now, cacheDir });
+	t.after(() => {
+		first.dispose();
+		second.dispose();
 	});
 
-	now += PR_TTL_MS + 1;
-	prState = "MERGED";
-	await tracker.refresh();
-	assert.equal(ghCalls, 2);
-	assert.deepEqual(tracker.getWorktrees(), [], "merged PR worktrees are no longer active work");
+	await first.observeToolInput("read", { path: join(limited.path, "README.md") });
+	assert.equal(limitedGitHub.calls.length, 1);
+	await second.observeToolInput("read", { path: join(healthy.path, "README.md") });
+	assert.equal(healthyGitHub.calls.length, 0, "the limit is the account's, not the repository's");
 
-	await rm(join(fixture.path, ".git"));
+	now += PR_RATE_LIMIT_BACKOFF_MS - 1;
+	await second.refresh();
+	await first.refresh();
+	assert.equal(healthyGitHub.calls.length + limitedGitHub.calls.length, 1);
+	now += 1;
+	await second.refresh();
+	assert.equal(healthyGitHub.calls.length, 1);
+});
+
+test("repeated failures back off exponentially, and a repository outside GitHub rests for hours", async (t) => {
+	const fixture = await fixtureWorktree();
+	t.after(() => rm(fixture.root, { recursive: true, force: true }));
+	let now = 1_000_000;
+	const github = fakeGitHub(new Map());
+	github.setFailing(true);
+	const tracker = session(fixture, github, { now: () => now });
+	t.after(() => tracker.dispose());
+
+	await tracker.observeToolInput("read", { path: join(fixture.path, "README.md") });
+	assert.equal(github.calls.length, 1);
+	now += PR_FAILURE_INTERVAL_MS - 1;
 	await tracker.refresh();
-	assert.deepEqual(tracker.getWorktrees(), []);
+	assert.equal(github.calls.length, 1);
+	now += 1;
+	await tracker.refresh();
+	assert.equal(github.calls.length, 2);
+	now += PR_FAILURE_INTERVAL_MS;
+	await tracker.refresh();
+	assert.equal(github.calls.length, 2, "the second failure waits twice as long");
+	now += PR_FAILURE_INTERVAL_MS;
+	await tracker.refresh();
+	assert.equal(github.calls.length, 3);
+
+	github.setFailing('error parsing "owner" value: no git remotes found');
+	now += PR_FAILURE_INTERVAL_MS * 4;
+	await tracker.refresh();
+	assert.equal(github.calls.length, 4);
+	now += PR_UNSUPPORTED_RETRY_MS - 1;
+	await tracker.refresh();
+	assert.equal(github.calls.length, 4, "no GitHub remote is not a blip");
+	now += 1;
+	await tracker.refresh();
+	assert.equal(github.calls.length, 5);
+});
+
+test("isPullRequestAction spots commands that change a PR or start its CI", () => {
+	const bash = (command: string) => isPullRequestAction("bash", { command });
+	for (const command of [
+		"gh run rerun 40742717132 -R hank-warren/pi-extensions",
+		"gh run rerun --failed 123",
+		"gh run cancel 123",
+		"gh workflow run ci.yml --ref feat/x",
+		"cd ~/repos/worktrees/x && gh pr create --fill",
+		"gh pr merge 76 --squash",
+		"gh pr ready 76",
+		"gh pr close 76 && echo done",
+		"gh pr reopen 76",
+		"git push -u origin HEAD",
+		"git -C ~/repos/worktrees/x push",
+		"git -c push.default=current push",
+	]) {
+		assert.equal(bash(command), true, command);
+	}
+	for (const command of [
+		"gh pr view 76 --json state",
+		"gh pr checks 76 --watch",
+		"gh run watch 123",
+		"gh run view 123 --log",
+		"git stash push -m wip",
+		"git log --oneline",
+		"cat <<'EOF'\ngh pr merge 76\nEOF",
+	]) {
+		assert.equal(bash(command), false, command);
+	}
+	assert.equal(isPullRequestAction("functions.bash", { command: "gh pr merge 1" }), true);
+	assert.equal(isPullRequestAction("write", { path: "README.md", content: "gh pr merge 1" }), false);
+	assert.equal(isPullRequestAction("bash", { command: 7 }), false);
+});
+
+test("a rerun or merge from this session is looked at within seconds, not at the next settled poll", async (t) => {
+	const fixture = await fixtureWorktree();
+	t.after(() => rm(fixture.root, { recursive: true, force: true }));
+	const start = 1_000_000;
+	let now = start;
+	const prs = new Map([["feature/statusline", [{ number: 76, state: "OPEN", rollup: "SUCCESS" } as FakeNode]]]);
+	const github = fakeGitHub(prs);
+	const tracker = session(fixture, github, { now: () => now });
+	t.after(() => tracker.dispose());
+	const tick = async (until: number) => {
+		while (now < until) {
+			now += PR_POLL_TICK_MS;
+			await tracker.pollPullRequests();
+		}
+	};
+
+	await tracker.observeToolInput("read", { path: join(fixture.path, "README.md") });
+	assert.equal(tracker.getWorktrees()[0]?.prChecks, "success");
+
+	await tick(start + 60_000);
+	tracker.observeToolResult("bash", { command: "gh pr view 76" });
+	await tick(start + 120_000);
+	assert.equal(github.calls.length, 1, "reading a PR changes nothing");
+
+	// Two actions in quick succession cost one lookup, after the last of them.
+	tracker.observeToolResult("bash", { command: "gh run rerun 123" });
+	await tick(now + PR_POLL_TICK_MS);
+	tracker.observeToolResult("bash", { command: "gh run rerun 456" });
+	const nudged = now;
+	prs.set("feature/statusline", [{ number: 76, state: "OPEN", rollup: "PENDING" }]);
+	await tick(nudged + PR_NUDGE_DELAY_MS - PR_POLL_TICK_MS);
+	assert.equal(github.calls.length, 1, "GitHub gets a moment to register the rerun");
+	await tick(nudged + PR_NUDGE_DELAY_MS);
+	assert.equal(github.calls.length, 2);
+	assert.equal(tracker.getWorktrees()[0]?.prChecks, "pending", "the rerun shows up long before the 5 min poll");
+
+	prs.set("feature/statusline", [{ number: 76, state: "OPEN", rollup: "SUCCESS" }]);
+	await tick(now + PR_PENDING_INTERVAL_MS);
+	assert.equal(tracker.getWorktrees()[0]?.prChecks, "success");
+
+	tracker.observeToolResult("bash", { command: "gh pr merge 76 --squash" });
+	prs.set("feature/statusline", [{ number: 76, state: "MERGED" }]);
+	await tick(now + PR_NUDGE_DELAY_MS);
+	assert.deepEqual(tracker.getWorktrees(), [], "a merged worktree leaves the line within seconds");
+	const calls = github.calls.length;
+	await tick(now + PR_SETTLED_INTERVAL_MS * 2);
+	assert.equal(github.calls.length, calls, "an answered nudge is not repeated");
+});
+
+test("sessions on different branches of one repository share one lookup per interval", async (t) => {
+	const alpha = await fixtureWorktree("alpha", "feat/alpha");
+	t.after(() => rm(alpha.root, { recursive: true, force: true }));
+	const beta = await fixtureWorktree("beta", "feat/beta", alpha.root);
+	const remotes = join(alpha.root, "pi-extensions", ".git", "refs", "remotes", "origin", "feat");
+	await mkdir(remotes, { recursive: true });
+	await writeFile(join(remotes, "alpha"), `${HEAD_OID}\n`);
+	await writeFile(join(remotes, "beta"), `${HEAD_OID}\n`);
+	const start = 1_000_000;
+	let now = start;
+	const github = fakeGitHub(new Map([["feat/beta", [{ number: 2, state: "OPEN", rollup: "SUCCESS" }]]]));
+	const asked: string[] = [];
+	const tracker = (name: string) =>
+		new SessionWorktreeTracker({
+			worktreeRoot: join(alpha.root, "home", "repos", "worktrees"),
+			home: join(alpha.root, "home"),
+			cacheDir: join(alpha.root, "cache"),
+			now: () => now,
+			exec: async (command, args) => {
+				if (command === "git") {
+					const branch = args[2] === alpha.path ? "feat/alpha" : "feat/beta";
+					return { stdout: gitStatusOutput(branch), stderr: "", code: 0, killed: false };
+				}
+				asked.push(name);
+				return github.respond(args);
+			},
+		});
+	const first = tracker("first");
+	const second = tracker("second");
+	t.after(() => {
+		first.dispose();
+		second.dispose();
+	});
+
+	await first.observeToolInput("read", { path: join(alpha.path, "README.md") });
+	now += PR_POLL_TICK_MS;
+	await second.observeToolInput("read", { path: join(beta.path, "README.md") });
+	assert.deepEqual(github.calls, [["feat/alpha"], ["feat/beta", "feat/alpha"]], "the other session's branch rides along");
+
+	while (now < start + 30 * 60_000) {
+		now += PR_POLL_TICK_MS;
+		await first.pollPullRequests();
+		await second.pollPullRequests();
+	}
+	assert.ok(github.calls.length <= 32, `one lookup per minute for the repository, saw ${github.calls.length} in 30 min`);
+	assert.ok(
+		github.calls.slice(1).every((branches) => branches.includes("feat/alpha") && branches.includes("feat/beta")),
+		"every lookup refreshes both sessions' branches",
+	);
+	assert.equal(asked.filter((name) => name === "second").length, 1, "the settled session never has to ask again");
+	assert.equal(second.getWorktrees()[0]?.pr, 2);
+	assert.equal(first.getWorktrees()[0]?.pr, undefined);
+});
+
+test("a local commit on a reused branch name re-selects from the held answer without a lookup", async (t) => {
+	const fixture = await fixtureWorktree();
+	t.after(() => rm(fixture.root, { recursive: true, force: true }));
+	let now = 1_000_000;
+	let status: Status = { ahead: 0, head: HEAD_OID, upstream: "origin/main" };
+	const github = fakeGitHub(new Map([["feature/statusline", [{ number: 5, state: "MERGED", headRefOid: HEAD_OID }]]]));
+	const tracker = session(fixture, github, { now: () => now, status: () => status });
+	t.after(() => tracker.dispose());
+
+	await tracker.observeToolInput("read", { path: join(fixture.path, "README.md") });
+	assert.deepEqual(tracker.getWorktrees(), [], "the merged PR holds exactly this commit");
+
+	status = { ahead: 1, head: NEXT_OID, upstream: "origin/main" };
+	now += PR_MIN_INTERVAL_MS;
+	await tracker.refresh();
+	assert.equal(github.calls.length, 1, "nothing new to ask GitHub");
+	assert.equal(tracker.getWorktrees()[0]?.branch, "feature/statusline", "new work on the old name is visible again");
+	assert.equal(tracker.getWorktrees()[0]?.pr, undefined);
 });

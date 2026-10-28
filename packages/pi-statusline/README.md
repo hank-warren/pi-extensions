@@ -3,15 +3,15 @@
 Replaces Pi's default footer with a compact statusline:
 
 ```text
-gpt-5.6-sol | pi-extensions:main* ⇣1 | 40k/1.0m |  97·54  80
-⑂ pi-extensions:feature/statusline* ⇣2 #7 | infra:fix/alerts #168
+gpt-5.6-sol | pi-extensions:main* ⇡2⇣1 | 40k/1.0m |  97·54  80
+⑂ pi-extensions:feature/statusline* ⇣2 #7 ● | infra:fix/alerts #168 ✓
 019fafa7-29c0-7e99-9f82-5794d5721848
 ```
 
 ## What it shows
 
-- **Line 1** — active model ID, optionally its thinking level and provider, current directory basename and Git branch, current context usage/window, subscription usage headroom (see below), and any [custom items](#custom-items) you configure. A yellow `*` marks a dirty checkout and `⇣N` shows how many commits it is behind its locally known upstream ref. Unknown context usage is rendered as `?/<window>` until Pi can provide an estimate. Exceptional prompt-cache hits trigger the celebration described below.
-- **Worktree lines** — when the session works in or sends tool calls into linked worktrees, one line shows the same branch/dirty/behind state for each worktree plus its associated PR number, underlined and clickable when the terminal supports hyperlinks.
+- **Line 1** — active model ID, optionally its thinking level and provider, current directory basename and Git branch, current context usage/window, subscription usage headroom (see below), and any [custom items](#custom-items) you configure. A yellow `*` marks a dirty checkout, and `⇡N`/`⇣N` show how many commits it is ahead of and behind its locally known upstream ref — both read from the same `git status` call, with no fetch. A worktree created from `origin/main` tracks `origin/main` until its first `git push -u`, so until then `⇡N` counts commits not yet on main. Unknown context usage is rendered as `?/<window>` until Pi can provide an estimate. Exceptional prompt-cache hits trigger the celebration described below.
+- **Worktree lines** — when the session works in or sends tool calls into linked worktrees, one line shows the same branch/dirty/ahead/behind state for each worktree plus its associated PR number, underlined and clickable when the terminal supports hyperlinks, and the PR's CI state: `✓` passed, `✗` failed, `●` running. A PR without checks shows no mark.
 - **Final line** — the full Pi session ID.
 
 Colors come from a selectable [theme](#themes), with context warning thresholds. Every element can be turned off from [`/statusline`](#statusline).
@@ -61,7 +61,7 @@ Compatibility rules, because old and new versions share one file:
 | `catppuccin-mocha` | [Catppuccin](https://catppuccin.com) Mocha |
 | `white` | No color: white text, dimmed punctuation, a white/grey badge flash |
 
-A theme maps eleven roles — `model`, `path`, `branch`, `text`, `dim`, `ok`, `warn`, `caution`, `danger`, `accent`, and the two `celebration` badge frames — so switching recolors every element at once without changing a single character of rendered text. `ok`/`warn`/`caution`/`danger` drive the context meter, the usage meters, and the dirty/behind markers alike, so the warning gradient stays legible in every theme. An unknown theme name in the settings file falls back to `default`.
+A theme maps eleven roles — `model`, `path`, `branch`, `text`, `dim`, `ok`, `warn`, `caution`, `danger`, `accent`, and the two `celebration` badge frames — so switching recolors every element at once without changing a single character of rendered text. `ok`/`warn`/`caution`/`danger` drive the context meter, the usage meters, and the dirty/ahead/behind markers and CI marks alike, so the warning gradient stays legible in every theme. An unknown theme name in the settings file falls back to `default`.
 
 ### Repo aliases are no longer built in
 
@@ -224,7 +224,7 @@ One JSON object on stdin, and `COLUMNS` in the environment (the footer's current
   "session_id": "019fafa7-29c0-7e99-9f82-5794d5721848",
   "cwd": "/home/hank/repos/pi-extensions",
   "model": { "id": "gpt-5.6-sol", "provider": "openai-codex" },
-  "git": { "branch": "main", "dirty": false, "behind": 0 },
+  "git": { "branch": "main", "dirty": false, "ahead": 0, "behind": 0 },
   "context_window": { "used_tokens": 40000, "context_window_size": 1000000, "used_percentage": 4 },
   "usage_remaining": {
     "claude": { "five_hour": 97, "seven_day": 54, "scoped_weekly": 24 },
@@ -373,9 +373,39 @@ Output and reasoning tokens are excluded because they are not prompt-cache candi
 - Worktree paths appearing only inside Bash heredoc payloads are ignored.
 - Merged and closed PR worktrees are hidden.
 - State is rebuilt on reload and tree navigation; deleted worktrees are pruned.
-- Git state refreshes after each turn; branches without a PR are rechecked every five seconds; existing PR metadata is cached for five minutes.
+- Git state refreshes after each turn.
 
-PR lookups use the `gh` CLI when available and degrade gracefully without it.
+### PR lookups
+
+PRs are looked up with `gh api graphql`, **one request per repository**: every tracked worktree of that repository rides in the same query, its branch names passed as GraphQL variables. `gh` resolves the repository from the worktree's remotes the same way `gh pr view` does, so `gh repo set-default` applies. Without `gh`, or outside GitHub, the lookup fails quietly and the line shows no PR.
+
+Lookups run on a five-second timer that only checks whether anything is due — a tick with nothing due reads nothing and spawns nothing — plus right after a worktree is first tracked and at each turn end. A repository is due when any of its worktrees is:
+
+| State | Rechecked after |
+|---|---|
+| this session just ran `gh pr create\|merge\|ready\|close\|reopen`, `gh run rerun\|cancel`, `gh workflow run`, or `git push` | 10 s after the command finishes, once, every tracked repository |
+| pushed or switched branch since the last lookup | 15 s |
+| open PR with checks still running | 20 s for their first 15 min, then 1 min until 30 min, then 5 min |
+| published branch, no PR yet | 60 s |
+| branch on no remote (never pushed) | 10 min |
+| open PR, checks settled or absent | 5 min |
+| merged or closed | never — hidden, and only looked up again after a push or branch switch |
+
+The command trigger watches this session's Bash calls (including ones a codemode script makes) and costs nothing until one of those commands runs. It cannot see actions taken on github.com or in another terminal; those wait for the ordinary cadence below, which for a settled PR is up to five minutes.
+
+"Pushed" means the same-named remote-tracking branch (`refs/remotes/*/<branch>`, read from git's ref files, no process) moved. A local commit does not count: GitHub cannot see it. A branch is published when that ref exists or the branch tracks a same-named upstream.
+
+Most CI finishes within 5-10 minutes, so the first 15 minutes of a head's checks are watched closely and a result shows up within about 20 seconds, keypress or not. Checks still running after that are long or stuck (a required check that never reports leaves the rollup `EXPECTED` forever), so they slow down rather than pin a fast poll. The clock starts when any session on the host first sees that head's checks running, and a new push restarts it.
+
+Once no turn has ended for ten minutes, absent, settled and unpublished lookups slow to ten minutes; running checks keep their own schedule. After an hour with no turn the tracker stops asking GitHub anything until the next turn or tool call.
+
+A failed lookup keeps the last known PR and backs off per repository: 1 min, doubling per consecutive failure up to 30 min. A repository `gh` cannot map to GitHub (no GitHub remote) is not asked again for six hours. A rate-limited answer pauses every repository on the host for fifteen minutes, because GitHub's limits belong to the account.
+
+#### Shared across sessions
+
+PR answers are host-wide, like the usage meters: every pi process shares `~/.pi/agent/statusline-prs/`, one file per repository (keyed by its common git dir) plus `host.json` for a rate-limit pause. A session whose lookup is due first reads that file and adopts any newer answer for the same push. When it does ask, the query also carries the other sessions' branches in that repository: every pushed branch some session has asked about in the last hour, except ones whose PR is already merged or closed, up to 40 per query. So fifty sessions over one repository cost one lookup per interval rather than fifty, whether they share a branch or each work in their own worktree; the repository is polled at the pace of its most urgent branch, and every other branch rides along. Before asking GitHub, a process takes a lock file for the repository; while another holds it, the rest skip the tick and adopt its answer on the next one. Locks older than thirty seconds belong to a dead process and are taken over. Writes are atomic (temp file and rename), and branches nobody has asked about for a week are dropped. A tracker rebuilt by tree navigation or a reload starts from the cache instead of re-asking.
+
+A branch name can outlive its PR — a new worktree reusing the name of one that was merged. The query fetches each branch's five newest PRs, and an open one always wins. A merged or closed PR only counts when it holds this worktree's work: its head commit is checked out, or the branch tracks a same-named remote branch with nothing unpushed. Otherwise the old PR is ignored and the worktree stays visible. The choice is re-made from the last answer whenever local state changes, so committing on top of a merged PR's head brings the worktree back without a lookup.
 
 When Pi detects OSC 8 hyperlink support (Herdr, Kitty, Ghostty, WezTerm, iTerm2, and others; override with `PI_HYPERLINKS` or the `terminal.hyperlinks` setting), the PR number is underlined and links to the pull request, so Ctrl/Cmd+click opens it. Without hyperlink support it renders as plain colored text.
 

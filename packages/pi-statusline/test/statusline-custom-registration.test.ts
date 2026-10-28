@@ -126,7 +126,7 @@ test("a registered run receives exactly the JSON a command reads on stdin", asyn
 			session_id: "019fafa7-29c0-7e99-9f82-5794d5721848",
 			cwd: "/tmp/project",
 			model: { id: "some-model", provider: "some-provider" },
-			git: { branch: "main", dirty: false, behind: 0 },
+			git: { branch: "main", dirty: false, ahead: 0, behind: 0 },
 			context_window: { used_tokens: 40_000, context_window_size: 1_000_000, used_percentage: 4 },
 			usage_remaining: {
 				claude: { five_hour: 97, seven_day: 54, scoped_weekly: null },
