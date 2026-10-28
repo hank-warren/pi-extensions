@@ -383,12 +383,15 @@ Lookups run on a five-second timer that only checks whether anything is due — 
 
 | State | Rechecked after |
 |---|---|
+| this session just ran `gh pr create\|merge\|ready\|close\|reopen`, `gh run rerun\|cancel`, `gh workflow run`, or `git push` | 10 s after the command finishes, once, every tracked repository |
 | pushed or switched branch since the last lookup | 15 s |
 | open PR with checks still running | 20 s for their first 15 min, then 1 min until 30 min, then 5 min |
 | published branch, no PR yet | 60 s |
 | branch on no remote (never pushed) | 10 min |
 | open PR, checks settled or absent | 5 min |
 | merged or closed | never — hidden, and only looked up again after a push or branch switch |
+
+The command trigger watches this session's Bash calls (including ones a codemode script makes) and costs nothing until one of those commands runs. It cannot see actions taken on github.com or in another terminal; those wait for the ordinary cadence below, which for a settled PR is up to five minutes.
 
 "Pushed" means the same-named remote-tracking branch (`refs/remotes/*/<branch>`, read from git's ref files, no process) moved. A local commit does not count: GitHub cannot see it. A branch is published when that ref exists or the branch tracks a same-named upstream.
 

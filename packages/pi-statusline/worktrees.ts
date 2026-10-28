@@ -36,6 +36,8 @@ export const PR_IDLE_AFTER_MS = 10 * 60_000;
 export const PR_DORMANT_AFTER_MS = 60 * 60_000;
 /** Floor between lookups after a push or branch switch. */
 export const PR_MIN_INTERVAL_MS = 15_000;
+/** After this session runs a command that changes a PR or starts CI, GitHub gets this long to register it. */
+export const PR_NUDGE_DELAY_MS = 10_000;
 /** A poll lock older than this belongs to a process that died mid-lookup (gh itself times out at 8 s). */
 const PR_LOCK_STALE_MS = 30_000;
 /** Shared answers for branches nobody has asked about in this long are dropped from the cache. */
@@ -438,6 +440,18 @@ export async function readRemoteBranch(commonDir: string, branch: string): Promi
 	return undefined;
 }
 
+// gh subcommands that change a PR or (re)start its CI, and git push with any -C/-c options before it.
+const PR_ACTION =
+	/\bgh\s+(?:run\s+(?:rerun|cancel)|workflow\s+run|pr\s+(?:create|merge|ready|close|reopen))\b|\bgit\s+(?:-[Cc]\s+\S+\s+)*push\b/;
+
+/** Whether a finished tool call changed a PR or its CI, making a prompt re-check worth one lookup. */
+export function isPullRequestAction(toolName: string, input: unknown): boolean {
+	const baseName = toolName.slice(toolName.lastIndexOf(".") + 1);
+	if (baseName !== "bash" || !input || typeof input !== "object") return false;
+	const command = (input as { command?: unknown }).command;
+	return typeof command === "string" && PR_ACTION.test(stripHeredocBodies(command));
+}
+
 export type LookupFailure = "rate-limited" | "unsupported" | "failed";
 
 /** Sorts a failed `gh` lookup by how long it is worth waiting before asking again. */
@@ -685,6 +699,8 @@ export class SessionWorktreeTracker {
 	private readonly abortController = new AbortController();
 	private timer: ReturnType<typeof setInterval> | undefined;
 	private lastActivityAt: number;
+	/** When a PR-changing command this session ran becomes worth a look; answers fetched after it satisfy it. */
+	private nudgeAt: number | undefined;
 	private disposed = false;
 
 	constructor(private readonly host: WorktreeTrackerHost) {
@@ -726,6 +742,17 @@ export class SessionWorktreeTracker {
 		if (added.length === 0) return;
 		await Promise.all(added.map((path) => this.refreshPath(path)));
 		await this.pollPullRequests();
+	}
+
+	/**
+	 * Called once a tool has finished. A merge, rerun, push and the like makes every
+	 * tracked repository due shortly, instead of waiting out a settled interval that
+	 * could swallow a whole CI run. The poll timer picks it up, so this spawns nothing.
+	 */
+	observeToolResult(toolName: string, input: unknown): void {
+		if (!isPullRequestAction(toolName, input)) return;
+		this.lastActivityAt = this.now();
+		this.nudgeAt = this.now() + PR_NUDGE_DELAY_MS;
 	}
 
 	async includeCurrentWorktree(cwd: string): Promise<void> {
@@ -792,6 +819,7 @@ export class SessionWorktreeTracker {
 		// Nobody has used this session for an hour; what it shows can wait for the next turn.
 		if (quiet >= PR_DORMANT_AFTER_MS) return false;
 		if (worktree.prCheckedAt === 0) return true;
+		if (this.nudgeAt !== undefined && now >= this.nudgeAt && worktree.prCheckedAt < this.nudgeAt) return true;
 		const elapsed = now - worktree.prCheckedAt;
 		// A push or branch switch is exactly when a PR or its checks change.
 		if (worktree.prCheckedKey !== pollKey(worktree)) return elapsed >= PR_MIN_INTERVAL_MS;

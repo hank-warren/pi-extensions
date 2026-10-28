@@ -645,6 +645,10 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 	pi.on("tool_call", (event) => {
 		if (tracker) runInBackground(tracker.observeToolInput(event.toolName, event.input));
 	});
+	// After the command has run, so a merge or rerun is on GitHub before the re-check.
+	pi.on("tool_result", (event) => {
+		tracker?.observeToolResult(event.toolName, event.input);
+	});
 	pi.on("turn_end", (event, ctx) => {
 		if (requestRender && settings.showCacheCelebration) {
 			triggerCacheCelebrationForMessage(event.message, cacheCelebration);

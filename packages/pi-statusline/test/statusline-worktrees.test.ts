@@ -9,12 +9,14 @@ import {
 	extractWorktreePathsFromToolCall,
 	buildPullRequestQuery,
 	classifyLookupFailure,
+	isPullRequestAction,
 	PR_ABSENT_INTERVAL_MS,
 	PR_DORMANT_AFTER_MS,
 	PR_FAILURE_INTERVAL_MS,
 	PR_IDLE_AFTER_MS,
 	PR_IDLE_INTERVAL_MS,
 	PR_MIN_INTERVAL_MS,
+	PR_NUDGE_DELAY_MS,
 	PR_PENDING_FAST_FOR_MS,
 	PR_PENDING_INTERVAL_MS,
 	PR_PENDING_MAX_INTERVAL_MS,
@@ -759,4 +761,87 @@ test("repeated failures back off exponentially, and a repository outside GitHub 
 	now += 1;
 	await tracker.refresh();
 	assert.equal(github.calls.length, 5);
+});
+
+test("isPullRequestAction spots commands that change a PR or start its CI", () => {
+	const bash = (command: string) => isPullRequestAction("bash", { command });
+	for (const command of [
+		"gh run rerun 40742717132 -R hank-warren/pi-extensions",
+		"gh run rerun --failed 123",
+		"gh run cancel 123",
+		"gh workflow run ci.yml --ref feat/x",
+		"cd ~/repos/worktrees/x && gh pr create --fill",
+		"gh pr merge 76 --squash",
+		"gh pr ready 76",
+		"gh pr close 76 && echo done",
+		"gh pr reopen 76",
+		"git push -u origin HEAD",
+		"git -C ~/repos/worktrees/x push",
+		"git -c push.default=current push",
+	]) {
+		assert.equal(bash(command), true, command);
+	}
+	for (const command of [
+		"gh pr view 76 --json state",
+		"gh pr checks 76 --watch",
+		"gh run watch 123",
+		"gh run view 123 --log",
+		"git stash push -m wip",
+		"git log --oneline",
+		"cat <<'EOF'\ngh pr merge 76\nEOF",
+	]) {
+		assert.equal(bash(command), false, command);
+	}
+	assert.equal(isPullRequestAction("functions.bash", { command: "gh pr merge 1" }), true);
+	assert.equal(isPullRequestAction("write", { path: "README.md", content: "gh pr merge 1" }), false);
+	assert.equal(isPullRequestAction("bash", { command: 7 }), false);
+});
+
+test("a rerun or merge from this session is looked at within seconds, not at the next settled poll", async (t) => {
+	const fixture = await fixtureWorktree();
+	t.after(() => rm(fixture.root, { recursive: true, force: true }));
+	const start = 1_000_000;
+	let now = start;
+	const prs = new Map([["feature/statusline", [{ number: 76, state: "OPEN", rollup: "SUCCESS" } as FakeNode]]]);
+	const github = fakeGitHub(prs);
+	const tracker = session(fixture, github, { now: () => now });
+	t.after(() => tracker.dispose());
+	const tick = async (until: number) => {
+		while (now < until) {
+			now += PR_POLL_TICK_MS;
+			await tracker.pollPullRequests();
+		}
+	};
+
+	await tracker.observeToolInput("read", { path: join(fixture.path, "README.md") });
+	assert.equal(tracker.getWorktrees()[0]?.prChecks, "success");
+
+	await tick(start + 60_000);
+	tracker.observeToolResult("bash", { command: "gh pr view 76" });
+	await tick(start + 120_000);
+	assert.equal(github.calls.length, 1, "reading a PR changes nothing");
+
+	// Two actions in quick succession cost one lookup, after the last of them.
+	tracker.observeToolResult("bash", { command: "gh run rerun 123" });
+	await tick(now + PR_POLL_TICK_MS);
+	tracker.observeToolResult("bash", { command: "gh run rerun 456" });
+	const nudged = now;
+	prs.set("feature/statusline", [{ number: 76, state: "OPEN", rollup: "PENDING" }]);
+	await tick(nudged + PR_NUDGE_DELAY_MS - PR_POLL_TICK_MS);
+	assert.equal(github.calls.length, 1, "GitHub gets a moment to register the rerun");
+	await tick(nudged + PR_NUDGE_DELAY_MS);
+	assert.equal(github.calls.length, 2);
+	assert.equal(tracker.getWorktrees()[0]?.prChecks, "pending", "the rerun shows up long before the 5 min poll");
+
+	prs.set("feature/statusline", [{ number: 76, state: "OPEN", rollup: "SUCCESS" }]);
+	await tick(now + PR_PENDING_INTERVAL_MS);
+	assert.equal(tracker.getWorktrees()[0]?.prChecks, "success");
+
+	tracker.observeToolResult("bash", { command: "gh pr merge 76 --squash" });
+	prs.set("feature/statusline", [{ number: 76, state: "MERGED" }]);
+	await tick(now + PR_NUDGE_DELAY_MS);
+	assert.deepEqual(tracker.getWorktrees(), [], "a merged worktree leaves the line within seconds");
+	const calls = github.calls.length;
+	await tick(now + PR_SETTLED_INTERVAL_MS * 2);
+	assert.equal(github.calls.length, calls, "an answered nudge is not repeated");
 });

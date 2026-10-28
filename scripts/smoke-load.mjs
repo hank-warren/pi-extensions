@@ -47,6 +47,7 @@ const EXPECTED_SURFACES = {
 			"session_tree",
 			"thinking_level_select",
 			"tool_call",
+			"tool_result",
 			"turn_end",
 		],
 	},
