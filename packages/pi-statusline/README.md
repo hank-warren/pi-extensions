@@ -379,18 +379,26 @@ Output and reasoning tokens are excluded because they are not prompt-cache candi
 
 PRs are looked up with `gh api graphql`, **one request per repository**: every tracked worktree of that repository rides in the same query, its branch names passed as GraphQL variables. `gh` resolves the repository from the worktree's remotes the same way `gh pr view` does, so `gh repo set-default` applies. Without `gh`, or outside GitHub, the lookup fails quietly and the line shows no PR.
 
-Lookups run on a five-second timer that only checks whether anything is due — a tick with nothing due spawns nothing — plus right after a worktree is first tracked and at each turn end. A repository is due when any of its worktrees is:
+Lookups run on a five-second timer that only checks whether anything is due — a tick with nothing due reads nothing and spawns nothing — plus right after a worktree is first tracked and at each turn end. A repository is due when any of its worktrees is:
 
 | State | Rechecked after |
 |---|---|
-| branch, commit, upstream, or ahead count changed since the last lookup (a commit, a push, a branch switch) | 15 s |
-| open PR with checks still running | 30 s |
-| no PR yet | 60 s |
-| last lookup failed (the last known PR is kept) | 60 s |
+| pushed or switched branch since the last lookup | 15 s |
+| open PR with checks still running | 30 s, growing to a quarter of how long they have run, capped at 5 min |
+| published branch, no PR yet | 60 s |
+| branch on no remote (never pushed) | 10 min |
 | open PR, checks settled or absent | 5 min |
-| merged or closed | never — hidden, and only looked up again if local state changes |
+| merged or closed | never — hidden, and only looked up again after a push or branch switch |
 
-Running checks are polled at 30 seconds even in an idle session, so CI finishing shows up without a keypress. Everything else slows to ten minutes once no turn has ended for ten minutes.
+"Pushed" means the same-named remote-tracking branch (`refs/remotes/*/<branch>`, read from git's ref files, no process) moved. A local commit does not count: GitHub cannot see it. A branch is published when that ref exists or the branch tracks a same-named upstream.
+
+Once no turn has ended for ten minutes, absent, settled and unpublished lookups slow to ten minutes; running checks keep their own backoff. After an hour with no turn the tracker stops asking GitHub anything until the next turn or tool call.
+
+A failed lookup keeps the last known PR and backs off per repository: 1 min, doubling per consecutive failure up to 30 min. A repository `gh` cannot map to GitHub (no GitHub remote) is not asked again for six hours. A rate-limited answer pauses every repository on the host for fifteen minutes, because GitHub's limits belong to the account.
+
+#### Shared across sessions
+
+PR answers are host-wide, like the usage meters: every pi process shares `~/.pi/agent/statusline-prs/`, one file per repository (keyed by its common git dir) plus `host.json` for a rate-limit pause. A session whose lookup is due first reads that file and adopts any newer answer for the same push, so fifty sessions over one repository cost one lookup per interval rather than fifty. Before asking GitHub, a process takes a lock file for the repository; while another holds it, the rest skip the tick and adopt its answer on the next one. Locks older than thirty seconds belong to a dead process and are taken over. Writes are atomic (temp file and rename), and branches nobody has asked about for a week are dropped. A tracker rebuilt by tree navigation or a reload starts from the cache instead of re-asking.
 
 A branch name can outlive its PR — a new worktree reusing the name of one that was merged. The query fetches each branch's five newest PRs, and an open one always wins. A merged or closed PR only counts when it holds this worktree's work: its head commit is checked out, or the branch tracks a same-named remote branch with nothing unpushed. Otherwise the old PR is ignored and the worktree stays visible.
 

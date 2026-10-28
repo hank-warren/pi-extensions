@@ -1,23 +1,40 @@
-import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, open, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import type { ExecResult } from "@earendil-works/pi-coding-agent";
+import { pid } from "node:process";
+import { type ExecResult, getAgentDir } from "@earendil-works/pi-coding-agent";
 
-/** How often the poll timer checks whether any repository is due; a due-less tick costs nothing. */
+/** How often the poll timer checks whether any repository is due; a due-less tick reads and spawns nothing. */
 export const PR_POLL_TICK_MS = 5_000;
-/** A branch with no PR yet. */
+/** A published branch with no PR yet. */
 export const PR_ABSENT_INTERVAL_MS = 60_000;
-/** An open PR whose checks are still running. */
+/** A branch that exists on no remote cannot have a PR yet; it is still checked now and then for one pushed elsewhere. */
+export const PR_UNPUBLISHED_INTERVAL_MS = 10 * 60_000;
+/** Floor for running checks; the interval grows to a quarter of how long they have been running. */
 export const PR_PENDING_INTERVAL_MS = 30_000;
+/** Ceiling for running checks, so a required check that never reports cannot pin a fast poll. */
+export const PR_PENDING_MAX_INTERVAL_MS = 5 * 60_000;
 /** An open PR whose checks have settled (or that has none). */
 export const PR_SETTLED_INTERVAL_MS = 5 * 60_000;
-/** A failed lookup, so a network blip does not hide CI for a whole settled interval. */
+/** First retry after a failed lookup; each consecutive failure doubles it, up to the max. */
 export const PR_FAILURE_INTERVAL_MS = 60_000;
-/** Absent and settled lookups slow to this once the session has been idle for PR_IDLE_AFTER_MS. */
+export const PR_FAILURE_MAX_INTERVAL_MS = 30 * 60_000;
+/** A repository gh cannot map to GitHub (no GitHub remote) is not asked again for this long. */
+export const PR_UNSUPPORTED_RETRY_MS = 6 * 60 * 60_000;
+/** GitHub's limits are per account, so one rate-limited answer pauses every repository on the host. */
+export const PR_RATE_LIMIT_BACKOFF_MS = 15 * 60_000;
+/** Absent, settled and unpublished lookups slow to this once the session has been idle for PR_IDLE_AFTER_MS. */
 export const PR_IDLE_INTERVAL_MS = 10 * 60_000;
 export const PR_IDLE_AFTER_MS = 10 * 60_000;
-/** Floor between lookups when local state (branch, commit, push) changes. */
+/** Past this without a turn nothing is looked up at all; the next turn or tool call resumes polling. */
+export const PR_DORMANT_AFTER_MS = 60 * 60_000;
+/** Floor between lookups after a push or branch switch. */
 export const PR_MIN_INTERVAL_MS = 15_000;
+/** A poll lock older than this belongs to a process that died mid-lookup (gh itself times out at 8 s). */
+const PR_LOCK_STALE_MS = 30_000;
+/** Shared answers for branches nobody has asked about in this long are dropped from the cache. */
+const PR_CACHE_RETENTION_MS = 7 * 24 * 60 * 60_000;
 /** Candidates fetched per branch, newest first; enough to skip past an old PR that reused the name. */
 const PR_CANDIDATES = 5;
 // The URL is embedded in an OSC 8 sequence, so control characters must never reach it.
@@ -55,10 +72,17 @@ interface CachedWorktree extends SessionWorktree {
 	commonDir: string;
 	head?: string;
 	upstream?: string;
+	/** Commit of the same-named remote-tracking branch: a push moves it, a local commit does not. */
+	remoteHead?: string;
+	/** The branch exists on a remote, so a PR can exist for it. */
+	published: boolean;
+	/** Fetch time of the PR data held; 0 before the first answer. */
 	prCheckedAt: number;
-	/** Local state at the last lookup; a different one makes the PR due sooner. */
+	/** Poll key the held PR data was fetched for; a different current key makes the PR due sooner. */
 	prCheckedKey?: string;
-	prFailed?: boolean;
+	/** When the open PR's current head started reporting running checks. */
+	pendingSince?: number;
+	pendingRef?: string;
 }
 
 interface WorktreeMetadata {
@@ -86,6 +110,8 @@ interface WorktreeTrackerHost {
 	worktreeRoot: string;
 	/** Home directory used to recognise `~`/`$HOME` spellings of the root. */
 	home?: string;
+	/** Directory of the host-wide PR cache shared by every pi process; defaults under the agent dir. */
+	cacheDir?: string;
 	now?: () => number;
 	onChange?: () => void;
 }
@@ -373,8 +399,75 @@ export function selectPullRequest(
 	return undefined;
 }
 
+const OBJECT_ID = /^[0-9a-f]{40,64}$/;
+
+/**
+ * Commit of `refs/remotes/<any remote>/<branch>`, read from git's ref files
+ * rather than by spawning git; undefined when no remote has the branch.
+ */
+export async function readRemoteBranch(commonDir: string, branch: string): Promise<string | undefined> {
+	const remotesDir = join(commonDir, "refs", "remotes");
+	let remotes: string[] = [];
+	try {
+		remotes = await readdir(remotesDir);
+	} catch {
+		// No loose remote-tracking refs; packed-refs may still have them.
+	}
+	for (const remote of remotes) {
+		try {
+			const value = (await readFile(join(remotesDir, remote, branch), "utf8")).trim();
+			if (OBJECT_ID.test(value)) return value;
+		} catch {
+			// Not on this remote.
+		}
+	}
+	try {
+		const packed = await readFile(join(commonDir, "packed-refs"), "utf8");
+		for (const line of packed.split(/\r?\n/)) {
+			const match = /^([0-9a-f]{40,64}) refs\/remotes\/[^/]+\/(.+)$/.exec(line);
+			if (match?.[2] === branch) return match[1];
+		}
+	} catch {
+		// No packed refs.
+	}
+	return undefined;
+}
+
+export type LookupFailure = "rate-limited" | "unsupported" | "failed";
+
+/** Sorts a failed `gh` lookup by how long it is worth waiting before asking again. */
+export function classifyLookupFailure(output: string): LookupFailure {
+	const text = output.toLowerCase();
+	if (/rate limit|abuse detection/.test(text)) return "rate-limited";
+	if (/no git remotes found|none of the git remotes|known github host/.test(text)) return "unsupported";
+	return "failed";
+}
+
+/** Delay before the next lookup after `failures` consecutive failures ending in `failure`. */
+export function failureBackoff(failure: LookupFailure, failures: number): number {
+	if (failure === "unsupported") return PR_UNSUPPORTED_RETRY_MS;
+	if (failure === "rate-limited") return PR_RATE_LIMIT_BACKOFF_MS;
+	return Math.min(PR_FAILURE_MAX_INTERVAL_MS, PR_FAILURE_INTERVAL_MS * 2 ** Math.max(0, failures - 1));
+}
+
+/** A push or branch switch changes this; a local commit does not, because GitHub cannot see it yet. */
 function pollKey(worktree: CachedWorktree): string {
-	return [worktree.branch, worktree.head ?? "", worktree.ahead, worktree.upstream ?? ""].join("\n");
+	return `${worktree.branch}\n${worktree.remoteHead ?? (worktree.published ? "published" : "")}`;
+}
+
+function isPublished(worktree: Pick<CachedWorktree, "branch" | "upstream">, remoteHead: string | undefined): boolean {
+	return remoteHead !== undefined || worktree.upstream?.endsWith(`/${worktree.branch}`) === true;
+}
+
+function pollInterval(worktree: CachedWorktree, idle: boolean, now: number): number {
+	if (worktree.pr !== undefined && worktree.prChecks === "pending") {
+		// Fast while CI is young, then a quarter of its age, so a check that never reports cannot pin a 30 s poll.
+		const running = now - (worktree.pendingSince ?? now);
+		return Math.min(PR_PENDING_MAX_INTERVAL_MS, Math.max(PR_PENDING_INTERVAL_MS, running / 4));
+	}
+	if (idle) return PR_IDLE_INTERVAL_MS;
+	if (!worktree.published) return PR_UNPUBLISHED_INTERVAL_MS;
+	return worktree.pr === undefined ? PR_ABSENT_INTERVAL_MS : PR_SETTLED_INTERVAL_MS;
 }
 
 function isTerminal(worktree: SessionWorktree): boolean {
@@ -414,11 +507,175 @@ function sameDisplay(a: CachedWorktree | undefined, b: CachedWorktree): boolean 
 	);
 }
 
+/** One branch's last answer from GitHub, shared by every pi process on the host. */
+interface SharedBranch {
+	fetchedAt: number;
+	/** Poll key of the branch when it was fetched. */
+	key: string;
+	candidates: PullRequestCandidate[];
+	pendingSince?: number;
+	/** `number:headRefOid` of the open PR whose checks have been running since pendingSince. */
+	pendingRef?: string;
+}
+
+interface SharedRepository {
+	branches: Map<string, SharedBranch>;
+	failures?: number;
+	retryAt?: number;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value);
+}
+
+function parseStoredCandidate(value: unknown): PullRequestCandidate[] {
+	if (!value || typeof value !== "object") return [];
+	const body = value as Record<string, unknown>;
+	if (!isFiniteNumber(body.number) || typeof body.state !== "string") return [];
+	const candidate: PullRequestCandidate = { number: body.number, state: body.state };
+	if (typeof body.url === "string" && SAFE_URL.test(body.url)) candidate.url = body.url;
+	if (typeof body.headRefOid === "string") candidate.headRefOid = body.headRefOid;
+	if (body.checks === "pending" || body.checks === "success" || body.checks === "failure") {
+		candidate.checks = body.checks;
+	}
+	return [candidate];
+}
+
+function parseSharedRepository(json: unknown): SharedRepository {
+	const repository: SharedRepository = { branches: new Map() };
+	if (!json || typeof json !== "object") return repository;
+	const body = json as Record<string, unknown>;
+	if (isFiniteNumber(body.failures)) repository.failures = body.failures;
+	if (isFiniteNumber(body.retryAt)) repository.retryAt = body.retryAt;
+	if (!body.branches || typeof body.branches !== "object") return repository;
+	for (const [branch, value] of Object.entries(body.branches)) {
+		if (!value || typeof value !== "object") continue;
+		const entry = value as Record<string, unknown>;
+		if (!isFiniteNumber(entry.fetchedAt) || typeof entry.key !== "string" || !Array.isArray(entry.candidates)) continue;
+		const parsed: SharedBranch = {
+			fetchedAt: entry.fetchedAt,
+			key: entry.key,
+			candidates: entry.candidates.flatMap(parseStoredCandidate),
+		};
+		if (isFiniteNumber(entry.pendingSince) && typeof entry.pendingRef === "string") {
+			parsed.pendingSince = entry.pendingSince;
+			parsed.pendingRef = entry.pendingRef;
+		}
+		repository.branches.set(branch, parsed);
+	}
+	return repository;
+}
+
+let writeSequence = 0;
+
+/**
+ * Host-wide PR answers, one file per repository. A busy host runs dozens of pi
+ * sessions over the same repositories, and GitHub's GraphQL budget is per
+ * account: without this every session would ask the same question on its own.
+ * A lock file makes one process the poller for a repository at a time; the
+ * others adopt its answer on a later tick.
+ */
+class PullRequestStore {
+	constructor(private readonly dir: string) {}
+
+	async readRepository(commonDir: string): Promise<SharedRepository> {
+		try {
+			return parseSharedRepository(JSON.parse(await readFile(this.path(commonDir, ".json"), "utf8")));
+		} catch {
+			return { branches: new Map() };
+		}
+	}
+
+	writeRepository(commonDir: string, repository: SharedRepository, now: number): Promise<void> {
+		const branches = Object.fromEntries(
+			[...repository.branches].filter(([, entry]) => now - entry.fetchedAt < PR_CACHE_RETENTION_MS),
+		);
+		return this.write(this.path(commonDir, ".json"), {
+			commonDir,
+			branches,
+			failures: repository.failures,
+			retryAt: repository.retryAt,
+		});
+	}
+
+	async readHostRetryAt(): Promise<number> {
+		try {
+			const value = (JSON.parse(await readFile(join(this.dir, "host.json"), "utf8")) as { retryAt?: unknown })
+				.retryAt;
+			return isFiniteNumber(value) ? value : 0;
+		} catch {
+			return 0;
+		}
+	}
+
+	writeHostRetryAt(retryAt: number): Promise<void> {
+		return this.write(join(this.dir, "host.json"), { retryAt });
+	}
+
+	/** A release function, "held" while a sibling is polling, or "unavailable" when the directory is unusable. */
+	async lock(commonDir: string): Promise<(() => Promise<void>) | "held" | "unavailable"> {
+		const path = this.path(commonDir, ".lock");
+		for (let attempt = 0; attempt < 2; attempt++) {
+			try {
+				await mkdir(this.dir, { recursive: true, mode: 0o700 });
+				await (await open(path, "wx", 0o600)).close();
+				return () => unlink(path).catch(() => {});
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "EEXIST") return "unavailable";
+				try {
+					if (Date.now() - (await stat(path)).mtimeMs < PR_LOCK_STALE_MS) return "held";
+					await unlink(path);
+				} catch {
+					// Someone else removed or replaced it first; the retry settles who owns it.
+				}
+			}
+		}
+		return "held";
+	}
+
+	private path(commonDir: string, suffix: string): string {
+		return join(this.dir, `${createHash("sha256").update(commonDir).digest("hex").slice(0, 16)}${suffix}`);
+	}
+
+	/** Atomic write; a lost race costs at most one extra lookup, never a corrupt file. */
+	private async write(path: string, value: unknown): Promise<void> {
+		const temporary = `${path}.${pid}.${++writeSequence}.tmp`;
+		try {
+			await mkdir(this.dir, { recursive: true, mode: 0o700 });
+			await writeFile(temporary, JSON.stringify(value), { mode: 0o600 });
+			await rename(temporary, path);
+		} catch {
+			// The cache is an optimisation; failing to share it must never surface.
+			await unlink(temporary).catch(() => {});
+		}
+	}
+}
+
+function withPullRequest(worktree: CachedWorktree, entry: SharedBranch): CachedWorktree {
+	const pr = selectPullRequest(entry.candidates, worktree);
+	return {
+		...worktree,
+		pr: pr?.number,
+		prState: pr?.state,
+		prUrl: pr?.url,
+		prChecks: pr?.state === "OPEN" ? pr.checks : undefined,
+		prCheckedAt: entry.fetchedAt,
+		prCheckedKey: entry.key,
+		pendingSince: entry.pendingSince,
+		pendingRef: entry.pendingRef,
+	};
+}
+
 export class SessionWorktreeTracker {
 	private readonly trackedPaths = new Set<string>();
 	private readonly cache = new Map<string, CachedWorktree>();
 	private readonly inFlight = new Map<string, Promise<void>>();
 	private readonly prInFlight = new Map<string, Promise<void>>();
+	/** Earliest next lookup per repository after a failure, mirrored from the shared cache. */
+	private readonly retryAt = new Map<string, number>();
+	/** Earliest next lookup anywhere, after GitHub rate-limited the account. */
+	private hostRetryAt = 0;
+	private readonly store: PullRequestStore;
 	private readonly abortController = new AbortController();
 	private timer: ReturnType<typeof setInterval> | undefined;
 	private lastActivityAt: number;
@@ -426,6 +683,7 @@ export class SessionWorktreeTracker {
 
 	constructor(private readonly host: WorktreeTrackerHost) {
 		this.lastActivityAt = this.now();
+		this.store = new PullRequestStore(host.cacheDir ?? join(getAgentDir(), "statusline-prs"));
 	}
 
 	/** Polls PRs on a timer so CI and newly opened PRs update while the session is idle. */
@@ -492,7 +750,7 @@ export class SessionWorktreeTracker {
 		await this.pollPullRequests();
 	}
 
-	/** One lookup per repository with anything due; nothing runs when nothing is due. */
+	/** Looks up each repository with anything due; nothing is read or spawned when nothing is due. */
 	async pollPullRequests(): Promise<void> {
 		if (this.disposed) return;
 		const now = this.now();
@@ -516,18 +774,23 @@ export class SessionWorktreeTracker {
 		return this.host.now?.() ?? Date.now();
 	}
 
+	private worktreesOf(commonDir: string): CachedWorktree[] {
+		return [...this.cache.values()]
+			.filter((worktree) => worktree.commonDir === commonDir)
+			.sort((a, b) => a.path.localeCompare(b.path));
+	}
+
 	private isDue(worktree: CachedWorktree, now: number): boolean {
+		if (now < Math.max(this.hostRetryAt, this.retryAt.get(worktree.commonDir) ?? 0)) return false;
+		const quiet = now - this.lastActivityAt;
+		// Nobody has used this session for an hour; what it shows can wait for the next turn.
+		if (quiet >= PR_DORMANT_AFTER_MS) return false;
 		if (worktree.prCheckedAt === 0) return true;
 		const elapsed = now - worktree.prCheckedAt;
-		// A new commit, push, or branch switch is exactly when a PR or its checks change.
+		// A push or branch switch is exactly when a PR or its checks change.
 		if (worktree.prCheckedKey !== pollKey(worktree)) return elapsed >= PR_MIN_INTERVAL_MS;
-		const idle = now - this.lastActivityAt >= PR_IDLE_AFTER_MS;
-		if (worktree.prFailed) return elapsed >= (idle ? PR_IDLE_INTERVAL_MS : PR_FAILURE_INTERVAL_MS);
 		if (isTerminal(worktree)) return false;
-		// CI is the one thing worth watching closely even while nobody is typing.
-		if (worktree.pr !== undefined && worktree.prChecks === "pending") return elapsed >= PR_PENDING_INTERVAL_MS;
-		if (idle) return elapsed >= PR_IDLE_INTERVAL_MS;
-		return elapsed >= (worktree.pr === undefined ? PR_ABSENT_INTERVAL_MS : PR_SETTLED_INTERVAL_MS);
+		return elapsed >= pollInterval(worktree, quiet >= PR_IDLE_AFTER_MS, now);
 	}
 
 	private pollRepository(commonDir: string): Promise<void> {
@@ -541,11 +804,60 @@ export class SessionWorktreeTracker {
 	}
 
 	private async pollRepositoryUncached(commonDir: string): Promise<void> {
-		const now = this.now();
-		// Riding along costs one more alias in a query that is being sent anyway.
-		const included = [...this.cache.values()].filter(
-			(worktree) => worktree.commonDir === commonDir && (!isTerminal(worktree) || this.isDue(worktree, now)),
+		// Ref files only: notices a push made from another session while this one sat idle.
+		await this.refreshRemoteHeads(commonDir);
+		// A sibling process may already have answered; adopting that costs one file read.
+		let shared = await this.store.readRepository(commonDir);
+		if (this.disposed || !this.adopt(commonDir, shared)) return;
+		const lock = await this.store.lock(commonDir);
+		// A sibling is asking right now; its answer is adopted on a later tick.
+		if (lock === "held") return;
+		try {
+			if (lock !== "unavailable") {
+				// The previous holder may have answered between our read and the lock.
+				shared = await this.store.readRepository(commonDir);
+				this.hostRetryAt = Math.max(this.hostRetryAt, await this.store.readHostRetryAt());
+				if (this.disposed || !this.adopt(commonDir, shared)) return;
+			}
+			await this.lookUp(commonDir, shared);
+		} finally {
+			if (lock !== "unavailable") await lock();
+		}
+	}
+
+	private async refreshRemoteHeads(commonDir: string): Promise<void> {
+		await Promise.all(
+			this.worktreesOf(commonDir).map(async (worktree) => {
+				const remoteHead = await readRemoteBranch(commonDir, worktree.branch);
+				const current = this.cache.get(worktree.path);
+				if (!current || current.branch !== worktree.branch || current.remoteHead === remoteHead) return;
+				this.cache.set(worktree.path, { ...current, remoteHead, published: isPublished(current, remoteHead) });
+			}),
 		);
+	}
+
+	/** Takes shared answers newer than ours for the same push; true when anything in the repository is still due. */
+	private adopt(commonDir: string, shared: SharedRepository): boolean {
+		if (shared.retryAt !== undefined) {
+			this.retryAt.set(commonDir, Math.max(this.retryAt.get(commonDir) ?? 0, shared.retryAt));
+		}
+		let changed = false;
+		for (const worktree of this.worktreesOf(commonDir)) {
+			const entry = shared.branches.get(worktree.branch);
+			if (!entry || entry.fetchedAt <= worktree.prCheckedAt || entry.key !== pollKey(worktree)) continue;
+			const next = withPullRequest(worktree, entry);
+			if (!sameDisplay(worktree, next)) changed = true;
+			this.cache.set(worktree.path, next);
+		}
+		if (changed) this.host.onChange?.();
+		const now = this.now();
+		return this.worktreesOf(commonDir).some((worktree) => this.isDue(worktree, now));
+	}
+
+	private async lookUp(commonDir: string, shared: SharedRepository): Promise<void> {
+		const now = this.now();
+		// Riding along costs one more alias in a query being sent anyway, and refreshes the answer for siblings.
+		const included = this.worktreesOf(commonDir).filter((worktree) => !isTerminal(worktree) || this.isDue(worktree, now));
 		const first = included[0];
 		if (!first) return;
 		const branches = [...new Set(included.map((worktree) => worktree.branch))];
@@ -553,42 +865,62 @@ export class SessionWorktreeTracker {
 		branches.forEach((branch, index) => args.push("-f", `b${index}=${branch}`));
 		args.push("-f", `query=${buildPullRequestQuery(branches.length)}`);
 
-		let candidates: PullRequestCandidate[][] | undefined;
+		let result: ExecResult | undefined;
 		try {
 			// gh resolves {owner}/{repo} from the worktree's remotes, the same way `gh pr view` does.
-			const result = await this.host.exec("gh", args, {
+			result = await this.host.exec("gh", args, {
 				cwd: first.path,
 				timeout: 8_000,
 				signal: this.abortController.signal,
 			});
-			if (result.code === 0) candidates = parsePullRequestResponse(result.stdout, branches.length);
 		} catch {
-			candidates = undefined;
+			result = undefined;
 		}
 		if (this.disposed) return;
+
+		const candidates = result?.code === 0 ? parsePullRequestResponse(result.stdout, branches.length) : undefined;
+		if (!candidates) {
+			// Keep the last known PR: a failed lookup says nothing about the PR itself.
+			const failure = classifyLookupFailure(`${result?.stderr ?? ""}\n${result?.stdout ?? ""}`);
+			const failures = (shared.failures ?? 0) + 1;
+			const retryAt = now + failureBackoff(failure, failures);
+			this.retryAt.set(commonDir, retryAt);
+			if (failure === "rate-limited") {
+				this.hostRetryAt = retryAt;
+				await this.store.writeHostRetryAt(retryAt);
+			}
+			await this.store.writeRepository(commonDir, { ...shared, failures, retryAt }, now);
+			return;
+		}
+
+		this.retryAt.delete(commonDir);
+		const answered = new Map(shared.branches);
+		branches.forEach((branch, index) => {
+			const local = included.find((worktree) => worktree.branch === branch) as CachedWorktree;
+			const list = candidates[index] ?? [];
+			const entry: SharedBranch = { fetchedAt: now, key: pollKey(local), candidates: list };
+			const open = list.find((candidate) => candidate.state === "OPEN");
+			if (open?.checks === "pending") {
+				const ref = `${open.number}:${open.headRefOid ?? ""}`;
+				const previous = shared.branches.get(branch);
+				entry.pendingRef = ref;
+				entry.pendingSince =
+					previous?.pendingRef === ref
+						? (previous.pendingSince ?? now)
+						: local.pendingRef === ref
+							? (local.pendingSince ?? now)
+							: now;
+			}
+			answered.set(branch, entry);
+		});
+		await this.store.writeRepository(commonDir, { branches: answered }, now);
 
 		let changed = false;
 		for (const requested of included) {
 			const current = this.cache.get(requested.path);
 			// A branch switch mid-lookup already reset this entry; the answer is for the old branch.
 			if (!current || current.branch !== requested.branch) continue;
-			let next: CachedWorktree;
-			if (!candidates) {
-				// Keep the last known PR: a failed lookup says nothing about the PR itself.
-				next = { ...current, prCheckedAt: now, prCheckedKey: pollKey(requested), prFailed: true };
-			} else {
-				const pr = selectPullRequest(candidates[branches.indexOf(requested.branch)] ?? [], requested);
-				next = {
-					...current,
-					pr: pr?.number,
-					prState: pr?.state,
-					prUrl: pr?.url,
-					prChecks: pr?.state === "OPEN" ? pr.checks : undefined,
-					prCheckedAt: now,
-					prCheckedKey: pollKey(requested),
-					prFailed: false,
-				};
-			}
+			const next = withPullRequest(current, answered.get(requested.branch) as SharedBranch);
 			if (!sameDisplay(current, next)) changed = true;
 			this.cache.set(requested.path, next);
 		}
@@ -621,12 +953,14 @@ export class SessionWorktreeTracker {
 			path,
 			this.abortController.signal,
 		);
+		const branch = status?.branch ?? metadata.branch;
+		const remoteHead = await readRemoteBranch(metadata.commonDir, branch);
 		if (this.disposed) return;
 		// Read after the awaits: a PR lookup may have landed while git was running.
 		const previous = this.cache.get(path);
-		const branch = status?.branch ?? metadata.branch;
 		const branchChanged = previous !== undefined && previous.branch !== branch;
 		const kept = branchChanged ? undefined : previous;
+		const upstream = status ? status.upstream : kept?.upstream;
 		const next: CachedWorktree = {
 			...metadata,
 			branch,
@@ -634,14 +968,17 @@ export class SessionWorktreeTracker {
 			ahead: status?.ahead ?? kept?.ahead ?? 0,
 			behind: status?.behind ?? kept?.behind ?? 0,
 			head: status ? status.head : kept?.head,
-			upstream: status ? status.upstream : kept?.upstream,
+			upstream,
+			remoteHead,
+			published: isPublished({ branch, upstream }, remoteHead),
 			pr: kept?.pr,
 			prState: kept?.prState,
 			prUrl: kept?.prUrl,
 			prChecks: kept?.prChecks,
 			prCheckedAt: kept?.prCheckedAt ?? 0,
 			prCheckedKey: kept?.prCheckedKey,
-			prFailed: kept?.prFailed,
+			pendingSince: kept?.pendingSince,
+			pendingRef: kept?.pendingRef,
 		};
 		this.cache.set(path, next);
 		if (!sameDisplay(previous, next)) this.host.onChange?.();

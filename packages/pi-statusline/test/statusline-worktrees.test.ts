@@ -8,13 +8,20 @@ import {
 	extractWorktreePathsFromEntries,
 	extractWorktreePathsFromToolCall,
 	buildPullRequestQuery,
+	classifyLookupFailure,
 	PR_ABSENT_INTERVAL_MS,
+	PR_DORMANT_AFTER_MS,
 	PR_FAILURE_INTERVAL_MS,
 	PR_IDLE_AFTER_MS,
 	PR_IDLE_INTERVAL_MS,
 	PR_MIN_INTERVAL_MS,
 	PR_PENDING_INTERVAL_MS,
+	PR_PENDING_MAX_INTERVAL_MS,
+	PR_POLL_TICK_MS,
+	PR_RATE_LIMIT_BACKOFF_MS,
 	PR_SETTLED_INTERVAL_MS,
+	PR_UNPUBLISHED_INTERVAL_MS,
+	PR_UNSUPPORTED_RETRY_MS,
 	parseGitStatus,
 	parsePullRequestResponse,
 	readWorktreeMetadata,
@@ -27,6 +34,7 @@ const WORKTREE_ROOT = "/home/hank/repos/worktrees";
 const HOME = "/home/hank";
 
 const HEAD_OID = "0123456789abcdef0123456789abcdef01234567";
+const NEXT_OID = "89abcdef0123456789abcdef0123456789abcdef";
 
 function gitStatusOutput(
 	branch: string,
@@ -70,11 +78,11 @@ interface FakeNode {
 /** Serves `gh api graphql` from a branch -> PRs map, recording each call's branches. */
 function fakeGitHub(prs: Map<string, FakeNode[]>) {
 	const calls: string[][] = [];
-	let fail = false;
+	let fail: boolean | string = false;
 	const respond = (args: string[]) => {
 		const branches = args.flatMap((arg) => /^b\d+=(.*)$/s.exec(arg)?.[1] ?? []);
 		calls.push(branches);
-		if (fail) return { stdout: "", stderr: "HTTP 502", code: 1, killed: false };
+		if (fail) return { stdout: "", stderr: fail === true ? "HTTP 502" : fail, code: 1, killed: false };
 		const repository = Object.fromEntries(
 			branches.map((branch, index) => [
 				`b${index}`,
@@ -96,10 +104,42 @@ function fakeGitHub(prs: Map<string, FakeNode[]>) {
 	return {
 		calls,
 		respond,
-		setFailing(value: boolean) {
+		/** True fails with a generic error; a string fails with that stderr. */
+		setFailing(value: boolean | string) {
 			fail = value;
 		},
 	};
+}
+
+type Status = { ahead?: number; head?: string; upstream?: string };
+
+/** A tracker as one pi process would build it, over a host cache directory shared with its siblings. */
+function session(
+	fixture: { root: string },
+	github: ReturnType<typeof fakeGitHub>,
+	options: { now: () => number; cacheDir?: string; status?: () => Status; beforeGh?: () => Promise<void> },
+): SessionWorktreeTracker {
+	return new SessionWorktreeTracker({
+		worktreeRoot: join(fixture.root, "home", "repos", "worktrees"),
+		home: join(fixture.root, "home"),
+		cacheDir: options.cacheDir ?? join(fixture.root, "cache"),
+		now: options.now,
+		exec: async (command, args) => {
+			if (command === "git") {
+				const status = options.status?.() ?? {};
+				return { stdout: gitStatusOutput("feature/statusline", 0, false, status), stderr: "", code: 0, killed: false };
+			}
+			await options.beforeGh?.();
+			return github.respond(args);
+		},
+	});
+}
+
+async function eventually(condition: () => boolean): Promise<void> {
+	for (let attempt = 0; attempt < 400 && !condition(); attempt++) {
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	}
+	assert.ok(condition(), "condition never became true");
 }
 
 test("extractWorktreePaths finds conventional worktrees in nested tool inputs", () => {
@@ -461,4 +501,225 @@ test("SessionWorktreeTracker keeps the last known PR through failed lookups", as
 	await tracker.pollPullRequests();
 	assert.equal(github.calls.length, 3, "a failure retries on the short interval");
 	tracker.dispose();
+});
+
+test("classifyLookupFailure separates rate limits and non-GitHub repositories from transient errors", () => {
+	assert.equal(classifyLookupFailure("GraphQL: API rate limit exceeded for user ID 1."), "rate-limited");
+	assert.equal(classifyLookupFailure("HTTP 403: You have exceeded a secondary rate limit."), "rate-limited");
+	assert.equal(classifyLookupFailure('error parsing "owner" value: no git remotes found'), "unsupported");
+	assert.equal(
+		classifyLookupFailure(
+			'error parsing "owner" value: none of the git remotes configured for this repository point to a known GitHub host.',
+		),
+		"unsupported",
+	);
+	assert.equal(classifyLookupFailure("HTTP 502: Bad Gateway"), "failed");
+	assert.equal(classifyLookupFailure(""), "failed");
+});
+
+test("sibling pi processes share one lookup per repository through the host cache", async (t) => {
+	const fixture = await fixtureWorktree();
+	t.after(() => rm(fixture.root, { recursive: true, force: true }));
+	let now = 1_000_000;
+	const github = fakeGitHub(new Map([["feature/statusline", [{ number: 7, state: "OPEN", rollup: "SUCCESS" }]]]));
+	const first = session(fixture, github, { now: () => now });
+	const second = session(fixture, github, { now: () => now });
+	t.after(() => {
+		first.dispose();
+		second.dispose();
+	});
+	const touch = { path: join(fixture.path, "README.md") };
+
+	await first.observeToolInput("read", touch);
+	await second.observeToolInput("read", touch);
+	assert.equal(github.calls.length, 1, "the second session adopts the first one's answer");
+	assert.equal(second.getWorktrees()[0]?.pr, 7);
+
+	now += PR_SETTLED_INTERVAL_MS;
+	await first.pollPullRequests();
+	now += PR_POLL_TICK_MS;
+	await second.pollPullRequests();
+	assert.equal(github.calls.length, 2, "one lookup per interval for the whole host");
+
+	// Tree navigation and reloads rebuild the tracker; the rebuilt one starts from the cache.
+	const rebuilt = session(fixture, github, { now: () => now });
+	t.after(() => rebuilt.dispose());
+	await rebuilt.observeToolInput("read", touch);
+	assert.equal(github.calls.length, 2);
+	assert.equal(rebuilt.getWorktrees()[0]?.pr, 7);
+});
+
+test("a sibling mid-lookup holds the repository and the others take its answer", async (t) => {
+	const fixture = await fixtureWorktree();
+	t.after(() => rm(fixture.root, { recursive: true, force: true }));
+	let now = 1_000_000;
+	const github = fakeGitHub(new Map([["feature/statusline", [{ number: 7, state: "OPEN", rollup: "SUCCESS" }]]]));
+	let started = 0;
+	let release: () => void = () => {};
+	const gate = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const beforeGh = async () => {
+		started++;
+		await gate;
+	};
+	const first = session(fixture, github, { now: () => now, beforeGh });
+	const second = session(fixture, github, { now: () => now, beforeGh });
+	t.after(() => {
+		release();
+		first.dispose();
+		second.dispose();
+	});
+	const touch = { path: join(fixture.path, "README.md") };
+
+	const firstLookup = first.observeToolInput("read", touch);
+	await eventually(() => started === 1);
+	await second.observeToolInput("read", touch);
+	assert.equal(started, 1, "only the lock holder asks GitHub");
+	assert.equal(second.getWorktrees()[0]?.pr, undefined);
+
+	release();
+	await firstLookup;
+	now += PR_POLL_TICK_MS;
+	await second.pollPullRequests();
+	assert.equal(started, 1);
+	assert.equal(second.getWorktrees()[0]?.pr, 7, "the next tick adopts the holder's answer");
+});
+
+test("an unpushed branch is checked rarely, a local commit asks nothing, and a push asks soon", async (t) => {
+	const fixture = await fixtureWorktree();
+	t.after(() => rm(fixture.root, { recursive: true, force: true }));
+	const start = 1_000_000;
+	let now = start;
+	let status: Status = { ahead: 0, head: HEAD_OID, upstream: "origin/main" };
+	const github = fakeGitHub(new Map());
+	const tracker = session(fixture, github, { now: () => now, status: () => status });
+	t.after(() => tracker.dispose());
+
+	await tracker.observeToolInput("read", { path: join(fixture.path, "README.md") });
+	assert.equal(github.calls.length, 1, "a new worktree is checked once, for a PR pushed from elsewhere");
+
+	now += PR_ABSENT_INTERVAL_MS;
+	await tracker.refresh();
+	assert.equal(github.calls.length, 1, "no PR can exist for a branch on no remote");
+	now = start + PR_UNPUBLISHED_INTERVAL_MS;
+	await tracker.refresh();
+	assert.equal(github.calls.length, 2);
+
+	status = { ahead: 1, head: NEXT_OID, upstream: "origin/main" };
+	now += PR_MIN_INTERVAL_MS;
+	await tracker.refresh();
+	assert.equal(github.calls.length, 2, "GitHub cannot see a local commit");
+
+	// `git push` without -u: upstream unchanged, but the remote-tracking ref appears.
+	const remoteRef = join(fixture.root, "pi-extensions", ".git", "refs", "remotes", "origin", "feature");
+	await mkdir(remoteRef, { recursive: true });
+	await writeFile(join(remoteRef, "statusline"), `${NEXT_OID}\n`);
+	await tracker.refresh();
+	assert.equal(github.calls.length, 3, "a push is when a PR appears");
+
+	now += PR_ABSENT_INTERVAL_MS;
+	await tracker.pollPullRequests();
+	assert.equal(github.calls.length, 4, "a published branch is watched for its PR");
+});
+
+test("long-running checks back off, and a session nobody uses stops polling", async (t) => {
+	const fixture = await fixtureWorktree();
+	t.after(() => rm(fixture.root, { recursive: true, force: true }));
+	const start = 1_000_000;
+	let now = start;
+	const times: number[] = [];
+	const github = fakeGitHub(new Map([["feature/statusline", [{ number: 3, state: "OPEN", rollup: "EXPECTED" }]]]));
+	const tracker = session(fixture, github, {
+		now: () => now,
+		beforeGh: async () => {
+			times.push(now);
+		},
+	});
+	t.after(() => tracker.dispose());
+
+	await tracker.observeToolInput("read", { path: join(fixture.path, "README.md") });
+	assert.equal(tracker.getWorktrees()[0]?.prChecks, "pending");
+	while (now < start + 3 * 60 * 60_000) {
+		now += PR_POLL_TICK_MS;
+		await tracker.pollPullRequests();
+	}
+
+	const gaps = times.slice(1).map((time, index) => time - (times[index] as number));
+	assert.equal(gaps[0], PR_PENDING_INTERVAL_MS, "young checks are watched closely");
+	assert.ok(gaps.every((gap, index) => index === 0 || gap >= (gaps[index - 1] as number)), "never speeds up");
+	assert.equal(gaps.at(-1), PR_PENDING_MAX_INTERVAL_MS, "a check that never reports is capped, not pinned");
+	assert.ok((times.at(-1) as number) - start < PR_DORMANT_AFTER_MS, "an hour without a turn stops polling");
+	assert.ok(times.length <= 20, `expected at most 20 lookups in three hours, saw ${times.length}`);
+
+	const before = times.length;
+	await tracker.refresh();
+	assert.equal(times.length, before + 1, "the next turn resumes");
+});
+
+test("a rate limit pauses every repository in every session on the host", async (t) => {
+	const limited = await fixtureWorktree();
+	const healthy = await fixtureWorktree();
+	t.after(() => rm(limited.root, { recursive: true, force: true }));
+	t.after(() => rm(healthy.root, { recursive: true, force: true }));
+	let now = 1_000_000;
+	const cacheDir = join(limited.root, "cache");
+	const limitedGitHub = fakeGitHub(new Map());
+	limitedGitHub.setFailing("GraphQL: API rate limit exceeded for user ID 1.");
+	const healthyGitHub = fakeGitHub(new Map());
+	const first = session(limited, limitedGitHub, { now: () => now, cacheDir });
+	const second = session(healthy, healthyGitHub, { now: () => now, cacheDir });
+	t.after(() => {
+		first.dispose();
+		second.dispose();
+	});
+
+	await first.observeToolInput("read", { path: join(limited.path, "README.md") });
+	assert.equal(limitedGitHub.calls.length, 1);
+	await second.observeToolInput("read", { path: join(healthy.path, "README.md") });
+	assert.equal(healthyGitHub.calls.length, 0, "the limit is the account's, not the repository's");
+
+	now += PR_RATE_LIMIT_BACKOFF_MS - 1;
+	await second.refresh();
+	await first.refresh();
+	assert.equal(healthyGitHub.calls.length + limitedGitHub.calls.length, 1);
+	now += 1;
+	await second.refresh();
+	assert.equal(healthyGitHub.calls.length, 1);
+});
+
+test("repeated failures back off exponentially, and a repository outside GitHub rests for hours", async (t) => {
+	const fixture = await fixtureWorktree();
+	t.after(() => rm(fixture.root, { recursive: true, force: true }));
+	let now = 1_000_000;
+	const github = fakeGitHub(new Map());
+	github.setFailing(true);
+	const tracker = session(fixture, github, { now: () => now });
+	t.after(() => tracker.dispose());
+
+	await tracker.observeToolInput("read", { path: join(fixture.path, "README.md") });
+	assert.equal(github.calls.length, 1);
+	now += PR_FAILURE_INTERVAL_MS - 1;
+	await tracker.refresh();
+	assert.equal(github.calls.length, 1);
+	now += 1;
+	await tracker.refresh();
+	assert.equal(github.calls.length, 2);
+	now += PR_FAILURE_INTERVAL_MS;
+	await tracker.refresh();
+	assert.equal(github.calls.length, 2, "the second failure waits twice as long");
+	now += PR_FAILURE_INTERVAL_MS;
+	await tracker.refresh();
+	assert.equal(github.calls.length, 3);
+
+	github.setFailing('error parsing "owner" value: no git remotes found');
+	now += PR_FAILURE_INTERVAL_MS * 4;
+	await tracker.refresh();
+	assert.equal(github.calls.length, 4);
+	now += PR_UNSUPPORTED_RETRY_MS - 1;
+	await tracker.refresh();
+	assert.equal(github.calls.length, 4, "no GitHub remote is not a blip");
+	now += 1;
+	await tracker.refresh();
+	assert.equal(github.calls.length, 5);
 });
