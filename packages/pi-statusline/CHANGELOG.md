@@ -1,5 +1,19 @@
 # @hank-warren/pi-statusline
 
+## 0.12.0
+
+### Minor Changes
+
+- Show ahead counts and PR CI state, and look PRs up with a host-wide shared poll.
+
+  - `⇡N` (commits ahead of upstream) renders next to `⇣N` on line 1 and the worktree line, and custom items receive it as `git.ahead`.
+  - Open PRs on the worktree line show their CI state: `✓` passed, `✗` failed, `●` running.
+  - PRs are looked up with one `gh api graphql` request per repository, and every pi process on the host shares the answers through `~/.pi/agent/statusline-prs/`, with a lock so only one process asks GitHub at a time. Fifty sessions over one repository cost one lookup per interval, not fifty.
+  - A timer keeps the line current while the session is idle. Running checks are watched every 20 s for their first 15 minutes, then less often; a published branch without a PR every minute; a settled PR every 5 minutes; never-pushed branches every 10 minutes; merged and closed PRs never. After an hour without a turn nothing is looked up until the next one.
+  - When the session runs `gh pr create|merge|ready|close|reopen`, `gh run rerun|cancel`, `gh workflow run`, or `git push`, PRs are re-checked 10 s after the command finishes.
+  - Failed lookups keep the last known PR and back off exponentially; a repository without a GitHub remote rests for 6 hours, and a rate limit pauses every repository on the host for 15 minutes.
+  - A merged or closed PR that only shares a reused branch name no longer hides new work on that branch.
+
 ## 0.11.0
 
 ### Minor Changes
