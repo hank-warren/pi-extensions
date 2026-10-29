@@ -1,7 +1,7 @@
 {
   "name": "@hank-warren/pi-multi-login",
-  "version": "0.3.2",
-  "description": "Register additional OAuth logins for Pi's built-in providers under aliased provider ids, managed with /multi-login.",
+  "version": "0.4.0",
+  "description": "Register additional OAuth or API-key logins for Pi's built-in providers under aliased provider ids, managed with /multi-login.",
   "type": "module",
   "keywords": [
     "pi-package",

@@ -1,9 +1,9 @@
 /**
- * pi-multi-login — register additional OAuth logins for Pi's built-in providers.
+ * pi-multi-login — register additional logins for Pi's built-in providers.
  *
  * Each alias is an ordinary provider whose id is `${base}-${suffix}`, so it gets
- * its own auth.json credential slot while reusing the base provider's OAuth
- * flow, transport and model catalog.
+ * its own auth.json credential slot while reusing the base provider's login
+ * methods (OAuth and/or API key), transport and model catalog.
  *
  * Aliases register during the extension *load* phase, not at session_start:
  * `pi --list-models`, `pi --model provider/id` and `pi auth` all run before any
@@ -28,7 +28,7 @@ import {
 	saveMultiLoginConfig,
 	type AliasEntry,
 } from "./config.js";
-import { adoptAliasesFromCredentials, createAliasProvider } from "./provider.js";
+import { adoptAliasesFromCredentials, createAliasProvider, hasLoginMethod } from "./provider.js";
 import { removeAliasEntry } from "./removal.js";
 
 const LOG_PREFIX = "[pi-multi-login]";
@@ -61,6 +61,15 @@ export default async function multiLogin(pi: ExtensionAPI): Promise<void> {
 		return runtime.getProviders().filter((provider) => provider.auth?.oauth);
 	}
 
+	function loginProviders(runtime: ModelRuntime): Provider[] {
+		return runtime.getProviders().filter(hasLoginMethod);
+	}
+
+	function loginMethodsLabel(provider: Provider): string {
+		const methods = [provider.auth.oauth && "OAuth", provider.auth.apiKey?.login && "API key"].filter(Boolean);
+		return methods.join(" or ");
+	}
+
 	/**
 	 * Register one alias with both the host and the package runtime. Returns a
 	 * warning when the alias cannot be built; a bad entry never aborts the rest.
@@ -70,7 +79,7 @@ export default async function multiLogin(pi: ExtensionAPI): Promise<void> {
 		if (runtime.getProvider(id)) return `alias "${id}" collides with an existing provider id; skipped`;
 		const source = runtime.getProvider(entry.base);
 		if (!source) return `alias "${id}" has unknown base provider "${entry.base}"; skipped`;
-		if (!source.auth?.oauth) return `alias "${id}" base provider "${entry.base}" has no OAuth login; skipped`;
+		if (!hasLoginMethod(source)) return `alias "${id}" base provider "${entry.base}" has no OAuth or API-key login; skipped`;
 
 		const clone = createAliasProvider(source, entry);
 		runtime.registerNativeProvider(clone);
@@ -119,7 +128,7 @@ export default async function multiLogin(pi: ExtensionAPI): Promise<void> {
 		// not the raw built-in. Re-registration is idempotent.
 		for (const entry of aliases) {
 			const source = ctx.modelRegistry.getProvider(entry.base);
-			if (!source?.auth?.oauth) {
+			if (!source || !hasLoginMethod(source)) {
 				console.warn(`${LOG_PREFIX} base provider "${entry.base}" is unavailable; ${aliasEntryId(entry)} was not refreshed.`);
 				continue;
 			}
@@ -141,15 +150,15 @@ export default async function multiLogin(pi: ExtensionAPI): Promise<void> {
 	async function addAlias(ctx: ExtensionContext): Promise<void> {
 		const runtime = await sharedRuntime();
 		const aliasIds = new Set(aliases.map(aliasEntryId));
-		const bases = oauthProviders(runtime)
+		const bases = loginProviders(runtime)
 			.filter((provider) => !aliasIds.has(provider.id))
 			.sort((a, b) => a.id.localeCompare(b.id));
 		if (bases.length === 0) {
-			ctx.ui.notify("No OAuth providers are available to alias.", "warning");
+			ctx.ui.notify("No providers with a login are available to alias.", "warning");
 			return;
 		}
 
-		const labels = bases.map((provider) => `${provider.id} — ${provider.name}`);
+		const labels = bases.map((provider) => `${provider.id} — ${provider.name} (${loginMethodsLabel(provider)})`);
 		const chosen = await ctx.ui.select("Base provider for the new login", labels);
 		if (!chosen) return;
 		const base = bases[labels.indexOf(chosen)];
@@ -202,7 +211,7 @@ export default async function multiLogin(pi: ExtensionAPI): Promise<void> {
 	}
 
 	pi.registerCommand("multi-login", {
-		description: "Add or remove an additional OAuth login; sign in with /login",
+		description: "Add or remove an additional provider login (OAuth or API key); sign in with /login",
 		handler: async (_args, ctx) => {
 			if (!ctx.hasUI || ctx.mode !== "tui") {
 				ctx.ui.notify("/multi-login requires interactive TUI mode", "warning");

@@ -3,8 +3,9 @@ import { describe, test } from "node:test";
 import type { Provider } from "@earendil-works/pi-ai";
 import { getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
+import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
-import { adoptAliasesFromCredentials, createAliasProvider } from "../provider.ts";
+import { adoptAliasesFromCredentials, createAliasProvider, hasLoginMethod } from "../provider.ts";
 
 /** Providers Pi ships an OAuth login for, as of the pinned pi-ai. */
 const OAUTH_PROVIDER_IDS = [
@@ -61,12 +62,68 @@ describe("alias provider clone", () => {
 		assert.equal(provider.auth.oauth?.name, "Anthropic (work)");
 	});
 
-	test("rejects a base provider without an OAuth login", () => {
-		const source = { ...openaiCodexProvider(), id: "no-oauth", auth: {} } as unknown as Provider;
+	test("rejects a base provider without any login", () => {
+		const source = { ...openaiCodexProvider(), id: "no-login", auth: {} } as unknown as Provider;
+		assert.equal(hasLoginMethod(source), false);
 		assert.throws(
-			() => createAliasProvider(source, { base: "no-oauth", suffix: "alt" }),
-			/does not offer OAuth authentication/,
+			() => createAliasProvider(source, { base: "no-login", suffix: "alt" }),
+			/does not offer an OAuth or API-key login/,
 		);
+	});
+
+	test("rejects a base whose API-key auth is ambient-only", () => {
+		const base = openaiProvider();
+		const { login: _login, ...ambient } = base.auth.apiKey ?? { name: "x", resolve: async () => undefined };
+		const source = { ...base, id: "ambient", auth: { apiKey: ambient } } as Provider;
+		assert.equal(hasLoginMethod(source), false);
+		assert.throws(() => createAliasProvider(source, { base: "ambient", suffix: "alt" }));
+	});
+});
+
+describe("alias API-key login", () => {
+	const signal = AbortSignal.timeout(5_000);
+	const ambientCtx = {
+		env: async (name: string) => (name === "ANTHROPIC_API_KEY" || name === "OPENAI_API_KEY" ? "sk-ambient" : undefined),
+		fileExists: async () => false,
+	};
+
+	test("keeps both OAuth and API-key logins when the base offers both", () => {
+		const source = anthropicProvider();
+		const provider = createAliasProvider(source, { base: "anthropic", suffix: "work" });
+
+		assert.ok(provider.auth.oauth);
+		assert.ok(provider.auth.apiKey);
+		assert.equal(provider.auth.apiKey.login, source.auth.apiKey?.login);
+		assert.equal(provider.auth.apiKey.name, `${provider.name} API key`);
+	});
+
+	test("aliases an API-key-only base", () => {
+		const provider = createAliasProvider(openaiProvider(), { base: "openai", suffix: "work" });
+
+		assert.equal(provider.id, "openai-work");
+		assert.equal(provider.auth.oauth, undefined);
+		assert.ok(provider.auth.apiKey?.login);
+		assert.ok(provider.getModels().every((model) => model.provider === "openai-work"));
+	});
+
+	test("never resolves the base's ambient environment key", async () => {
+		const source = anthropicProvider();
+		const provider = createAliasProvider(source, { base: "anthropic", suffix: "work" });
+
+		// The base itself does pick the ambient key up; the alias must not.
+		assert.ok(await source.auth.apiKey?.resolve({ ctx: ambientCtx, signal }));
+		assert.equal(await provider.auth.apiKey?.resolve({ ctx: ambientCtx, signal }), undefined);
+		if (provider.auth.apiKey?.check) {
+			assert.equal(await provider.auth.apiKey.check({ ctx: ambientCtx, signal }), undefined);
+		}
+	});
+
+	test("resolves the alias's own stored key", async () => {
+		const provider = createAliasProvider(anthropicProvider(), { base: "anthropic", suffix: "work" });
+		const credential = { type: "api_key" as const, key: "sk-alias" };
+
+		const result = await provider.auth.apiKey?.resolve({ ctx: ambientCtx, credential, signal });
+		assert.equal(result?.auth.apiKey, "sk-alias");
 	});
 });
 

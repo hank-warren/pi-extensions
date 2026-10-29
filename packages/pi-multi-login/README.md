@@ -1,6 +1,8 @@
 # @hank-warren/pi-multi-login
 
-Register a **second (third, fourth…) OAuth login** for any provider Pi already knows how to sign in to. Each additional login is an ordinary provider with its own id — `openai-codex-work`, `anthropic-personal` — so it gets its own credential slot in `auth.json` while reusing the base provider's OAuth flow, transport and model catalog.
+Register a **second (third, fourth…) login** for any provider Pi already knows how to sign in to, by OAuth or by API key. Each additional login is an ordinary provider with its own id — `openai-codex-work`, `anthropic-personal` — so it gets its own credential slot in `auth.json` while reusing the base provider's login methods, transport and model catalog.
+
+Every slot holds one credential of either type, so you can mix them freely: keep `anthropic` on a Claude Max subscription and sign `anthropic-work` in with an API key, or keep several `openai-*` API keys side by side.
 
 Use it to keep a subscription account separate from a work account, or to give a background reviewer (such as [`@hank-warren/pi-auto-permissions`](../pi-auto-permissions/README.md)) a dedicated login that never competes with your interactive session for rate limits.
 
@@ -20,10 +22,10 @@ pi -e npm:@hank-warren/pi-multi-login
 
 Run `/multi-login` in an interactive session:
 
-- **Add a login…** — pick a base provider, type a suffix. The alias is written to the config file and registered immediately; then run `/login`, pick the alias, and complete OAuth there.
+- **Add a login…** — pick a base provider, type a suffix. The alias is written to the config file and registered immediately; then run `/login`, pick the alias, and choose OAuth or API key there (whichever the base provider offers).
 - **An existing alias** — remove it, which deletes both the credential and the provider.
 
-All authentication goes through Pi's own `/login` — signing in for the first time and re-authenticating later (token expired, wrong account) both work there, because aliases are ordinary providers. `/multi-login` deliberately never drives an OAuth flow itself: `/login` implements every prompt type a provider's flow can emit (including the option choice OpenAI Codex asks for), so there is exactly one login path to keep correct. Aliases also appear in `/model` and `pi --list-models` with no extra work.
+All authentication goes through Pi's own `/login` — signing in for the first time and re-authenticating later (token expired, wrong account) both work there, because aliases are ordinary providers. `/multi-login` deliberately never drives a login flow itself: `/login` implements every prompt type a provider's flow can emit (including the option choice OpenAI Codex asks for), so there is exactly one login path to keep correct. Aliases also appear in `/model` and `pi --list-models` with no extra work.
 
 Once an alias has a credential you can select it like any other model:
 
@@ -52,13 +54,15 @@ When `PI_CODING_AGENT_DIR` points elsewhere, the configuration follows that agen
 
 | Field | Required | Meaning |
 |-------|----------|---------|
-| `base` | yes | Provider id whose OAuth flow, transport and model catalog the alias reuses. It must expose an OAuth login, and it must not itself be an alias. |
+| `base` | yes | Provider id whose login methods, transport and model catalog the alias reuses. It must offer an OAuth login or an interactive API-key login, and it must not itself be an alias. |
 | `suffix` | yes | Lowercase slug (`^[a-z0-9]+(-[a-z0-9]+)*$`) appended to `base`. The provider id is always `` `${base}-${suffix}` ``. |
 | `name` | no | Display name. Defaults to `` `${baseProviderName} (${suffix})` ``. |
 
 `/multi-login` rewrites this file, but editing it by hand is supported — the format is the point. Unknown fields are ignored; a malformed file registers no aliases and reports the problem once at session start.
 
-The providers that can act as a base are the ones Pi offers an OAuth login for: `anthropic`, `github-copilot`, `kimi-coding`, `openai-codex`, `openrouter`, `radius`, `xai`. `/multi-login` lists whatever the running Pi version actually offers.
+Any provider Pi's `/login` can sign in to can act as a base — OAuth providers such as `anthropic`, `openai-codex` and `github-copilot`, and API-key providers such as `openai`. Ambient-only providers (no interactive login) cannot. `/multi-login` lists whatever the running Pi version actually offers, with the login methods each one supports.
+
+An alias's API-key login resolves only from **its own** stored key. The base provider's environment fallback (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) is deliberately not inherited, so an alias never shows up as signed in until you sign it in.
 
 ## How it works
 

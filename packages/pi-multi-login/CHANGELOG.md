@@ -1,5 +1,11 @@
 # @hank-warren/pi-multi-login
 
+## 0.4.0
+
+### Minor Changes
+
+- Aliases now keep the base provider's API-key login alongside OAuth, so `/login` can sign an alias in with either. An alias's API key resolves only from its own stored credential, never the base's environment variable. `/multi-login` can also alias API-key-only providers such as `openai`.
+
 ## 0.3.2
 
 ### Patch Changes
