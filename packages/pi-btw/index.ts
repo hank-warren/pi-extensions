@@ -27,8 +27,7 @@ export default function btw(pi: ExtensionAPI): void {
 		active = undefined;
 	};
 
-	// `context_with_system` is pi 0.87+, newer than this repo's pinned typings. A host
-	// that never fires it leaves /btw replaying the session branch instead.
+	// `context_with_system` (pi 0.87+) is newer than this repo's pinned typings.
 	const onUntyped = pi.on.bind(pi) as unknown as (event: string, handler: (event: { messages?: unknown }) => void) => void;
 	onUntyped("context_with_system", (event) => {
 		if (Array.isArray(event.messages)) tracker.onContext(event.messages as TranscriptMessage[]);
@@ -78,19 +77,28 @@ export default function btw(pi: ExtensionAPI): void {
 				return;
 			}
 			const streamSimple = resolveStreamSimple(ctx.modelRegistry);
-			if (!streamSimple) {
-				ctx.ui.notify("/btw needs pi 0.87 or newer.", "error");
+			const settings = readSettings(pi);
+			// Without the settings the replay cannot honor images.blockImages or thinking budgets.
+			if (!streamSimple || !settings) {
+				ctx.ui.notify("/btw needs pi 0.99 or newer.", "error");
 				return;
 			}
 			const prefix = tracker.snapshot() ?? sessionPrefix(ctx.sessionManager);
 			// Not awaited: the editor stays free and a running turn keeps streaming meanwhile.
-			void run(ctx, { model, streamSimple, prefix, question });
+			void run(ctx, { model, streamSimple, prefix, question, ...settings });
 		},
 	});
 
 	async function run(
 		ctx: ExtensionContext,
-		request: { model: { provider: string; id: string }; streamSimple: StreamSimple; prefix: Prefix; question: string },
+		request: {
+			model: { provider: string; id: string };
+			streamSimple: StreamSimple;
+			prefix: Prefix;
+			question: string;
+			thinkingBudgets?: unknown;
+			blockImages: boolean;
+		},
 	): Promise<void> {
 		const current = { controller: new AbortController() };
 		active = current;
@@ -105,13 +113,10 @@ export default function btw(pi: ExtensionAPI): void {
 		});
 
 		try {
-			const settings = readSettings(pi);
 			const answer = await ask({
 				...request,
 				sessionId: ctx.sessionManager.getSessionId(),
 				thinkingLevel: pi.getThinkingLevel(),
-				thinkingBudgets: settings.thinkingBudgets,
-				blockImages: settings.blockImages,
 				signal: current.controller.signal,
 				onProgress: (progress) => {
 					live.answer = progress.answer;
@@ -150,14 +155,14 @@ export default function btw(pi: ExtensionAPI): void {
 	}
 }
 
-/** Settings the agent loop feeds into its requests; `pi.getSettings` is pi 1.x. */
-function readSettings(pi: ExtensionAPI): { thinkingBudgets?: unknown; blockImages?: boolean } {
+/** Settings the agent loop feeds into its requests, or undefined before `pi.getSettings` (pi 0.99). */
+function readSettings(pi: ExtensionAPI): { thinkingBudgets?: unknown; blockImages: boolean } | undefined {
 	try {
 		const getSettings = (pi as { getSettings?: () => unknown }).getSettings;
-		if (typeof getSettings !== "function") return {};
+		if (typeof getSettings !== "function") return undefined;
 		const settings = getSettings.call(pi) as { thinkingBudgets?: unknown; images?: { blockImages?: unknown } } | undefined;
 		return { thinkingBudgets: settings?.thinkingBudgets, blockImages: settings?.images?.blockImages === true };
 	} catch {
-		return {};
+		return undefined;
 	}
 }

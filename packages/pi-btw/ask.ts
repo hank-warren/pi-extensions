@@ -1,7 +1,7 @@
 import { convertToLlm } from "@earendil-works/pi-coding-agent";
 import { alignPayload, type Prefix, type TranscriptMessage } from "./prefix.ts";
 
-/** What `ctx.modelRegistry.streamSimple` (pi 0.86+) needs from this extension. */
+/** What `ctx.modelRegistry.streamSimple` needs from this extension. */
 export type StreamSimple = (model: unknown, context: { messages: unknown[] }, options: Record<string, unknown>) => AssistantStream;
 
 export interface AssistantStream extends AsyncIterable<StreamEvent> {

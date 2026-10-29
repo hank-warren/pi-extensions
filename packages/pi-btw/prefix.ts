@@ -118,8 +118,8 @@ export function alignPayload(own: unknown, main: unknown): Record<string, unknow
 	if (!isRecord(own) || !isRecord(main) || own.model !== main.model) return undefined;
 	const aligned: Record<string, unknown> = {};
 	for (const [key, value] of Object.entries(main)) {
-		if (!OWN_KEYS.has(key)) aligned[key] = structuredClone(value);
-		else if (key in own) aligned[key] = own[key];
+		const next = OWN_KEYS.has(key) ? own[key] : fromMain(value, own[key]);
+		if (next !== undefined) aligned[key] = next;
 	}
 	for (const key of OWN_KEYS) {
 		if (key in own && !(key in aligned)) aligned[key] = own[key];
@@ -127,6 +127,41 @@ export function alignPayload(own: unknown, main: unknown): Record<string, unknow
 	return aligned;
 }
 
+/**
+ * A copy of the main request's value that keeps this request's live handles.
+ *
+ * Payloads are JSON data apart from the odd live object, such as the AbortSignal
+ * Gemini carries in `config.abortSignal`. Taking the main request's would tie the
+ * side question to a finished request's signal, so a live value always comes
+ * from this request, and is kept even where the main request had none.
+ */
+function fromMain(main: unknown, own: unknown): unknown {
+	if (isLive(main)) return own;
+	if (Array.isArray(main)) return main.map((item, index) => fromMain(item, Array.isArray(own) ? own[index] : undefined));
+	if (!isRecord(main)) return main;
+	const ownRecord = isPlainObject(own) ? own : {};
+	const copy: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(main)) {
+		const next = fromMain(value, ownRecord[key]);
+		if (next !== undefined) copy[key] = next;
+	}
+	for (const [key, value] of Object.entries(ownRecord)) {
+		if (!(key in copy) && isLive(value)) copy[key] = value;
+	}
+	return copy;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	if (!isRecord(value)) return false;
+	const prototype = Object.getPrototypeOf(value);
+	return prototype === Object.prototype || prototype === null;
+}
+
+/** Functions and class instances: handles, not data. */
+function isLive(value: unknown): boolean {
+	return typeof value === "function" || (isRecord(value) && !isPlainObject(value));
 }

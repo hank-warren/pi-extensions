@@ -18,7 +18,7 @@ Try it without installing:
 pi -e npm:@hank-warren/pi-btw
 ```
 
-Requires pi 0.87 or newer.
+Requires pi 0.99 or newer.
 
 ## Usage
 

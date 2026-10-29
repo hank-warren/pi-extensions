@@ -60,10 +60,10 @@ function answering(text: string, extra: Record<string, unknown> = {}) {
 	};
 }
 
-function setup(options: { entries?: unknown[]; leafId?: string | null; thinkingLevel?: string; mode?: string; settings?: unknown } = {}) {
+function setup(options: { entries?: unknown[]; leafId?: string | null; thinkingLevel?: string; mode?: string; settings?: unknown; noSettings?: boolean } = {}) {
 	const mock = createMockPi();
 	if (options.thinkingLevel) mock.rawPi.setThinkingLevel(options.thinkingLevel);
-	if (options.settings) Object.assign(mock.rawPi, { getSettings: () => options.settings });
+	if (!options.noSettings) Object.assign(mock.rawPi, { getSettings: () => options.settings ?? {} });
 	btw(mock.pi);
 	const calls: Call[] = [];
 	let next: { events: unknown[]; result: Record<string, unknown>; gate?: Promise<void> } = answering("forty-two");
@@ -256,11 +256,27 @@ test("refuses outside the interactive terminal and without arguments", async () 
 	assert.deepEqual(bare.notifications.at(-1), { message: "Usage: /btw <question>", level: "info" });
 });
 
-test("explains the pi version floor when the host has no streamSimple", async () => {
-	const s = setup();
-	Object.assign(s.ctx as object, { modelRegistry: {} });
+test("explains the pi version floor when the host lacks streamSimple or getSettings", async () => {
+	const noStream = setup();
+	Object.assign(noStream.ctx as object, { modelRegistry: {} });
+	await noStream.command("q");
+	assert.match(noStream.notifications.at(-1)!.message, /pi 0\.99/);
+
+	// pi 0.87 has streamSimple but no getSettings, so it could not honor images.blockImages.
+	const noSettings = setup({ noSettings: true });
+	await noSettings.command("q");
+	assert.equal(noSettings.calls.length, 0);
+	assert.match(noSettings.notifications.at(-1)!.message, /pi 0\.99/);
+});
+
+test("images.blockImages from settings replaces images in the replay, as Pi's own request does", async () => {
+	const s = setup({ settings: { images: { blockImages: true } } });
+	const picture: TranscriptMessage = { role: "user", content: [{ type: "image", data: "x", mimeType: "image/png" }, { type: "text", text: "this?" }], timestamp: 2 };
+	await s.fire("context_with_system", { messages: [system, picture] });
 	await s.command("q");
-	assert.match(s.notifications.at(-1)!.message, /pi 0\.87/);
+	await settle();
+	const sent = s.calls[0]!.context.messages.find((message) => message.role === "user")!;
+	assert.deepEqual(sent.content, [{ type: "text", text: "Image reading is disabled." }, { type: "text", text: "this?" }]);
 });
 
 test("the payload hook gives the question the main request's top-level shape", async () => {
@@ -289,6 +305,20 @@ test("alignPayload keeps the main key order and drops fields a hook removed", ()
 	assert.deepEqual(aligned.input, ["a", "b"]);
 	assert.equal(alignPayload({ ...own, model: "other" }, main), undefined);
 	assert.equal(alignPayload("text", main), undefined);
+});
+
+test("alignPayload keeps this request's live handles, like Gemini's config.abortSignal", () => {
+	const mainSignal = new AbortController().signal;
+	const ownSignal = new AbortController().signal;
+	const onChunk = () => undefined;
+	const main = { model: "gemini", contents: ["a"], config: { systemInstruction: "s", tools: [{ name: "bash", strict: null }], abortSignal: mainSignal } };
+	const own = { model: "gemini", contents: ["a", "b"], config: { systemInstruction: "s", tools: [{ name: "bash" }], abortSignal: ownSignal, onChunk } };
+	const aligned = alignPayload(own, main)! as { contents: unknown; config: Record<string, unknown> };
+	assert.equal(aligned.config.abortSignal, ownSignal);
+	assert.equal(aligned.config.onChunk, onChunk, "a live value only this request has is kept");
+	assert.deepEqual(aligned.config.tools, [{ name: "bash", strict: null }]);
+	assert.deepEqual(aligned.contents, ["a", "b"]);
+	assert.notEqual(aligned.config.tools, main.config.tools, "data is copied, not shared with the main payload");
 });
 
 test("only the payload right after a captured context counts", () => {
