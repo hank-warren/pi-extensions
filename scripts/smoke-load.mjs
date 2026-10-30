@@ -137,6 +137,17 @@ const EXPECTED_SURFACES = {
 	"./packages/pi-image-prune/index.ts": {
 		handlers: ["before_provider_request", "context", "session_start"],
 	},
+	// context_with_system + before_provider_request + message_end: track the last
+	// request's exact transcript and payload. session_compact/session_tree: that
+	// transcript stops being the next request's prefix. session_start/shutdown:
+	// reset and cancel a running answer.
+	"./packages/pi-btw/index.ts": {
+		commands: ["btw"],
+		handlers: [
+			"before_provider_request", "context_with_system", "message_end",
+			"session_compact", "session_shutdown", "session_start", "session_tree",
+		],
+	},
 };
 
 const CATEGORIES = ["tools", "commands", "handlers", "flags", "shortcuts"];

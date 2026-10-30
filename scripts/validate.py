@@ -24,6 +24,7 @@ EXPECTED_EXTENSION_ENTRYPOINTS = [
     "./packages/pi-auto-name/index.ts",
     "./packages/pi-agents/index.ts",
     "./packages/pi-image-prune/index.ts",
+    "./packages/pi-btw/index.ts",
 ]
 # Public resources must live in inventoried packages: a top-level extensions/
 # or skills/ directory would bypass package validation and ship through the
@@ -73,6 +74,7 @@ PUBLIC_PACKAGES = {
     "packages/pi-auto-name": "@hank-warren/pi-auto-name",
     "packages/pi-agents": "@hank-warren/pi-agents",
     "packages/pi-image-prune": "@hank-warren/pi-image-prune",
+    "packages/pi-btw": "@hank-warren/pi-btw",
 }
 # Sources deliberately duplicated byte-for-byte instead of shared through a
 # package dependency, because sharing them would cost far more than copying

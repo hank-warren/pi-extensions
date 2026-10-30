@@ -39,7 +39,8 @@
       "./packages/pi-thinking-step/index.ts",
       "./packages/pi-auto-name/index.ts",
       "./packages/pi-agents/index.ts",
-      "./packages/pi-image-prune/index.ts"
+      "./packages/pi-image-prune/index.ts",
+      "./packages/pi-btw/index.ts"
     ],
     "skills": [
       "./packages/pi-auto-permissions/auto-permissions-setup",
