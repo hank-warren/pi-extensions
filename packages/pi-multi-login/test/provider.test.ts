@@ -3,6 +3,7 @@ import { describe, test } from "node:test";
 import type { Provider } from "@earendil-works/pi-ai";
 import { getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
+import { googleProvider } from "@earendil-works/pi-ai/providers/google";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
 import { adoptAliasesFromCredentials, createAliasProvider, hasLoginMethod } from "../provider.ts";
@@ -12,6 +13,8 @@ const OAUTH_PROVIDER_IDS = [
 	"anthropic",
 	"github-copilot",
 	"kimi-coding",
+	"meta",
+	"openai",
 	"openai-codex",
 	"openrouter",
 	"radius",
@@ -98,12 +101,14 @@ describe("alias API-key login", () => {
 	});
 
 	test("aliases an API-key-only base", () => {
-		const provider = createAliasProvider(openaiProvider(), { base: "openai", suffix: "work" });
+		const source = googleProvider();
+		assert.equal(source.auth.oauth, undefined);
+		const provider = createAliasProvider(source, { base: "google", suffix: "work" });
 
-		assert.equal(provider.id, "openai-work");
+		assert.equal(provider.id, "google-work");
 		assert.equal(provider.auth.oauth, undefined);
 		assert.ok(provider.auth.apiKey?.login);
-		assert.ok(provider.getModels().every((model) => model.provider === "openai-work"));
+		assert.ok(provider.getModels().every((model) => model.provider === "google-work"));
 	});
 
 	test("never resolves the base's ambient environment key", async () => {

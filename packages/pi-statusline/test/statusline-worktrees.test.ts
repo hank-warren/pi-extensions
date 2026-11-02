@@ -87,7 +87,7 @@ function fakeGitHub(prs: Map<string, FakeNode[]>) {
 	const respond = (args: string[]) => {
 		const branches = args.flatMap((arg) => /^b\d+=(.*)$/s.exec(arg)?.[1] ?? []);
 		calls.push(branches);
-		if (fail) return { stdout: "", stderr: fail === true ? "HTTP 502" : fail, code: 1, killed: false };
+		if (fail) return { stdout: "", stderr: fail === true ? "HTTP 502" : fail, code: 1, killed: false, truncated: false };
 		const repository = Object.fromEntries(
 			branches.map((branch, index) => [
 				`b${index}`,
@@ -104,7 +104,7 @@ function fakeGitHub(prs: Map<string, FakeNode[]>) {
 				},
 			]),
 		);
-		return { stdout: JSON.stringify({ data: { repository } }), stderr: "", code: 0, killed: false };
+		return { stdout: JSON.stringify({ data: { repository } }), stderr: "", code: 0, killed: false, truncated: false };
 	};
 	return {
 		calls,
@@ -132,7 +132,7 @@ function session(
 		exec: async (command, args) => {
 			if (command === "git") {
 				const status = options.status?.() ?? {};
-				return { stdout: gitStatusOutput("feature/statusline", 0, false, status), stderr: "", code: 0, killed: false };
+				return { stdout: gitStatusOutput("feature/statusline", 0, false, status), stderr: "", code: 0, killed: false, truncated: false };
 			}
 			await options.beforeGh?.();
 			return github.respond(args);
@@ -343,7 +343,7 @@ test("SessionWorktreeTracker looks up every worktree of a repository in one gh c
 		exec: async (command, args, options) => {
 			if (command === "git") {
 				const branch = args[2] === first.path ? "feat/alpha" : "feat/beta";
-				return { stdout: gitStatusOutput(branch, 0, false, { upstream: "origin/main" }), stderr: "", code: 0, killed: false };
+				return { stdout: gitStatusOutput(branch, 0, false, { upstream: "origin/main" }), stderr: "", code: 0, killed: false, truncated: false };
 			}
 			ghArgs.push(args);
 			assert.equal(options.cwd, first.path);
@@ -375,7 +375,7 @@ test("SessionWorktreeTracker polls on a cadence set by PR and CI state", async (
 		now: () => now,
 		exec: async (command, args) =>
 			command === "git"
-				? { stdout: gitStatusOutput("feature/statusline"), stderr: "", code: 0, killed: false }
+				? { stdout: gitStatusOutput("feature/statusline"), stderr: "", code: 0, killed: false, truncated: false }
 				: github.respond(args),
 	});
 
@@ -431,7 +431,7 @@ test("SessionWorktreeTracker re-checks soon after a commit or push, and slows do
 		now: () => now,
 		exec: async (command, args) =>
 			command === "git"
-				? { stdout: gitStatusOutput("feature/statusline", 0, false, status), stderr: "", code: 0, killed: false }
+				? { stdout: gitStatusOutput("feature/statusline", 0, false, status), stderr: "", code: 0, killed: false, truncated: false }
 				: github.respond(args),
 	});
 
@@ -478,7 +478,7 @@ test("SessionWorktreeTracker keeps the last known PR through failed lookups", as
 		onChange: () => changes++,
 		exec: async (command, args) =>
 			command === "git"
-				? { stdout: gitStatusOutput("feature/statusline"), stderr: "", code: 0, killed: false }
+				? { stdout: gitStatusOutput("feature/statusline"), stderr: "", code: 0, killed: false, truncated: false }
 				: github.respond(args),
 	});
 
@@ -871,7 +871,7 @@ test("sessions on different branches of one repository share one lookup per inte
 			exec: async (command, args) => {
 				if (command === "git") {
 					const branch = args[2] === alpha.path ? "feat/alpha" : "feat/beta";
-					return { stdout: gitStatusOutput(branch), stderr: "", code: 0, killed: false };
+					return { stdout: gitStatusOutput(branch), stderr: "", code: 0, killed: false, truncated: false };
 				}
 				asked.push(name);
 				return github.respond(args);
