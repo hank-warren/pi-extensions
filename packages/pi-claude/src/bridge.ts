@@ -47,6 +47,16 @@ export function removePrivateDirectorySync(): void {
   if (root) rmSync(root, { recursive: true, force: true });
 }
 
+/** A private bridge endpoint: a Unix socket in the 0700 directory, or a named pipe on Windows. */
+export function bridgeAddress(dir: string, platform: NodeJS.Platform = process.platform): string {
+  const name = `pi-claude-${randomBytes(12).toString("hex")}`;
+  return platform === "win32" ? `\\\\.\\pipe\\${name}` : join(dir, `${name}.sock`);
+}
+
+function isNamedPipe(address: string): boolean {
+  return address.startsWith("\\\\.\\pipe\\");
+}
+
 function sameToken(left: string, right: string): boolean {
   const a = Buffer.from(left);
   const b = Buffer.from(right);
@@ -71,7 +81,7 @@ export class McpBridge {
   ) {}
 
   static async start(dir: string, tools: McpTool[], onCall: (call: ParkedCall) => void): Promise<McpBridge> {
-    const bridge = new McpBridge(join(dir, `b-${randomBytes(6).toString("hex")}.sock`), tools, onCall);
+    const bridge = new McpBridge(bridgeAddress(dir), tools, onCall);
     await bridge.listen();
     return bridge;
   }
@@ -83,7 +93,8 @@ export class McpBridge {
       server.once("error", reject);
       server.listen(this.socketPath, () => {
         server.off("error", reject);
-        void chmod(this.socketPath, 0o600).catch(() => undefined);
+        // Named pipes have no file mode; the token still gates every connection.
+        if (!isNamedPipe(this.socketPath)) void chmod(this.socketPath, 0o600).catch(() => undefined);
         resolve();
       });
     });
@@ -166,6 +177,6 @@ export class McpBridge {
     this.closed = true;
     for (const socket of this.sockets) socket.destroy();
     await new Promise<void>((resolve) => (this.server ? this.server.close(() => resolve()) : resolve()));
-    await rm(this.socketPath, { force: true }).catch(() => undefined);
+    if (!isNamedPipe(this.socketPath)) await rm(this.socketPath, { force: true }).catch(() => undefined);
   }
 }

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import { conflictingEnvironment, claudeEnvironment, discoverClaudeModels, clearReadyStatusCache } from "../src/claude-cli.ts";
+import { bridgeAddress } from "../src/bridge.ts";
 import { registerCreatedSession, sweepCreatedSessions } from "../src/cleanup.ts";
 import { FALLBACK_MODELS, modelFromDiscovery, PROVIDER_ID, API_ID } from "../src/model-catalog.ts";
 import { effortFor, mcpInputSchema } from "../src/stream.ts";
@@ -171,6 +172,14 @@ test("environment refuses auth and backend overrides and enables threads", () =>
   assert.equal(env.CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS, "1");
   assert.equal(env.CLAUDE_CODE_EXTRA_BODY, undefined);
   assert.equal(claudeEnvironment({ PI_CLAUDE_SUB_THREADS: "0" }).CLAUDE_CODE_TETHER_LIVE, undefined);
+});
+
+test("the MCP bridge listens on a named pipe on Windows and a private Unix socket elsewhere", () => {
+  const pipe = bridgeAddress("C:\\Temp\\pi-claude-x", "win32");
+  assert.match(pipe, /^\\\\\.\\pipe\\pi-claude-[0-9a-f]{24}$/u);
+  const socket = bridgeAddress("/tmp/pi-claude-x", "linux");
+  assert.match(socket, /^\/tmp\/pi-claude-x\/pi-claude-[0-9a-f]{24}\.sock$/u);
+  assert.notEqual(bridgeAddress("/tmp/pi-claude-x", "linux"), socket);
 });
 
 test("model discovery reads Claude Code's catalog and context windows without a model request", async () => {
