@@ -74,6 +74,27 @@ test("tool calls park in Claude Code and Pi's real results answer them", async (
   assert.match(text(third.message), /\[result A=35\]/u);
 });
 
+test("without tool_use ids in MCP metadata, parked calls keep their order-and-name correlation", async () => {
+  process.env.FAKE_CLAUDE_NO_TOOL_META = "1";
+  try {
+    const messages: Message[] = [user('CALL lookup {"word":"alpha"}\nCALL lookup {"word":"beta"}')];
+    const first = await runTurn(messages);
+    assert.equal(first.message.stopReason, "toolUse", first.message.errorMessage);
+    const calls = callsOf(first.message);
+    // Let the first MCP call reach the bridge and park before Pi's results arrive.
+    for (let i = 0; i < 100 && !readLog(log).some((entry) => entry.event === "tool_call"); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    messages.push(first.message, toolResult(calls[0]!, "A=35"), toolResult(calls[1]!, "B=28"));
+    const second = await runTurn(messages);
+    assert.equal(second.path, "tool-results");
+    assert.equal(text(second.message), "tool results: [result A=35] [result B=28]");
+  } finally {
+    delete process.env.FAKE_CLAUDE_NO_TOOL_META;
+  }
+});
+
 test("tool results followed by a steering message fork at the tool call and send both", async () => {
   const messages: Message[] = [user('CALL lookup {"word":"gamma"}')];
   const first = await runTurn(messages);

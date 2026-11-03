@@ -168,7 +168,10 @@ async function turn(content) {
     await mcpReady;
     const results = [];
     for (const call of calls) {
-      const result = await mcpRequest("tools/call", { name: call.name.slice("mcp__pi__".length), arguments: call.input, _meta: { "claudecode/toolUseId": call.id, progressToken: 1 } });
+      // FAKE_CLAUDE_NO_TOOL_META emulates Claude Code versions that omit the tool_use id.
+      const meta = process.env.FAKE_CLAUDE_NO_TOOL_META ? { progressToken: 1 } : { "claudecode/toolUseId": call.id, progressToken: 1 };
+      log({ event: "tool_call", id: call.id });
+      const result = await mcpRequest("tools/call", { name: call.name.slice("mcp__pi__".length), arguments: call.input, _meta: meta });
       const block = { tool_use_id: call.id, type: "tool_result", content: result.content, ...(result.isError ? { is_error: true } : {}) };
       const entry = addEntry("user", { role: "user", content: [block] }, { toolUseResult: result.content });
       out({ type: "user", message: entry.message, uuid: entry.uuid, session_id: sessionId, parent_tool_use_id: null });

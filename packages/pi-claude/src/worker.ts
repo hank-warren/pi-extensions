@@ -117,7 +117,7 @@ export class ClaudeWorker {
 
   private sink?: TurnSink;
   private stderr = "";
-  private parked: (ParkedCall & { resolvedId?: string })[] = [];
+  private parked: (ParkedCall & { resolvedId: string })[] = [];
   private readonly answers = new Map<string, McpCallResult>();
   private readonly answeredByPi = new Set<string>();
   private readonly called = new Set<string>();
@@ -239,7 +239,8 @@ export class ClaudeWorker {
     }
     const parked = this.parked;
     this.parked = [];
-    for (const call of parked) this.onToolCall(call);
+    // Parked calls already hold their correlation; re-resolving would skip their own id.
+    for (const call of parked) this.deliver(call, call.resolvedId);
   }
 
   /** Every pending tool_use was either answered by Pi or is still waiting; none was answered by Claude Code itself. */
@@ -265,6 +266,10 @@ export class ClaudeWorker {
       return;
     }
     this.called.add(id);
+    this.deliver(call, id);
+  }
+
+  private deliver(call: ParkedCall, id: string): void {
     const answer = this.answers.get(id);
     if (answer) {
       this.answers.delete(id);
