@@ -612,15 +612,18 @@ test("publishes pi's native Claude transcript flags only for models pi marks wit
   assert.equal(models["claude-opus-4-6"].compat, undefined, "unknown to pi");
 });
 
-test("Devin's Claude routes get no Anthropic transcript flags", async () => {
+test("Devin's Claude routes get no per-turn effort", async () => {
   const result = buildProviderModels(
     [{ id: "devin/claude-opus-5-5", owned_by: "anthropic" }, { id: "claude-opus-5-5", owned_by: "anthropic" }],
     {}, {}, "canonical", {}, null, await piProfiles,
   );
   const models = Object.fromEntries(result.models.map((model) => [model.id, model]));
 
-  // CPA picks Devin's effort variant from the top-level effort, which per-turn effort pins to low.
-  assert.equal(models["devin/claude-opus-5-5"].compat, undefined);
+  // CPA picks Devin's effort variant from the top-level effort, which per-turn effort pins to a placeholder.
+  assert.deepEqual(models["devin/claude-opus-5-5"].compat, {
+    supportsMidConvoSystemMessages: true,
+    supportsMidConvoToolChanges: true,
+  });
   assert.equal(models["devin/claude-opus-5-5"].api, "anthropic-messages");
   assert.deepEqual(models["devin/claude-opus-5-5"].thinkingLevelMap, models["claude-opus-5-5"].thinkingLevelMap);
   assert.deepEqual(models["claude-opus-5-5"].compat, ALL_CLAUDE_UPDATES);

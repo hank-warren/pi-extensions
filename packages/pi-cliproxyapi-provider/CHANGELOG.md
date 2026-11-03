@@ -4,7 +4,7 @@
 
 ### Patch Changes
 
-- Stop publishing Anthropic transcript flags for `devin/` Claude routes. Per-turn effort pins the top-level effort to `low`, and CLIProxyAPI picks Devin's effort variant from that value only, so every Devin Claude request ran on the `-low` variant regardless of pi's thinking level.
+- Stop publishing per-turn effort for `devin/` Claude routes. Pi pins the top-level effort to a fixed placeholder (`high` before pi 1.5.0, `low` since), and CLIProxyAPI picks Devin's effort variant from that value only and drops the per-turn directives, so Devin Claude requests ignored pi's thinking level. Mid-conversation system messages and tool changes stay on.
 
 ## 0.5.0
 
