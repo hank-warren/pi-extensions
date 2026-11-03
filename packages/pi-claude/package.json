@@ -1,0 +1,51 @@
+{
+  "name": "@hank-warren/pi-claude",
+  "version": "0.1.0",
+  "description": "Fork of earendil-works/pi-claude-code: Claude models in Pi on your Claude subscription plan limits, through your own Claude Code login, with message threads, cache-warm /tree forks and accurate context windows.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "claude",
+    "anthropic",
+    "provider",
+    "subscription"
+  ],
+  "author": "Hank Warren",
+  "contributors": [
+    {
+      "name": "Armin Ronacher",
+      "url": "https://github.com/mitsuhiko"
+    }
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hank-warren/pi-extensions.git",
+    "directory": "packages/pi-claude"
+  },
+  "bugs": {
+    "url": "https://github.com/hank-warren/pi-extensions/issues"
+  },
+  "homepage": "https://github.com/hank-warren/pi-extensions/tree/main/packages/pi-claude#readme",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "src",
+    "README.md",
+    "ARCHITECTURE.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}

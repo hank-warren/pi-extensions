@@ -78,6 +78,12 @@ const CLEARED_ENV = [
 	"CLIPROXYAPI_AUTH_HEADER",
 	"CLIPROXYAPI_MODELS_DEV_ENABLED",
 	"CLIPROXYAPI_METADATA_FALLBACK_PROVIDER",
+	// pi-claude: which Claude Code to run, its config dir, and the threads switch.
+	// A host pointing these at a real install would let tests start real Claude Code.
+	"PI_CLAUDE_SUB_COMMAND",
+	"PI_CLAUDE_SUB_CONFIG_DIR",
+	"PI_CLAUDE_SUB_THREADS",
+	"CLAUDE_CONFIG_DIR",
 ];
 
 const realHome = process.env.HOME ?? homedir();
