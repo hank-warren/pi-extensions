@@ -168,6 +168,10 @@ const NOT_READ_ONLY = [
 	"git shortlog -n --output=report.txt HEAD",
 	"git log -n --output=report.txt",
 	"grep -e --include=x -r",
+	// A value flag may take a literal -- as its value, so -- after one is not a terminator.
+	"gh api -t -- --method DELETE repos/owner/repo",
+	"gh api --jq -- --method DELETE repos/owner/repo",
+	"git log -n -- --output=x",
 	"gh pr list --json number | jq -r '.[].number'",
 ];
 
@@ -182,6 +186,8 @@ test("anything that writes, executes, expands, reveals credentials or is unknown
 test("a flag that takes an attached value never swallows the next argument", () => {
 	const spec = { shortAttached: "M", longValue: ["--stat"] };
 	assert.equal(positionalsIfAllowed(["-M", "--output=x"], spec), undefined);
+	assert.equal(positionalsIfAllowed(["-n", "--", "--output=x"], { shortValue: "n" }), undefined);
+	assert.deepEqual(positionalsIfAllowed(["-n", "5", "--", "-x"], { shortValue: "n" }), ["-x"]);
 	assert.equal(positionalsIfAllowed(["--stat", "--output=x"], spec), undefined);
 	assert.deepEqual(positionalsIfAllowed(["-M50%", "--stat=200", "HEAD"], spec), ["HEAD"]);
 });

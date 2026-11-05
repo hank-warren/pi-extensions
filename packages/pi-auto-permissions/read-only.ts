@@ -35,8 +35,8 @@ interface FlagSpec {
   /** Boolean short flags, combinable (`-niw`). */
   short?: string;
   /**
-   * Short flags taking the rest of this argument (`-A3`), or the next one (`-e PAT`) unless
-   * it starts with `-`, which is then checked as a flag of its own.
+   * Short flags taking the rest of this argument (`-A3`) or the next one (`-e PAT`). A
+   * next argument starting with `-` (including `--`) is ambiguous: not read-only.
    */
   shortValue?: string;
   /** Short flags taking an attached value only (`-M50%`); never the next argument. */
@@ -46,8 +46,9 @@ interface FlagSpec {
   /**
    * Long flags taking a value. Only the attached `--flag=value` form is read as
    * one: whether a program takes a separate value, and whether it is optional,
-   * varies (`grep --color`), so a following argument is always checked on its
-   * own. Swallowing it could hide a flag; checking it costs at most a review.
+   * varies (`grep --color`), so a following plain argument is checked as a
+   * positional, and a following one starting with `-` (including `--`, which a
+   * program may take as the value) is ambiguous: not read-only.
    */
   longValue?: readonly string[];
   /** Accept `-<number>` (`git log -5`). */
@@ -66,7 +67,12 @@ export function positionalsIfAllowed(args: readonly string[], spec: FlagSpec): s
     if (arg.startsWith("--")) {
       const eq = arg.indexOf("=");
       const name = eq < 0 ? arg : arg.slice(0, eq);
-      if (spec.longValue?.includes(name)) continue;
+      if (spec.longValue?.includes(name)) {
+        // A program may take the next argument as this flag's value, even `--`: then a
+        // following flag-like argument is ambiguous, and ambiguity goes to review.
+        if (eq < 0 && args[i + 1]?.startsWith("-")) return undefined;
+        continue;
+      }
       if (eq < 0 && spec.long?.includes(name)) continue;
       return undefined;
     }
@@ -75,9 +81,13 @@ export function positionalsIfAllowed(args: readonly string[], spec: FlagSpec): s
       for (let j = 1; j < arg.length; j++) {
         const flag = arg[j];
         if (spec.shortValue?.includes(flag)) {
-          // A separate value is taken only when it cannot be a flag: if this one is really a
-          // boolean (`git shortlog -n`), a swallowed `--output=x` would go unchecked.
-          if (j === arg.length - 1 && i + 1 < args.length && !args[i + 1].startsWith("-")) i++;
+          if (j === arg.length - 1 && i + 1 < args.length) {
+            // Whether the program takes the next argument as the value (even `--`) or this
+            // flag is really a boolean (`git shortlog -n`), a flag-like next argument is
+            // ambiguous and goes to review; a plain one is taken as the value.
+            if (args[i + 1].startsWith("-")) return undefined;
+            i++;
+          }
           break;
         }
         if (spec.shortAttached?.includes(flag)) break;
