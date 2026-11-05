@@ -122,7 +122,7 @@ function GREP_SPEC(): FlagSpec {
   };
 }
 
-/** Flags shared by git's history and diff readers (log, show, diff, rev-list, shortlog, stash show). */
+/** Flags shared by git's history readers (log, show, rev-list, shortlog, stash show, reflog). */
 const GIT_HISTORY: FlagSpec = {
   short: "puswbaiEFPzRrtc",
   shortValue: "nSG",
@@ -151,11 +151,14 @@ const GIT_HISTORY: FlagSpec = {
   ],
 };
 
-/** Per-subcommand flags for the git subcommands that only read. */
+/**
+ * Per-subcommand flags for the git subcommands that only read the repository's
+ * own objects. `diff` and `grep` are absent: outside a worktree (or with a path
+ * outside it) they fall back to reading arbitrary files.
+ */
 const GIT: Record<string, FlagSpec> = {
   log: GIT_HISTORY,
   show: GIT_HISTORY,
-  diff: GIT_HISTORY,
   "rev-list": GIT_HISTORY,
   shortlog: GIT_HISTORY,
   status: {
@@ -163,18 +166,6 @@ const GIT: Record<string, FlagSpec> = {
     shortAttached: "u",
     long: ["--short", "--branch", "--long", "--show-stash", "--no-ahead-behind", "--ahead-behind", "--renames", "--no-renames", "--null"],
     longOptional: ["--porcelain", "--untracked-files", "--ignored", "--ignore-submodules"],
-  },
-  grep: {
-    short: "nilcwvFEPhHIozq",
-    shortValue: "eABCm",
-    long: [
-      "--cached", "--untracked", "--name-only", "--files-with-matches",
-      "--files-without-match", "--count", "--line-number", "--ignore-case", "--word-regexp",
-      "--invert-match", "--fixed-strings", "--extended-regexp", "--perl-regexp", "--full-name",
-      "--heading", "--break", "--show-function", "--column", "--only-matching", "--null", "--quiet",
-      "--all-match", "--exclude-standard",
-    ],
-    longValue: ["--max-depth", "--context", "--after-context", "--before-context", "--max-count", "--threads"],
   },
   fetch: {
     short: "pqv",
