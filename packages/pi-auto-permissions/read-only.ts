@@ -1,25 +1,28 @@
 /**
- * Read-only fast path for `reviewAllShell`: a command made only of known
- * read-only programs skips the blanket review, as Claude Code's built-in
- * read-only set skips its classifier.
+ * Read-only fast path for `reviewAllShell`: a command that can neither change
+ * anything nor print anything beyond names, counts and the project's own
+ * history skips the blanket review. Guardian reviews are cheap; this exists to
+ * skip the obviously harmless ones, not to be clever.
  *
- * An allowlist all the way down. A program is read-only here only when no
- * argument can make it write, execute, or reveal a credential (PURE), or when
- * every flag it is given is one this file lists (`rg`, `git`, `gh`). Anything
- * this parser cannot vouch for — an unknown program, subcommand or flag, a
- * substitution or expansion, a subshell, a here-doc, a background job, an
- * env-prefixed command, a write redirect other than to /dev/null — goes to the
- * guardian. A forgotten safe flag costs one review; a forgotten unsafe one
- * would run a command unreviewed, which is why no list here names unsafe flags.
+ * An allowlist all the way down, kept deliberately small:
+ * - META programs print metadata only (names, sizes, counts, hashes), whatever
+ *   their arguments.
+ * - STDIN_FILTERS (`head`, `grep`, `jq`, ...) take listed flags and no file
+ *   arguments, so they only ever see what an earlier, itself-checked part of
+ *   the pipeline produced.
+ * - Read-only `git` and `gh` subcommands take listed flags only.
+ * Anything else — a program that reads file contents (`cat`, `rg`), an
+ * unknown program, subcommand or flag, an unquoted glob, a substitution or
+ * expansion, a subshell, a here-doc, a background job, an env-prefixed
+ * command, a write redirect other than to /dev/null — goes to the guardian.
+ * A forgotten safe case costs one review; no list here names unsafe flags.
  */
 
-/** Programs no argument can make write, execute, or print a credential. */
-const PURE = new Set([
-  "ls", "pwd", "cat", "head", "tail", "wc", "stat", "realpath", "basename", "dirname", "du", "df",
-  "free", "ps", "id", "whoami", "uname", "uptime", "which", "type", "echo", "printf", "grep",
-  "egrep", "fgrep", "md5sum", "sha1sum", "sha256sum", "sha512sum", "cksum", "cut", "tr",
-  "column", "nl", "diff", "cmp", "comm", "strings", "hexdump", "od", "base64", "readlink",
-  "nproc", "lscpu", "lsblk", "lsof", "true", "false", "test", "[", "sleep", "cd",
+/** Programs that print only metadata (names, sizes, counts, hashes), never file contents. */
+const META = new Set([
+  "ls", "pwd", "stat", "du", "df", "free", "id", "whoami", "uname", "uptime", "which", "type",
+  "basename", "dirname", "realpath", "readlink", "nproc", "lscpu", "lsblk", "true", "false",
+  "test", "sleep", "cd", "echo", "wc", "md5sum", "sha1sum", "sha256sum", "sha512sum", "cksum",
 ]);
 
 /** The flags a program may be given. Anything else is not read-only. */
@@ -78,28 +81,44 @@ export function positionalsIfAllowed(args: readonly string[], spec: FlagSpec): s
   return positionals;
 }
 
-const RG: FlagSpec = {
-  short: "nilcwvFSuLHNoxsUPqIa",
-  shortValue: "egtTABCmjMfEdr",
-  long: [
-    "--hidden", "--no-ignore", "--no-ignore-vcs", "--no-ignore-dot", "--no-ignore-parent", "--files",
-    "--files-with-matches", "--files-without-match", "--count", "--count-matches", "--line-number",
-    "--no-line-number", "--ignore-case", "--smart-case", "--case-sensitive", "--word-regexp",
-    "--line-regexp", "--fixed-strings", "--invert-match", "--json", "--vimgrep", "--only-matching",
-    "--multiline", "--multiline-dotall", "--pcre2", "--no-heading", "--heading", "--with-filename",
-    "--no-filename", "--follow", "--trim", "--stats", "--unrestricted", "--text", "--null",
-    "--null-data", "--column", "--byte-offset", "--passthru", "--quiet", "--no-messages",
-    "--type-list", "--one-file-system", "--no-config", "--max-columns-preview", "--binary",
-    "--crlf", "--no-unicode", "--glob-case-insensitive", "--include-zero", "--sort-files",
-  ],
-  longValue: [
-    "--regexp", "--glob", "--iglob", "--type", "--type-not", "--type-add", "--context", "--after-context",
-    "--before-context", "--max-count", "--max-depth", "--max-filesize", "--max-columns", "--sort",
-    "--sortr", "--threads", "--replace", "--file", "--encoding", "--engine", "--color", "--colors",
-    "--context-separator", "--field-match-separator", "--field-context-separator",
-    "--path-separator",
-  ],
+/**
+ * Filters allowed with no file arguments, so they read only their pipe.
+ * `positionals` is how many non-flag arguments each takes (patterns, filters,
+ * character sets), never paths.
+ */
+const STDIN_FILTERS: Record<string, { spec: FlagSpec; positionals: (args: readonly string[]) => number }> = {
+  head: { spec: { short: "qvz", shortValue: "nc", numeric: true, longValue: ["--lines", "--bytes"], long: ["--quiet", "--silent", "--verbose", "--zero-terminated"] }, positionals: () => 0 },
+  tail: { spec: { short: "qvzfF", shortValue: "nc", numeric: true, longValue: ["--lines", "--bytes"], long: ["--quiet", "--silent", "--verbose", "--zero-terminated"] }, positionals: () => 0 },
+  cut: { spec: { short: "sz", shortValue: "dfcb", longValue: ["--delimiter", "--fields", "--characters", "--bytes", "--output-delimiter"], long: ["--complement", "--only-delimited", "--zero-terminated"] }, positionals: () => 0 },
+  tr: { spec: { short: "cCdst" }, positionals: () => 2 },
+  // No -r/-R/-d/--include/-f: those read files.
+  grep: { spec: GREP_SPEC(), positionals: (args) => (args.some((arg) => /^-[^-]*e|^--regexp/u.test(arg)) ? 0 : 1) },
+  egrep: { spec: GREP_SPEC(), positionals: (args) => (args.some((arg) => /^-[^-]*e|^--regexp/u.test(arg)) ? 0 : 1) },
+  fgrep: { spec: GREP_SPEC(), positionals: (args) => (args.some((arg) => /^-[^-]*e|^--regexp/u.test(arg)) ? 0 : 1) },
+  // No -f/--from-file, --rawfile, --slurpfile: those read files.
+  jq: {
+    spec: {
+      short: "rncsSjeaCMR",
+      long: ["--raw-output", "--raw-output0", "--null-input", "--compact-output", "--slurp", "--sort-keys", "--join-output", "--exit-status", "--ascii-output", "--tab", "--raw-input", "--color-output", "--monochrome-output"],
+      longValue: ["--indent"],
+    },
+    positionals: () => 1,
+  },
 };
+
+function GREP_SPEC(): FlagSpec {
+  return {
+    short: "nivcwxoqsEFGPlLHhbzZIUa",
+    shortValue: "eABCm",
+    long: [
+      "--line-number", "--ignore-case", "--invert-match", "--count", "--word-regexp", "--line-regexp",
+      "--only-matching", "--quiet", "--silent", "--no-messages", "--extended-regexp", "--fixed-strings",
+      "--basic-regexp", "--perl-regexp", "--with-filename", "--no-filename", "--byte-offset", "--null",
+      "--null-data", "--text",
+    ],
+    longValue: ["--regexp", "--after-context", "--before-context", "--context", "--max-count", "--color", "--colour", "--label"],
+  };
+}
 
 /** Flags shared by git's history and diff readers (log, show, diff, rev-list, shortlog, stash show). */
 const GIT_HISTORY: FlagSpec = {
@@ -147,7 +166,7 @@ const GIT: Record<string, FlagSpec> = {
     short: "nilcwvFEPhHIozq",
     shortValue: "eABCm",
     long: [
-      "--cached", "--untracked", "--no-index", "--name-only", "--files-with-matches",
+      "--cached", "--untracked", "--name-only", "--files-with-matches",
       "--files-without-match", "--count", "--line-number", "--ignore-case", "--word-regexp",
       "--invert-match", "--fixed-strings", "--extended-regexp", "--perl-regexp", "--full-name",
       "--heading", "--break", "--show-function", "--column", "--only-matching", "--null", "--quiet",
@@ -238,17 +257,11 @@ function gitReadOnly(args: string[]): boolean {
     }
     case "worktree":
       return subArgs[0] === "list" && !!positionalsIfAllowed(subArgs.slice(1), { short: "v", long: ["--porcelain", "--verbose"] });
-    case "remote":
-      return (subArgs.length === 0 || (subArgs.length === 1 && (subArgs[0] === "-v" || subArgs[0] === "--verbose")))
-        || ((subArgs[0] === "show" || subArgs[0] === "get-url") && subArgs.slice(1).every((arg) => !arg.startsWith("-")));
     case "tag": {
       // As with branch: a positional is a pattern only with --list, otherwise it creates a tag.
       const positionals = positionalsIfAllowed(subArgs, GIT_TAG);
       return !!positionals && (positionals.length === 0 || subArgs.includes("--list") || subArgs.includes("-l"));
     }
-    case "config":
-      return /^(--get|--get-all|--get-regexp|--list|-l)$/u.test(subArgs[0] ?? "")
-        && !!positionalsIfAllowed(subArgs.slice(1), { long: ["--global", "--local", "--system", "--show-origin", "--show-scope", "--null"] });
     default:
       return false;
   }
@@ -358,6 +371,8 @@ export function tokenizeShell(command: string): Token[] | undefined {
       continue;
     }
     if (c === "$" || c === "`" || c === "(" || c === ")" || c === "{" || c === "}") return undefined;
+    // An unquoted glob expands to file names this parser never sees, any of which can be a flag.
+    if (c === "*" || c === "?" || c === "[") return undefined;
     if (c === "#" && !inWord) {
       const end = command.indexOf("\n", i);
       i = end < 0 ? command.length : end - 1;
@@ -440,11 +455,15 @@ function segmentReadOnly(words: string[]): boolean {
   }
   if (program === "git") return gitReadOnly(args);
   if (program === "gh") return ghReadOnly(args);
-  if (program === "rg") return !!positionalsIfAllowed(args, RG);
   if (program === "command") return args.length === 2 && (args[0] === "-v" || args[0] === "-V");
-  // jq cannot write or execute, but its filter can read the environment.
-  if (program === "jq") return !args.some((arg) => /\$ENV|\benv\b/u.test(arg));
-  return PURE.has(program);
+  const filter = STDIN_FILTERS[program];
+  if (filter) {
+    const positionals = positionalsIfAllowed(args, filter.spec);
+    if (!positionals || positionals.length > filter.positionals(args)) return false;
+    // jq cannot write or execute, but its filter can read the environment.
+    return program !== "jq" || !positionals.some((arg) => /\$ENV|\benv\b/u.test(arg));
+  }
+  return META.has(program);
 }
 
 /** True when every command in `command` is a known read-only program given only allowed arguments. */

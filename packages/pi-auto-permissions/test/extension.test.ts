@@ -630,7 +630,7 @@ test("8 · reviewAllShell reviews an unmatched command under the generic gate, u
 			assert.equal(harness.calls.length, 1);
 			assert.match(harness.calls[0].envelope, /"gate": "shell command"/u);
 			assert.match(harness.calls[0].envelope, /"group": "all-shell"/u);
-			assert.equal(await harness.toolCall("cd /tmp && git status && rg -n todo | head"), undefined);
+			assert.equal(await harness.toolCall("cd /tmp && git status && ls | head"), undefined);
 			assert.equal(harness.calls.length, 1, "a known read-only command skips the blanket review");
 		},
 	);
