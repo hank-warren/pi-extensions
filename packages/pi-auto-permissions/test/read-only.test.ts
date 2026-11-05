@@ -29,6 +29,12 @@ const READ_ONLY = [
 	"systemctl --user status pi-thing",
 	"journalctl -u vault-server -n 50 --no-pager",
 	"timeout 10 git fetch origin",
+	"git fetch https://github.com/x/y.git main",
+	"git reflog",
+	"git reflog show main",
+	"git reflog main",
+	"echo hi >&2",
+	"ls 2>&-",
 	"npm ls --depth=0",
 	"date -u +%Y-%m-%d",
 	"# just a comment\nls",
@@ -84,6 +90,23 @@ const NOT_READ_ONLY = [
 	"python3 -c 'print(1)'",
 	"sed -n 1,5p file",
 	"xargs rm",
+	// Credentials printed by otherwise read-only commands.
+	"gh auth status --show-token",
+	"gh auth status -t",
+	"docker inspect web",
+	"systemctl show nginx",
+	"systemctl cat nginx",
+	"kubectl get secret db -o yaml",
+	"kubectl get secrets",
+	// Recovery history and local branches.
+	"git reflog expire --expire=now --all",
+	"git reflog delete HEAD@{1}",
+	"git fetch origin +main:main",
+	"git fetch origin main:refs/heads/main",
+	// A redirect whose fd word is really a file name.
+	"echo overwrite >&1report.txt",
+	"echo x >&2x",
+	"echo x >& out.txt",
 ];
 
 test("known read-only commands skip review", () => {

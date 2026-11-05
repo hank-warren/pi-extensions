@@ -39,18 +39,20 @@ const READ_ONLY_PROGRAMS: Record<string, RegExp | null> = {
 
 /** Programs whose first non-flag argument is a subcommand; only these subcommands are read-only. */
 const READ_ONLY_SUBCOMMANDS: Record<string, Set<string>> = {
-  docker: new Set(["ps", "images", "logs", "inspect", "version", "info"]),
+  // Reads that can print credentials (`docker inspect` and `systemctl show|cat` show
+  // environments, `kubectl get secret` shows values) are left to the guardian.
+  docker: new Set(["ps", "images", "logs", "version", "info"]),
   kubectl: new Set(["get", "describe", "logs", "top", "version", "explain"]),
   systemctl: new Set([
-    "status", "show", "cat", "list-units", "list-timers", "list-unit-files", "list-sockets",
+    "status", "list-units", "list-timers", "list-unit-files", "list-sockets",
     "is-active", "is-enabled", "is-failed",
   ]),
   npm: new Set(["ls", "list", "view", "info", "outdated", "explain", "why"]),
 };
 
 const GIT_READ_ONLY = new Set([
-  "status", "log", "show", "diff", "fetch", "blame", "describe", "rev-parse", "shortlog",
-  "ls-files", "ls-remote", "ls-tree", "cat-file", "rev-list", "merge-base", "reflog",
+  "status", "log", "show", "diff", "blame", "describe", "rev-parse", "shortlog",
+  "ls-files", "ls-remote", "ls-tree", "cat-file", "rev-list", "merge-base",
   "grep", "for-each-ref", "show-ref", "name-rev", "cherry", "count-objects", "check-ignore",
 ]);
 /** Flags that make an otherwise read-only git subcommand write or execute. */
@@ -160,10 +162,11 @@ export function tokenizeShell(command: string): Token[] | undefined {
       // Here-docs, here-strings and process substitution carry content this parser does not read.
       if (op.includes("<<") || command[j] === "(") return undefined;
       if (op.endsWith("&")) {
-        // fd duplication (`2>&1`, `>&2`, `<&0`) or closing (`>&-`) touches no file.
+        // fd duplication (`2>&1`, `>&2`, `<&0`) or closing (`>&-`) touches no file. The
+        // whole word must be the fd: bash reads `>&1report.txt` as a redirect into a file.
         let k = j;
-        while (k < command.length && /[\d-]/u.test(command[k])) k++;
-        if (k === j) return undefined;
+        while (k < command.length && !/[\s;&|<>()]/u.test(command[k])) k++;
+        if (!/^(\d+-?|-)$/u.test(command.slice(j, k))) return undefined;
         i = k - 1;
         continue;
       }
@@ -199,8 +202,13 @@ function gitSegmentReadOnly(args: string[]): boolean {
   const [sub, ...subArgs] = rest;
   if (!sub || sub.startsWith("-")) return false;
   if (subArgs.some((arg) => GIT_UNSAFE_ARG.test(arg))) return false;
+  // A refspec with a destination (`+main:main`) can overwrite a local branch.
+  if (sub === "fetch") return !subArgs.some((arg) => arg.includes(":") && !arg.includes("://"));
   if (GIT_READ_ONLY.has(sub)) return true;
   switch (sub) {
+    case "reflog":
+      // Bare `git reflog` and `show` list; `expire` and `delete` erase recovery history.
+      return subArgs.length === 0 || subArgs[0] === "show" || (!subArgs[0].startsWith("-") && subArgs.length === 1 && !/^(expire|delete|drop)$/u.test(subArgs[0]));
     case "branch":
       // A bare positional creates a branch; one is allowed only as a listing flag's value.
       return subArgs.every((arg, index) =>
@@ -225,7 +233,8 @@ function gitSegmentReadOnly(args: string[]): boolean {
 function ghSegmentReadOnly(args: string[]): boolean {
   const [area, action, ...rest] = args;
   if (area === "api") return !args.slice(1).some((arg) => GH_API_WRITE.test(arg));
-  if (area === "auth") return action === "status";
+  // `--show-token` / `-t` print the credential.
+  if (area === "auth") return action === "status" && !rest.some((arg) => /^(-t|--show-token)$/u.test(arg));
   const actions = area ? GH_READ_ONLY[area] : undefined;
   return !!actions && !!action && actions.has(action) && !rest.includes("--web");
 }
@@ -248,6 +257,7 @@ function segmentReadOnly(words: string[]): boolean {
   if (subcommands) {
     const sub = firstNonFlag(args);
     if (!sub || !subcommands.has(sub.value)) return false;
+    if (program === "kubectl" && args.some((arg) => /^secrets?(\/|$)/u.test(arg))) return false;
     // A flag before the subcommand may take a value that looks like one (`kubectl -n get pods`).
     return sub.index === 0 || program === "systemctl";
   }
