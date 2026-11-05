@@ -157,6 +157,9 @@ const NOT_READ_ONLY = [
 	"git log --format --output=x",
 	"git status --porcelain --output=x",
 	"gh pr view 1 -w --show-token",
+	// A builtin that evaluates an array subscript runs the substitution inside it.
+	"test -v 'BASH_VERSINFO[$(rm -rf ./pre-existing-dir)]'",
+	"test -f README.md && echo yes",
 ];
 
 test("known read-only commands skip review", () => {

@@ -18,10 +18,14 @@
  * A forgotten safe case costs one review; no list here names unsafe flags.
  */
 
-/** Programs that print only metadata (names, sizes, counts, hashes), never file contents. */
+/**
+ * Programs that print only metadata (names, sizes), never file contents. The
+ * builtins among them (cd, echo, pwd, type, true, false) never evaluate their
+ * arguments; `test` is absent because `test -v 'a[$(cmd)]'` runs cmd.
+ */
 const META = new Set([
   "ls", "pwd", "stat", "df", "free", "id", "whoami", "uname", "uptime", "which", "type",
-  "basename", "dirname", "realpath", "readlink", "nproc", "true", "false", "test", "sleep", "cd",
+  "basename", "dirname", "realpath", "readlink", "nproc", "true", "false", "sleep", "cd",
   "echo",
 ]);
 
