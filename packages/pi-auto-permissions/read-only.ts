@@ -3,75 +3,300 @@
  * read-only programs skips the blanket review, as Claude Code's built-in
  * read-only set skips its classifier.
  *
- * Conservative by construction. The command is tokenized with shell quoting,
- * and anything this parser cannot vouch for is "not read-only" and goes to the
- * guardian: substitutions (`$(`, backticks, `$VAR`), subshells and groups,
- * write redirects, here-docs, background jobs, env-prefixed commands, and any
- * program or subcommand not listed below. A false "not read-only" costs one
- * review; a false "read-only" runs a command unreviewed, so every doubt lands
- * on the review side.
+ * An allowlist all the way down. A program is read-only here only when no
+ * argument can make it write, execute, or reveal a credential (PURE), or when
+ * every flag it is given is one this file lists (`rg`, `git`, `gh`). Anything
+ * this parser cannot vouch for — an unknown program, subcommand or flag, a
+ * substitution or expansion, a subshell, a here-doc, a background job, an
+ * env-prefixed command, a write redirect other than to /dev/null — goes to the
+ * guardian. A forgotten safe flag costs one review; a forgotten unsafe one
+ * would run a command unreviewed, which is why no list here names unsafe flags.
  */
 
-/** Programs that only read, whatever their arguments, except for the listed flags. */
-const READ_ONLY_PROGRAMS: Record<string, RegExp | null> = {
-  ls: null, pwd: null, cat: null, head: null, tail: null, wc: null, stat: null,
-  realpath: null, basename: null, dirname: null, du: null, df: null, free: null, ps: null,
-  id: null, whoami: null, uname: null, uptime: null, which: null, type: null,
-  echo: null, printf: null, grep: null, egrep: null, fgrep: null, md5sum: null, sha1sum: null,
-  sha256sum: null, sha512sum: null, cksum: null, jq: null, cut: null, tr: null, column: null,
-  nl: null, diff: null, cmp: null, comm: null, strings: null, hexdump: null, od: null,
-  base64: null, readlink: null, nproc: null, lscpu: null, lsblk: null, lsof: null, true: null,
-  false: null, test: null, "[": null, sleep: null, cd: null,
-  // tree -o writes its listing to a file.
-  tree: /^(-o|--output(=|$))/,
-  // ripgrep runs a preprocessor program with --pre.
-  rg: /^--pre(=|$)/,
-  // file -C compiles a magic file; ss -K kills sockets.
-  file: /^(-\w*C|--compile)$/,
-  ss: /^(-\w*K|--kill)$/,
-  // sort -o writes a file; --compress-program runs one.
-  sort: /^(-\w*o|--output(=|$)|--compress-program(=|$))/,
-  // date -s sets the clock.
-  date: /^(-\w*s|--set(=|$))/,
-  find: /^-(delete|exec|execdir|ok|okdir|fprint|fprint0|fprintf|fls)$/,
-  journalctl: /^--(vacuum|rotate|flush|relinquish|smart-relinquish|setup-keys|sync|update-catalog)/,
-};
-
-/** Programs whose first non-flag argument is a subcommand; only these subcommands are read-only. */
-const READ_ONLY_SUBCOMMANDS: Record<string, Set<string>> = {
-  // Reads that can print credentials (`docker inspect` and `systemctl show|cat` show
-  // environments, `kubectl get secret` shows values) are left to the guardian.
-  docker: new Set(["ps", "images", "logs", "version", "info"]),
-  kubectl: new Set(["get", "describe", "logs", "top", "version", "explain"]),
-  systemctl: new Set([
-    "status", "list-units", "list-timers", "list-unit-files", "list-sockets",
-    "is-active", "is-enabled", "is-failed",
-  ]),
-  npm: new Set(["ls", "list", "view", "info", "outdated", "explain", "why"]),
-};
-
-const GIT_READ_ONLY = new Set([
-  "status", "log", "show", "diff", "blame", "describe", "rev-parse", "shortlog",
-  "ls-files", "ls-remote", "ls-tree", "cat-file", "rev-list", "merge-base",
-  "grep", "for-each-ref", "show-ref", "name-rev", "cherry", "count-objects", "check-ignore",
+/** Programs no argument can make write, execute, or print a credential. */
+const PURE = new Set([
+  "ls", "pwd", "cat", "head", "tail", "wc", "stat", "realpath", "basename", "dirname", "du", "df",
+  "free", "ps", "id", "whoami", "uname", "uptime", "which", "type", "echo", "printf", "grep",
+  "egrep", "fgrep", "md5sum", "sha1sum", "sha256sum", "sha512sum", "cksum", "cut", "tr",
+  "column", "nl", "diff", "cmp", "comm", "strings", "hexdump", "od", "base64", "readlink",
+  "nproc", "lscpu", "lsblk", "lsof", "true", "false", "test", "[", "sleep", "cd",
 ]);
-/** Flags that make an otherwise read-only git subcommand write or execute. */
-const GIT_UNSAFE_ARG = /^(--output(=|$)|--upload-pack|--receive-pack|--exec(=|$)|--ext-diff|ext::|-c$|-O|--open-files-in-pager)/;
-/** Flags of `git branch` that list, and the ones among them that take a value. */
-const GIT_BRANCH_LIST_FLAG = /^(--list|--show-current|--all|--remotes|-[avr]+|--contains|--merged|--no-merged|--points-at)$/;
-const GIT_BRANCH_VALUE_FLAG = /^--(contains|merged|no-merged|points-at)$/;
 
-const GH_READ_ONLY: Record<string, Set<string>> = {
+/** The flags a program may be given. Anything else is not read-only. */
+interface FlagSpec {
+  /** Boolean short flags, combinable (`-niw`). */
+  short?: string;
+  /** Short flags taking the next argument, or the rest of this one (`-e PAT`, `-A3`). */
+  shortValue?: string;
+  /** Short flags taking an attached value only (`-M50%`); never the next argument. */
+  shortAttached?: string;
+  /** Boolean long flags. */
+  long?: readonly string[];
+  /** Long flags taking `=value` or the next argument. */
+  longValue?: readonly string[];
+  /** Long flags taking an optional attached `=value` only; never the next argument. */
+  longOptional?: readonly string[];
+  /** Accept `-<number>` (`git log -5`). */
+  numeric?: boolean;
+}
+
+/** The positional arguments when every flag fits `spec`, or undefined when one does not. */
+export function positionalsIfAllowed(args: readonly string[], spec: FlagSpec): string[] | undefined {
+  const positionals: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--") {
+      positionals.push(...args.slice(i + 1));
+      break;
+    }
+    if (arg.startsWith("--")) {
+      const eq = arg.indexOf("=");
+      const name = eq < 0 ? arg : arg.slice(0, eq);
+      if (spec.longValue?.includes(name)) {
+        if (eq < 0) i++;
+        continue;
+      }
+      if (spec.longOptional?.includes(name)) continue;
+      if (eq < 0 && spec.long?.includes(name)) continue;
+      return undefined;
+    }
+    if (arg.startsWith("-") && arg.length > 1) {
+      if (spec.numeric && /^-\d+$/u.test(arg)) continue;
+      for (let j = 1; j < arg.length; j++) {
+        const flag = arg[j];
+        if (spec.shortValue?.includes(flag)) {
+          if (j === arg.length - 1) i++;
+          break;
+        }
+        if (spec.shortAttached?.includes(flag)) break;
+        if (!spec.short?.includes(flag)) return undefined;
+      }
+      continue;
+    }
+    positionals.push(arg);
+  }
+  return positionals;
+}
+
+const RG: FlagSpec = {
+  short: "nilcwvFSuLHNoxsUPqIa",
+  shortValue: "egtTABCmjMfEdr",
+  long: [
+    "--hidden", "--no-ignore", "--no-ignore-vcs", "--no-ignore-dot", "--no-ignore-parent", "--files",
+    "--files-with-matches", "--files-without-match", "--count", "--count-matches", "--line-number",
+    "--no-line-number", "--ignore-case", "--smart-case", "--case-sensitive", "--word-regexp",
+    "--line-regexp", "--fixed-strings", "--invert-match", "--json", "--vimgrep", "--only-matching",
+    "--multiline", "--multiline-dotall", "--pcre2", "--no-heading", "--heading", "--with-filename",
+    "--no-filename", "--follow", "--trim", "--stats", "--unrestricted", "--text", "--null",
+    "--null-data", "--column", "--byte-offset", "--passthru", "--quiet", "--no-messages",
+    "--type-list", "--one-file-system", "--no-config", "--max-columns-preview", "--binary",
+    "--crlf", "--no-unicode", "--glob-case-insensitive", "--include-zero", "--sort-files",
+  ],
+  longValue: [
+    "--regexp", "--glob", "--iglob", "--type", "--type-not", "--type-add", "--context", "--after-context",
+    "--before-context", "--max-count", "--max-depth", "--max-filesize", "--max-columns", "--sort",
+    "--sortr", "--threads", "--replace", "--file", "--encoding", "--engine", "--color", "--colors",
+    "--context-separator", "--field-match-separator", "--field-context-separator",
+    "--path-separator",
+  ],
+};
+
+/** Flags shared by git's history and diff readers (log, show, diff, rev-list, shortlog, stash show). */
+const GIT_HISTORY: FlagSpec = {
+  short: "puswbaiEFPzRrtc",
+  shortValue: "nSG",
+  shortAttached: "UMCB",
+  numeric: true,
+  long: [
+    "--oneline", "--shortstat", "--numstat", "--summary", "--name-only", "--name-status", "--raw",
+    "--patch", "--no-patch", "--abbrev-commit", "--no-abbrev-commit", "--no-decorate", "--graph",
+    "--all", "--branches", "--tags", "--remotes", "--no-merges", "--merges", "--first-parent",
+    "--reverse", "--follow", "--cached", "--staged", "--no-color", "--ignore-all-space",
+    "--ignore-space-change", "--ignore-blank-lines", "--check", "--minimal", "--histogram",
+    "--patience", "--exit-code", "--quiet", "--no-ext-diff", "--no-textconv", "--left-right",
+    "--cherry-pick", "--cherry-mark", "--boundary", "--topo-order", "--date-order",
+    "--full-history", "--simplify-by-decoration", "--source", "--full-diff", "--no-renames",
+    "--text", "--compact-summary", "--no-walk", "--count", "--regexp-ignore-case",
+    "--extended-regexp", "--fixed-strings", "--all-match", "--invert-grep", "--summary",
+    "--numbered", "--email", "--committer", "--no-prefix", "--name-only",
+  ],
+  longValue: [
+    "--format", "--date", "--since", "--until", "--after", "--before", "--author", "--committer",
+    "--grep", "--max-count", "--skip", "--diff-filter", "--min-parents", "--max-parents",
+  ],
+  longOptional: [
+    "--stat", "--dirstat", "--color", "--word-diff", "--relative", "--abbrev", "--decorate",
+    "--pretty", "--find-renames", "--find-copies", "--unified",
+  ],
+};
+
+/** Per-subcommand flags for the git subcommands that only read. */
+const GIT: Record<string, FlagSpec> = {
+  log: GIT_HISTORY,
+  show: GIT_HISTORY,
+  diff: GIT_HISTORY,
+  "rev-list": GIT_HISTORY,
+  shortlog: GIT_HISTORY,
+  status: {
+    short: "sbz",
+    shortAttached: "u",
+    long: ["--short", "--branch", "--long", "--show-stash", "--no-ahead-behind", "--ahead-behind", "--renames", "--no-renames", "--null"],
+    longOptional: ["--porcelain", "--untracked-files", "--ignored", "--ignore-submodules"],
+  },
+  grep: {
+    short: "nilcwvFEPhHIozq",
+    shortValue: "eABCm",
+    long: [
+      "--cached", "--untracked", "--no-index", "--name-only", "--files-with-matches",
+      "--files-without-match", "--count", "--line-number", "--ignore-case", "--word-regexp",
+      "--invert-match", "--fixed-strings", "--extended-regexp", "--perl-regexp", "--full-name",
+      "--heading", "--break", "--show-function", "--column", "--only-matching", "--null", "--quiet",
+      "--all-match", "--exclude-standard",
+    ],
+    longValue: ["--max-depth", "--context", "--after-context", "--before-context", "--max-count", "--threads"],
+  },
+  fetch: {
+    short: "pqv",
+    long: ["--prune", "--quiet", "--verbose", "--all", "--tags", "--no-tags", "--dry-run", "--progress", "--no-progress"],
+    longValue: ["--jobs"],
+  },
+  "rev-parse": {
+    short: "q",
+    long: [
+      "--show-toplevel", "--git-dir", "--git-common-dir", "--absolute-git-dir", "--is-inside-work-tree",
+      "--is-bare-repository", "--show-prefix", "--show-cdup", "--symbolic-full-name", "--verify",
+      "--quiet", "--show-superproject-working-tree", "--all", "--branches", "--tags", "--remotes",
+    ],
+    longOptional: ["--short", "--abbrev-ref"],
+  },
+  "ls-files": {
+    short: "cdmoisuz",
+    long: [
+      "--cached", "--deleted", "--modified", "--others", "--ignored", "--stage", "--unmerged",
+      "--exclude-standard", "--full-name", "--error-unmatch", "--directory", "--no-empty-directory",
+      "--eol", "--deduplicate",
+    ],
+    longValue: ["--exclude"],
+  },
+  "ls-remote": { short: "htq", long: ["--heads", "--tags", "--refs", "--quiet", "--symref", "--get-url"], longValue: ["--sort"] },
+  "ls-tree": { short: "rdtlz", long: ["--name-only", "--name-status", "--full-name", "--full-tree", "--long", "--object-only"], longValue: ["--format"], longOptional: ["--abbrev"] },
+  "cat-file": { short: "tspe" },
+  describe: { long: ["--tags", "--all", "--always", "--long", "--exact-match", "--contains"], longValue: ["--match", "--exclude", "--candidates"], longOptional: ["--abbrev", "--dirty"] },
+  blame: { short: "lstwefnp", shortValue: "L", shortAttached: "MC", long: ["--porcelain", "--line-porcelain", "--show-email", "--show-name", "--show-number"], longValue: ["--date"] },
+  "merge-base": { long: ["--is-ancestor", "--all", "--octopus", "--independent", "--fork-point"] },
+  "show-ref": { short: "dsq", long: ["--heads", "--tags", "--head", "--verify", "--quiet", "--dereference"], longOptional: ["--hash", "--abbrev"] },
+  "for-each-ref": { longValue: ["--format", "--sort", "--count", "--points-at", "--merged", "--no-merged", "--contains"] },
+  "name-rev": { long: ["--name-only", "--tags", "--all"] },
+  cherry: { short: "v" },
+  "count-objects": { short: "vH" },
+  "check-ignore": { short: "vnq", long: ["--verbose", "--non-matching", "--no-index", "--quiet"] },
+};
+
+/** `git branch` listing flags; a positional is a pattern only with `--list`, otherwise it creates a branch. */
+const GIT_BRANCH: FlagSpec = {
+  short: "avrl",
+  long: ["--list", "--show-current", "--all", "--remotes", "--verbose"],
+  longValue: ["--contains", "--merged", "--no-merged", "--points-at", "--format", "--sort"],
+};
+
+const GIT_TAG: FlagSpec = {
+  short: "l",
+  long: ["--list"],
+  longValue: ["--sort", "--contains", "--no-contains", "--points-at", "--merged", "--no-merged", "--format"],
+};
+
+function gitReadOnly(args: string[]): boolean {
+  let rest = args;
+  // `git -C <dir>` and pager suppression are the only global options allowed.
+  for (;;) {
+    if (rest[0] === "-C" && rest.length >= 2) rest = rest.slice(2);
+    else if (rest[0] === "--no-pager" || rest[0] === "-P") rest = rest.slice(1);
+    else break;
+  }
+  const [sub, ...subArgs] = rest;
+  if (!sub) return false;
+  const spec = GIT[sub];
+  if (spec) {
+    const positionals = positionalsIfAllowed(subArgs, spec);
+    if (!positionals) return false;
+    // A refspec with a destination (`+main:main`) can overwrite a local branch.
+    if (sub === "fetch") return !positionals.some((arg) => arg.includes(":") && !arg.includes("://"));
+    return true;
+  }
+  switch (sub) {
+    case "branch": {
+      const positionals = positionalsIfAllowed(subArgs, GIT_BRANCH);
+      return !!positionals && (positionals.length === 0 || subArgs.includes("--list") || subArgs.includes("-l"));
+    }
+    case "stash":
+      return (subArgs[0] === "list" || subArgs[0] === "show") && !!positionalsIfAllowed(subArgs.slice(1), GIT_HISTORY);
+    case "reflog": {
+      // Bare `git reflog` and `show` list; `expire` and `delete` erase recovery history.
+      const listing = subArgs[0] === "show" ? subArgs.slice(1) : subArgs;
+      const positionals = positionalsIfAllowed(listing, GIT_HISTORY);
+      return !!positionals && !positionals.some((arg) => /^(expire|delete|drop|exists)$/u.test(arg));
+    }
+    case "worktree":
+      return subArgs[0] === "list" && !!positionalsIfAllowed(subArgs.slice(1), { short: "v", long: ["--porcelain", "--verbose"] });
+    case "remote":
+      return (subArgs.length === 0 || (subArgs.length === 1 && (subArgs[0] === "-v" || subArgs[0] === "--verbose")))
+        || ((subArgs[0] === "show" || subArgs[0] === "get-url") && subArgs.slice(1).every((arg) => !arg.startsWith("-")));
+    case "tag": {
+      // As with branch: a positional is a pattern only with --list, otherwise it creates a tag.
+      const positionals = positionalsIfAllowed(subArgs, GIT_TAG);
+      return !!positionals && (positionals.length === 0 || subArgs.includes("--list") || subArgs.includes("-l"));
+    }
+    case "config":
+      return /^(--get|--get-all|--get-regexp|--list|-l)$/u.test(subArgs[0] ?? "")
+        && !!positionalsIfAllowed(subArgs.slice(1), { long: ["--global", "--local", "--system", "--show-origin", "--show-scope", "--null"] });
+    default:
+      return false;
+  }
+}
+
+/** gh subcommands whose every form reads. */
+const GH_READ: Record<string, ReadonlySet<string>> = {
   pr: new Set(["view", "list", "diff", "status", "checks"]),
   run: new Set(["list", "view"]),
   issue: new Set(["view", "list", "status"]),
   repo: new Set(["view", "list"]),
   release: new Set(["list", "view"]),
   workflow: new Set(["list", "view"]),
+  label: new Set(["list"]),
   search: new Set(["repos", "issues", "prs", "code", "commits"]),
 };
-/** `gh api` is a GET unless one of these sets a method or a body. */
-const GH_API_WRITE = /^(-X|--method(=|$)|-f|-F|--field(=|$)|--raw-field(=|$)|--input(=|$)|-X\w+)/;
+
+const GH_FLAGS: FlagSpec = {
+  short: "c",
+  shortValue: "qtRLsAalBHSbwejiu",
+  long: [
+    "--comments", "--log", "--log-failed", "--exit-status", "--watch", "--required", "--fail-fast",
+    "--verbose", "--name-only", "--patch", "--draft", "--archived", "--fork", "--source",
+  ],
+  longValue: [
+    "--json", "--jq", "--template", "--repo", "--limit", "--state", "--author", "--assignee",
+    "--label", "--base", "--head", "--search", "--branch", "--workflow", "--event", "--status",
+    "--user", "--commit", "--created", "--job", "--attempt", "--interval", "--owner", "--language",
+    "--sort", "--order", "--match", "--filename", "--extension", "--hostname", "--mention",
+    "--milestone", "--app", "--visibility", "--topic", "--color",
+  ],
+};
+
+/** `gh api` without a method or a body is a GET. */
+const GH_API: FlagSpec = {
+  short: "i",
+  shortValue: "qtH",
+  long: ["--paginate", "--slurp", "--include", "--silent", "--verbose"],
+  longValue: ["--jq", "--template", "--header", "--cache", "--hostname"],
+};
+
+function ghReadOnly(args: string[]): boolean {
+  const [area, action, ...rest] = args;
+  if (area === "api") return !!positionalsIfAllowed(args.slice(1), GH_API);
+  if (area === "auth") return action === "status" && !!positionalsIfAllowed(rest, { long: ["--active"], longValue: ["--hostname"] });
+  const actions = area ? GH_READ[area] : undefined;
+  return !!actions && !!action && actions.has(action) && !!positionalsIfAllowed(rest, GH_FLAGS);
+}
 
 type Token = { kind: "word"; text: string } | { kind: "op"; text: string };
 
@@ -96,23 +321,39 @@ export function tokenizeShell(command: string): Token[] | undefined {
       continue;
     }
     if (c === '"') {
+      // Bash's double-quote rules: backslash escapes only $ ` " \ and newline, and a
+      // backslash-newline disappears; any other backslash is literal.
       let j = i + 1;
       for (; j < command.length && command[j] !== '"'; j++) {
         const d = command[j];
         // Any expansion inside double quotes is a value this parser cannot see.
         if (d === "$" || d === "`") return undefined;
-        if (d === "\\") j++;
+        if (d === "\\" && j + 1 < command.length) {
+          const next = command[j + 1];
+          if (next === "\n") {
+            j++;
+            continue;
+          }
+          if (next === '"' || next === "\\") {
+            word += next;
+            j++;
+            continue;
+          }
+          if (next === "$" || next === "`") return undefined;
+        }
+        word += d;
       }
       if (j >= command.length) return undefined;
-      word += command.slice(i + 1, j).replace(/\\(.)/gu, "$1");
       inWord = true;
       i = j;
       continue;
     }
     if (c === "\\") {
       if (i + 1 >= command.length) return undefined;
-      if (command[i + 1] !== "\n") word += command[i + 1];
-      inWord = inWord || command[i + 1] !== "\n";
+      if (command[i + 1] !== "\n") {
+        word += command[i + 1];
+        inWord = true;
+      }
       i++;
       continue;
     }
@@ -186,87 +427,27 @@ export function tokenizeShell(command: string): Token[] | undefined {
   return tokens;
 }
 
-function firstNonFlag(args: string[]): { value: string; index: number } | undefined {
-  const index = args.findIndex((arg) => !arg.startsWith("-"));
-  return index < 0 ? undefined : { value: args[index], index };
-}
-
-function gitSegmentReadOnly(args: string[]): boolean {
-  let rest = args;
-  // `git -C <dir>` and pager suppression are allowed; every other global option is not.
-  for (;;) {
-    if (rest[0] === "-C" && rest.length >= 2) rest = rest.slice(2);
-    else if (rest[0] === "--no-pager" || rest[0] === "-P") rest = rest.slice(1);
-    else break;
-  }
-  const [sub, ...subArgs] = rest;
-  if (!sub || sub.startsWith("-")) return false;
-  if (subArgs.some((arg) => GIT_UNSAFE_ARG.test(arg))) return false;
-  // A refspec with a destination (`+main:main`) can overwrite a local branch.
-  if (sub === "fetch") return !subArgs.some((arg) => arg.includes(":") && !arg.includes("://"));
-  if (GIT_READ_ONLY.has(sub)) return true;
-  switch (sub) {
-    case "reflog":
-      // Bare `git reflog` and `show` list; `expire` and `delete` erase recovery history.
-      return subArgs.length === 0 || subArgs[0] === "show" || (!subArgs[0].startsWith("-") && subArgs.length === 1 && !/^(expire|delete|drop)$/u.test(subArgs[0]));
-    case "branch":
-      // A bare positional creates a branch; one is allowed only as a listing flag's value.
-      return subArgs.every((arg, index) =>
-        GIT_BRANCH_LIST_FLAG.test(arg) || (!arg.startsWith("-") && GIT_BRANCH_VALUE_FLAG.test(subArgs[index - 1] ?? "")));
-    case "stash":
-      return subArgs[0] === "list" || subArgs[0] === "show";
-    case "worktree":
-      return subArgs[0] === "list";
-    case "remote":
-      return subArgs.length === 0
-        || (subArgs.length === 1 && (subArgs[0] === "-v" || subArgs[0] === "--verbose"))
-        || subArgs[0] === "show" || subArgs[0] === "get-url";
-    case "tag":
-      return subArgs.length === 0 || subArgs[0] === "-l" || subArgs[0] === "--list";
-    case "config":
-      return /^(--get|--get-all|--get-regexp|--list|-l)$/u.test(subArgs[0] ?? "");
-    default:
-      return false;
-  }
-}
-
-function ghSegmentReadOnly(args: string[]): boolean {
-  const [area, action, ...rest] = args;
-  if (area === "api") return !args.slice(1).some((arg) => GH_API_WRITE.test(arg));
-  // `--show-token` / `-t` print the credential.
-  if (area === "auth") return action === "status" && !rest.some((arg) => /^(-t|--show-token)$/u.test(arg));
-  const actions = area ? GH_READ_ONLY[area] : undefined;
-  return !!actions && !!action && actions.has(action) && !rest.includes("--web");
-}
-
 function segmentReadOnly(words: string[]): boolean {
-  let [program, ...args] = words;
+  const [program, ...args] = words;
   if (!program) return false;
   // `timeout <duration> cmd` only bounds how long a read-only command runs.
   if (program === "timeout") {
-    while (args[0]?.startsWith("-")) args = args.slice(1);
-    if (!args[0] || !/^\d+(\.\d+)?[smhd]?$/u.test(args[0])) return false;
-    return segmentReadOnly(args.slice(1));
+    const positionals = positionalsIfAllowed(args.slice(0, 1), { long: ["--foreground", "--preserve-status"] });
+    let rest = args;
+    while (rest[0] === "--foreground" || rest[0] === "--preserve-status") rest = rest.slice(1);
+    if (!positionals || !rest[0] || !/^\d+(\.\d+)?[smhd]?$/u.test(rest[0])) return false;
+    return segmentReadOnly(rest.slice(1));
   }
-  // An env-prefixed command (`FOO=1 cmd`) can change what cmd executes.
-  if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(program)) return false;
-  if (program === "git") return gitSegmentReadOnly(args);
-  if (program === "gh") return ghSegmentReadOnly(args);
-  if (program === "command") return args[0] === "-v" || args[0] === "-V";
-  const subcommands = READ_ONLY_SUBCOMMANDS[program];
-  if (subcommands) {
-    const sub = firstNonFlag(args);
-    if (!sub || !subcommands.has(sub.value)) return false;
-    if (program === "kubectl" && args.some((arg) => /^secrets?(\/|$)/u.test(arg))) return false;
-    // A flag before the subcommand may take a value that looks like one (`kubectl -n get pods`).
-    return sub.index === 0 || program === "systemctl";
-  }
-  if (!(program in READ_ONLY_PROGRAMS)) return false;
-  const unsafe = READ_ONLY_PROGRAMS[program];
-  return !unsafe || !args.some((arg) => unsafe.test(arg));
+  if (program === "git") return gitReadOnly(args);
+  if (program === "gh") return ghReadOnly(args);
+  if (program === "rg") return !!positionalsIfAllowed(args, RG);
+  if (program === "command") return args.length === 2 && (args[0] === "-v" || args[0] === "-V");
+  // jq cannot write or execute, but its filter can read the environment.
+  if (program === "jq") return !args.some((arg) => /\$ENV|\benv\b/u.test(arg));
+  return PURE.has(program);
 }
 
-/** True when every command in `command` is a known read-only program with no unsafe arguments. */
+/** True when every command in `command` is a known read-only program given only allowed arguments. */
 export function isReadOnlyCommand(command: string): boolean {
   const tokens = tokenizeShell(command);
   if (!tokens) return false;
