@@ -608,11 +608,13 @@ describe("evidence pruning", () => {
 		assert.match(subagentContextSystemPrompt(true), /irreversible destruction outside the subagent's scope as never authorized by delegation alone/);
 	});
 
-	test("prompt explains implied follow-ons, secret round-trips, truncation, and overrides", async () => {
+	test("prompt explains the block list, user approvals, secret round-trips, truncation, and overrides", async () => {
 		const { OVERRIDE_FEEDBACK_SYSTEM_PROMPT } = await import("../review.ts");
-		assert.match(AUTO_PERMISSIONS_SYSTEM_PROMPT, /Implied follow-on authorization/);
-		assert.match(AUTO_PERMISSIONS_SYSTEM_PROMPT, /creating or updating the pull request/);
-		assert.match(AUTO_PERMISSIONS_SYSTEM_PROMPT, /never extends to shared or default branches/);
+		assert.match(AUTO_PERMISSIONS_SYSTEM_PROMPT, /Default posture: allow, with a block list/);
+		assert.match(AUTO_PERMISSIONS_SYSTEM_PROMPT, /creating or updating a pull request in that repository/);
+		assert.match(AUTO_PERMISSIONS_SYSTEM_PROMPT, /pushing to a default or deploy branch/);
+		assert.match(AUTO_PERMISSIONS_SYSTEM_PROMPT, /USER APPROVALS/);
+		assert.match(AUTO_PERMISSIONS_SYSTEM_PROMPT, /Anything the user said not to do/);
 		assert.match(AUTO_PERMISSIONS_SYSTEM_PROMPT, /Secret round-trips are not exfiltration/);
 		assert.match(AUTO_PERMISSIONS_SYSTEM_PROMPT, /unrelated third destination/);
 		assert.match(AUTO_PERMISSIONS_SYSTEM_PROMPT, /never as evidence that something did not happen/);

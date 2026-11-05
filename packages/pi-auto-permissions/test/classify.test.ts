@@ -49,7 +49,7 @@ describe("classifyCommand", () => {
 	});
 
 	test("reviewAllShell captures a command no rule names", () => {
-		const classified = classifyCommand("echo hello", config([gate("guarded", "git", "Git push")], true), NOTHING);
+		const classified = classifyCommand("npm install left-pad", config([gate("guarded", "git", "Git push")], true), NOTHING);
 		assert.equal(classified.kind, "review");
 		assert.equal(classified.kind === "review" && classified.gate.group, "all-shell");
 		assert.equal(classified.kind === "review" && classified.gate.label, "shell command");
@@ -62,6 +62,12 @@ describe("classifyCommand", () => {
 			{ kind: "pass" },
 			"a trusted match was waved through explicitly, not left unnamed",
 		);
+	});
+
+	test("reviewAllShell lets a known read-only command through, but a rule naming it still reviews it", () => {
+		assert.deepEqual(classifyCommand("git status && ls -la", config([], true), NOTHING), { kind: "pass" });
+		const named = classifyCommand("cat ~/.aws/credentials", config([gate("guarded", "secrets", "Credential read", "credentials")], true), NOTHING);
+		assert.equal(named.kind, "review");
 	});
 
 	test("trusting the all-shell group itself opts out of blanket review", () => {

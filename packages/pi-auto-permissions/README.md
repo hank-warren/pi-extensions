@@ -12,10 +12,9 @@ A context-aware permission system for Pi shell commands, with an automated guard
 
 Pi Auto Permissions pauses configured Bash commands before execution. A guardian model reviews the exact command against a compact view of the current conversation:
 
-- Clearly authorized and compliant commands run automatically.
-- Authorized commands that violate the user's constraints are blocked with feedback so the agent can revise them.
-- Commands without clear authorization are sent to the user for confirmation.
-- High-risk commands always require confirmation.
+- Commands that serve the task and are not on the guardian's block list run automatically, named by the user or not.
+- Commands that violate the user's constraints are blocked with feedback so the agent can revise them.
+- Block-listed commands the user has not approved (destroying pre-existing data, pushing to default branches, merges, live systems, data leaving the trust boundary, credentials) need the user. By default the command is blocked with the reason and the agent keeps working, asking for approval in its reply; see [Approval modes](#approval-modes).
 
 Only user messages can grant permission or impose constraints. The assistant cannot authorize its own command.
 
@@ -28,12 +27,29 @@ The design deliberately mirrors Claude Code's auto mode (default ruleset content
 | | pi-auto-permissions | Claude Code auto mode |
 |---|---|---|
 | **Verdicts and reasons** | `approve`/`revise`/`ask_user`; always a concrete one-sentence reason; `revise` tells the agent exactly how to clear the objection | Deny only; fixed `Blocked by classifier` text in most sessions |
+| **Unapproved actions** | `auto` (default) blocks and keeps the agent working, prompting after 3 blocks in a row or 20 in a session; `careful` prompts at once; `afk` never prompts | Blocks and keeps working; prompts after 3 in a row or 20 total |
 | **Evidence caching** | Append-only reviewer lineage: full envelope once, deltas after, fingerprint-invalidated | Stage-1→stage-2 prompt cache; no cross-review evidence cache |
 | **Deterministic surface** | Regex gates are testable; the false-positive surface is bounded by the patterns; the guardian runs only after a mechanical match | Prose rules are checkable only by running the classifier |
 | **Evaluation loop** | Labelled evaluation JSONL (three-way user labels) + per-review cost sidecar | `/feedback`; no per-review cost or label surface |
 | **Coverage** | **Bash only.** Edits, writes, fetches, MCP tools, and subagent spawns are ungated (the beyond-bash plan is the named follow-up) | All tool calls Tier 3-reviewed; in-project edits skip review by design |
 | **Sandbox** | None — pair with OS sandboxing for a hard boundary | Integrated sandbox + network-domain review |
 | **Injection posture** | Keeps assistant text and tool-call summaries as (non-authorizing) evidence — better provenance, larger injection surface | Strips assistant text and tool output entirely; input-layer injection probe |
+
+## Approval modes
+
+What happens when the guardian cannot approve a command (an `ask_user` verdict, or a review that failed) depends on the session's approval mode:
+
+| Mode | Behavior |
+|---|---|
+| `auto` (default) | The command is blocked with the guardian's reason. The agent is told not to retry it unchanged, to carry on with the rest of the task, and, if the step is genuinely required, to name the exact command in its final message and ask you. Your reply naming the operation and target ("yes, delete old-experiment") approves it at the next review. A live prompt appears only as a fallback: on the 3rd block in a row without an approval in between, or the 20th in a session. |
+| `careful` | You are prompted as soon as the guardian cannot approve a command, and the agent waits for your answer. |
+| `afk` | Nothing prompts. Blocked commands are refused, the agent gets a short system prompt section saying you are away, and it lists what it needs approved in its final message. |
+
+Set the default with `"approvalMode": "auto" | "careful" | "afk"` in the config, and switch one session with `/auto-permissions auto`, `/auto-permissions careful` or `/auto-permissions afk`. A session switch lasts until the session ends or switches again, and a new or resumed session starts in the configured default. A blocked command lands in the denial log, so **Recent denials → Allow on retry** clears it too.
+
+To keep the agent working while being careful about specific things, say so in your message ("don't push", "treat vistra as read-only"): the guardian blocks matching actions until a later message lifts the boundary. Boundaries you state live in the transcript, so a compaction can drop them; for anything that must always hold, use `guardianPolicy.softDeny` / `hardDeny` or a deny rule.
+
+Subagents keep their own revise-first behavior (see [Subagent sessions](#subagent-sessions)), and an unattended session is always `afk` (see [Unattended sessions](#unattended-sessions)).
 
 ## Example
 
@@ -139,7 +155,7 @@ Set `enabled` to `false` to disable the extension. Invalid configuration fails c
 
 ### Review every shell command
 
-Set `"reviewAllShell": true` to review every bash command that matches no rule under a generic `shell command` gate (group `all-shell`), the analogue of Claude Code's `classifyAllShell`. The rules then act as a severity layer on top of blanket coverage: deny rules still block outright, and everything else — named by a rule or not — goes to the guardian. The trade is one guardian call per command; pair it with a cheap reviewer model. A command whose matching group is listed in `.pi/trusted-ops` was explicitly waved through and is not re-captured by the blanket gate; trusting `all-shell` itself opts a project out of blanket review while keeping the ruleset live. Lineage caching and the evaluation log apply to `all-shell` reviews unchanged.
+Set `"reviewAllShell": true` to review every bash command that matches no rule under a generic `shell command` gate (group `all-shell`), the analogue of Claude Code's `classifyAllShell`. The rules then act as a severity layer on top of blanket coverage: deny rules still block outright, and everything else — named by a rule or not — goes to the guardian. Known read-only commands skip the blanket gate: a command whose every part is a listed read-only program (`ls`, `cat`, `rg`, `jq`, `git status|log|diff|show|fetch`, `gh pr view|checks`, a GET `gh api`, `docker ps`, `kubectl get` and the like, joined by pipes, `&&`, `||` or `;`, optionally after `cd` or `timeout`) runs unreviewed. The parser is conservative: any substitution or expansion (`$(…)`, backticks, `$VAR`), subshell, here-doc, background job, env-prefixed command, write redirect other than to `/dev/null`, or unlisted program or flag sends the command to the guardian. See [`read-only.ts`](read-only.ts). The fast path only skips the blanket gate: a rule that names a command still reviews it. Everything else costs one guardian call per command; pair it with a cheap reviewer model. A command whose matching group is listed in `.pi/trusted-ops` was explicitly waved through and is not re-captured by the blanket gate; trusting `all-shell` itself opts a project out of blanket review while keeping the ruleset live. Lineage caching and the evaluation log apply to `all-shell` reviews unchanged.
 
 ## Define trusted infrastructure
 
@@ -229,7 +245,7 @@ Saves are applied immediately — the config is re-read on every guarded command
 
 ### Guardian prompt
 
-The bundled prompt evaluates authorization, command risk, and compliance with user constraints. Replace it inline with `systemPrompt`, or load a file:
+The bundled prompt is allow-by-default with a block list, like Claude Code's classifier: an action that serves the user's task is approved unless it is block-listed (destroying data or state the session did not create, rewriting shared history or pushing to default and deploy branches, merging or publishing, live and production systems, data leaving the trust boundary, credentials, executing unreviewed code, or anything the user said not to do). A user message that names the operation and its target, or a short "yes" answering an assistant request that named them, approves a block-listed action. Replace the prompt inline with `systemPrompt`, or load a file:
 
 ```json
 {
@@ -243,7 +259,7 @@ The guardian must return one of three decisions:
 
 - `approve`: execute the command
 - `revise`: block it and tell the main agent what to correct
-- `ask_user`: open an approval prompt (rendered with [`@hank-warren/pi-permission-selector`](../pi-permission-selector)'s `OptionSelector`): the command, then the guardian's note behind a `▌` bar in a fixed strong yellow (gold on dark themes, dark goldenrod on light ones, regardless of the theme's `warning` color), then numbered options. A command taller than a quarter of the terminal is cut to a preview, and the prompt stays pinned while you scroll the session above. Ctrl+O opens the full command in a scrolling viewer inside the prompt (Shift+↑/↓ or the mouse wheel; PgUp/PgDn outside fullscreen) and closes it again — the only complete copy when a codemode script built the command, since the transcript then shows the script. Numbered options with `1`–`9` hotkeys, Tab to attach a note that is delivered to the agent as a steering user message, Esc to cancel — which blocks the command. In RPC mode, as in a pi-agents child whose prompts the parent shows, the prompt is Pi's plain select dialog instead: Allow or Block, without Tab notes. It waits for the RPC client's answer, so a client that never answers holds the command until the turn is cancelled
+- `ask_user`: the user is needed. In `auto` and `afk` the command is blocked with the reason (see [Approval modes](#approval-modes)); in `careful`, or as `auto`'s fallback, it opens an approval prompt (rendered with [`@hank-warren/pi-permission-selector`](../pi-permission-selector)'s `OptionSelector`): the command, then the guardian's note behind a `▌` bar in a fixed strong yellow (gold on dark themes, dark goldenrod on light ones, regardless of the theme's `warning` color), then numbered options. A command taller than a quarter of the terminal is cut to a preview, and the prompt stays pinned while you scroll the session above. Ctrl+O opens the full command in a scrolling viewer inside the prompt (Shift+↑/↓ or the mouse wheel; PgUp/PgDn outside fullscreen) and closes it again — the only complete copy when a codemode script built the command, since the transcript then shows the script. Numbered options with `1`–`9` hotkeys, Tab to attach a note that is delivered to the agent as a steering user message, Esc to cancel — which blocks the command. In RPC mode, as in a pi-agents child whose prompts the parent shows, the prompt is Pi's plain select dialog instead: Allow or Block, without Tab notes. It waits for the RPC client's answer, so a client that never answers holds the command until the turn is cancelled
 
 ## Conversation context and caching
 
@@ -474,7 +490,7 @@ Reviewer usage records from subagent sessions carry `"subagent": true` in the us
 
 Some hosts have a UI that nobody answers. An ACP bridge driven by a chat system — Buzz running Pi through `buzz-pi-acp`, for example — forwards each approval prompt as a `session/request_permission` and auto-selects its first "allow" option, so every `ask_user` verdict would quietly become an approval (and, with the evaluation log on, be recorded as "asking was unnecessary").
 
-Set `PI_AUTO_PERMISSIONS_UNATTENDED=1` in the environment of such a session, for example in the command that launches the bridge:
+Set `PI_AUTO_PERMISSIONS_UNATTENDED=1` in the environment of such a session, for example in the command that launches the bridge. Such a session is always in the `afk` [approval mode](#approval-modes), and `/auto-permissions` cannot switch it:
 
 ```bash
 env PI_AUTO_PERMISSIONS_UNATTENDED=1 buzz-pi-acp
@@ -498,7 +514,7 @@ Reviewer requests dispatch through the host's model runtime rather than pi-ai's 
 
 A missing reviewer model, unavailable credentials, malformed response, timeout, cancellation, or oversized review context never auto-approves a command.
 
-- Interactive sessions fall back to user confirmation.
+- A failure is handled like an `ask_user` verdict under the session's [approval mode](#approval-modes): blocked in `auto` and `afk` (the agent is told a later retry may succeed), a prompt in `careful`.
 - Non-interactive sessions block the command.
 - Invalid configuration blocks Bash calls until corrected.
 

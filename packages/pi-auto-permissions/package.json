@@ -61,6 +61,8 @@
     "usage-log.ts",
     "widget-status.ts",
     "classify.ts",
+    "read-only.ts",
+    "approval-mode.ts",
     "prompt-select.ts",
     "remote-answers.ts",
     "approval-prompt.ts",

@@ -3,7 +3,15 @@ import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { loadAutoPermissionsConfig, type AutoPermissionsConfig } from "./config.js";
+import { loadAutoPermissionsConfig, type ApprovalMode, type AutoPermissionsConfig } from "./config.js";
+import {
+  AFK_PERMISSIONS_PROMPT,
+  AFK_PROMPT_SECTION,
+  afkBlockReason,
+  approvalModeStatus,
+  autoBlockReason,
+  BlockCounter,
+} from "./approval-mode.js";
 import {
   appendDenialRecord,
   buildDenialRecord,
@@ -207,6 +215,9 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   // Set per session: PI_AUTO_PERMISSIONS_UNATTENDED=1 means nobody answers
   // prompts (an ACP bridge auto-allows them), so ask_user blocks instead.
   let unattendedSession = false;
+  // Set by `/auto-permissions <mode>` for this session; otherwise the config default applies.
+  let sessionApprovalMode: ApprovalMode | undefined;
+  const blocks = new BlockCounter();
   let turnGeneration = 0;
   const reviseFirst = new Map<string, number>();
   let lastConfigError: string | undefined;
@@ -424,11 +435,18 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     }
   }
 
+  /** Unattended sessions are always `afk`: their prompts are auto-answered by the host. */
+  function approvalModeOf(config: AutoPermissionsConfig): ApprovalMode {
+    if (unattendedSession) return "afk";
+    return sessionApprovalMode ?? config.approvalMode;
+  }
+
   async function askUser(
     scope: ReviewScope,
     detail: string,
     lifecycleSignal: AbortSignal,
     decisionSource: "guardian" | "review_failure",
+    escalation?: string,
   ): Promise<BlockResult | undefined> {
     const { ctx, config, gate, command } = scope;
     const signal = callSignalOf(scope);
@@ -462,7 +480,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     const evaluationContext = config.evaluationLog.enabled ? reviewer.collectEvidence(scope) : [];
     setHerdrBlocked(pi, true, gate.label);
     const content = {
-      header: `${gate.label} — Auto Permissions needs approval`,
+      header: `${gate.label} — Auto Permissions needs approval${escalation ? ` (${escalation})` : ""}`,
       command,
       noteLabel: decisionSource === "guardian" ? "Guardian" : "Review failed",
       note: detail,
@@ -505,6 +523,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
         logPromptEvaluation(scope, detail, evaluationContext, decisionSource, classification.userChoice);
       }
       if (classification?.allowsExecution) {
+        blocks.approved();
         return settle(scope, { display: "approved", reason: "approved by user" });
       }
       return settle(scope, {
@@ -624,6 +643,45 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     });
   }
 
+  /**
+   * Where the guardian could not approve: refuse first, ask a human last.
+   * A subagent revises first; `auto` and `afk` block (with `auto` falling
+   * back to a live prompt after repeated blocks); `careful`, and an `auto`
+   * session with no UI (askUser blocks there itself), ask.
+   */
+  function needsHuman(
+    scope: ReviewScope,
+    reason: string,
+    source: "guardian" | "review_failure",
+    lifecycleSignal: AbortSignal,
+  ): Promise<BlockResult | undefined> | BlockResult | undefined {
+    const revised = reviseFirstBlock(scope, reason, source, lifecycleSignal);
+    if (revised) return revised;
+    const mode = approvalModeOf(scope.config);
+    // A subagent's revise-first already is its block-first.
+    const blockFirst = mode === "afk" || (mode === "auto" && scope.ctx.hasUI && !subagentSession);
+    if (!blockFirst) return askUser(scope, reason, lifecycleSignal, source);
+    // As askUser does: a block the model will never see must not count.
+    const cancelled = cancelledAfterAwait(scope, lifecycleSignal);
+    if (cancelled) return cancelled;
+    if (mode === "auto") {
+      const escalation = blocks.next();
+      if (escalation) return askUser(scope, reason, lifecycleSignal, source, escalation);
+    }
+    const failed = source === "review_failure";
+    return settle(scope, {
+      display: "blocked",
+      verdict: "block",
+      source,
+      reason,
+      block: unattendedSession
+        ? unattendedBlockReason(scope.gate.label, reason)
+        : mode === "afk"
+          ? afkBlockReason(scope.gate.label, reason, failed)
+          : autoBlockReason(scope.gate.label, reason, failed),
+    });
+  }
+
   /** Apply one settled review. Runs holding the decision slot. */
   function applyReview(
     scope: ReviewScope,
@@ -631,11 +689,11 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     lifecycleSignal: AbortSignal,
   ): Promise<BlockResult | undefined> | BlockResult | undefined {
     if (outcome.kind === "failed") {
-      const reason = `Automatic review failed: ${outcome.reason}`;
-      return reviseFirstBlock(scope, reason, "review_failure", lifecycleSignal) ?? askUser(scope, reason, lifecycleSignal, "review_failure");
+      return needsHuman(scope, `Automatic review failed: ${outcome.reason}`, "review_failure", lifecycleSignal);
     }
     const { verdict } = outcome;
     if (verdict.decision === "approve") {
+      blocks.approved();
       return settle(scope, { display: "approved", reason: verdict.reason });
     }
     if (verdict.decision === "revise") {
@@ -647,7 +705,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
         block: `Auto Permissions requested revision: ${verdict.reason}\nRevise the command and try again.`,
       });
     }
-    return reviseFirstBlock(scope, verdict.reason, "guardian", lifecycleSignal) ?? askUser(scope, verdict.reason, lifecycleSignal, "guardian");
+    return needsHuman(scope, verdict.reason, "guardian", lifecycleSignal);
   }
 
   /**
@@ -862,12 +920,15 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", (event) => {
-    if (!subagentSession && !unattendedSession) return;
+    let config: AutoPermissionsConfig | undefined;
     try {
-      if (!loadAutoPermissionsConfig().enabled) return;
+      config = loadAutoPermissionsConfig();
+      if (!config.enabled) return;
     } catch {
       // An invalid config fails closed on the first bash call; the guidance still applies.
     }
+    const afk = !unattendedSession && config !== undefined && approvalModeOf(config) === "afk";
+    if (!subagentSession && !unattendedSession && !afk) return;
     // On Pi 1.x a returned systemPrompt forces the whole prompt for the run,
     // dropping what later extensions change in its options (pi-agents adds
     // the parent's instruction files there), so the guidance goes into a
@@ -875,7 +936,9 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     // Unattended wins over subagent: its prompts pause no supervising session.
     const [sectionName, guidance] = unattendedSession
       ? [UNATTENDED_PROMPT_SECTION, UNATTENDED_PERMISSIONS_PROMPT]
-      : [SUBAGENT_PROMPT_SECTION, SUBAGENT_PERMISSIONS_PROMPT];
+      : afk
+        ? [AFK_PROMPT_SECTION, AFK_PERMISSIONS_PROMPT]
+        : [SUBAGENT_PROMPT_SECTION, SUBAGENT_PERMISSIONS_PROMPT];
     const sections = (event as { systemPromptOptions?: { sections?: Record<string, string> } }).systemPromptOptions?.sections;
     if (sections) {
       sections[sectionName] = guidance;
@@ -884,7 +947,23 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     return { systemPrompt: `${event.systemPrompt}\n\n${guidance}` };
   });
 
-  registerSettingsCommand(pi, { overrides, reviewer });
+  function showApprovalMode(ctx: ExtensionContext, mode: ApprovalMode): void {
+    ctx.ui.setStatus("auto-permissions-mode", approvalModeStatus(mode));
+  }
+
+  registerSettingsCommand(pi, {
+    overrides,
+    reviewer,
+    approvalMode: {
+      set(mode, ctx) {
+        if (unattendedSession) return "this session is unattended (PI_AUTO_PERMISSIONS_UNATTENDED=1), which is always afk";
+        sessionApprovalMode = mode;
+        blocks.reset();
+        showApprovalMode(ctx, mode);
+        return undefined;
+      },
+    },
+  });
 
   function resetCallTracking(): void {
     lastAssistantCalls = [];
@@ -913,6 +992,9 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     resetCallTracking();
     subagentSession = detectSubagentContext(ctx.cwd) !== undefined;
     unattendedSession = detectUnattended() !== undefined;
+    sessionApprovalMode = undefined;
+    blocks.reset();
+    if (config) showApprovalMode(ctx, approvalModeOf(config));
     reviseFirst.clear();
     reviewer.startSession(ctx.cwd);
     overrides.restore(ctx.sessionManager.getBranch());

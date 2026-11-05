@@ -18,6 +18,13 @@ function configFile(value: unknown): string {
 }
 
 describe("auto permissions config", () => {
+	test("approvalMode defaults to auto and rejects unknown modes", () => {
+		assert.equal(loadAutoPermissionsConfig(configFile({})).approvalMode, "auto");
+		assert.equal(loadAutoPermissionsConfig(configFile({ approvalMode: "careful" })).approvalMode, "careful");
+		assert.equal(loadAutoPermissionsConfig(configFile({ approvalMode: "afk" })).approvalMode, "afk");
+		assert.throws(() => loadAutoPermissionsConfig(configFile({ approvalMode: "yolo" })), /approvalMode must be one of auto, careful, afk/);
+	});
+
 	test("uses the built-in ruleset when the config is missing", () => {
 		const config = loadAutoPermissionsConfig(join(tmpdir(), "missing-auto-permissions-config.json"));
 		assert.equal(config.enabled, true);

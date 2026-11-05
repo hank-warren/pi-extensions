@@ -273,6 +273,8 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 			reviewer: { provider: GUARDIAN_MODEL.provider, model: GUARDIAN_MODEL.id, timeoutMs: 30_000 },
 			rules: options.rules ?? [],
 			usageLog: { enabled: false },
+			// The prompt mechanics are tested in careful mode; auto and afk have their own tests.
+			approvalMode: "careful",
 			...options.config,
 		}),
 	);
@@ -624,10 +626,12 @@ test("8 · reviewAllShell reviews an unmatched command under the generic gate, u
 		async (harness) => {
 			await harness.sessionStart();
 
-			assert.equal(await harness.toolCall("echo hello"), undefined);
+			assert.equal(await harness.toolCall("npm install left-pad"), undefined);
 			assert.equal(harness.calls.length, 1);
 			assert.match(harness.calls[0].envelope, /"gate": "shell command"/u);
 			assert.match(harness.calls[0].envelope, /"group": "all-shell"/u);
+			assert.equal(await harness.toolCall("cd /tmp && git status && rg -n todo | head"), undefined);
+			assert.equal(harness.calls.length, 1, "a known read-only command skips the blanket review");
 		},
 	);
 
@@ -642,7 +646,7 @@ test("8 · reviewAllShell reviews an unmatched command under the generic gate, u
 		async (harness) => {
 			await harness.sessionStart();
 
-			assert.equal(await harness.toolCall("echo hello"), undefined);
+			assert.equal(await harness.toolCall("npm install left-pad"), undefined);
 			assert.deepEqual(harness.calls, [], "a trusted all-shell group is not re-captured by the blanket gate");
 			assert.deepEqual(harness.displays, []);
 		},
@@ -2296,4 +2300,127 @@ test("29 · with remoteAnswers on, a cancelled prompt closes without a choice, a
 			assert.deepEqual(rpcEvents, []);
 		},
 	);
+});
+
+test("50 · auto mode blocks an ask_user verdict with the reason and keeps the agent working, without a prompt", async () => {
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			config: { approvalMode: "auto" },
+			completeSimple: () => assistantResponse(verdictText("ask_user", "pushing to main is block-listed")),
+		},
+		async (harness) => {
+			await harness.sessionStart();
+			const result = await harness.toolCall("git push origin main");
+			assert.ok(result?.block);
+			assert.match(result.reason, /^Git push was blocked by Auto Permissions: pushing to main is block-listed/u);
+			assert.match(result.reason, /Do not retry it unchanged\. Carry on with the parts of the task/u);
+			assert.match(result.reason, /ask the user to approve it/u);
+			assert.equal(harness.customCalls, 0, "no prompt opens");
+			assert.equal(harness.denied[0]?.verdict, "block");
+			assert.equal(harness.denied[0]?.decisionSource, "guardian");
+			assert.equal(harness.denials()[0]?.verdict, "block", "Recent denials can allow it on retry");
+			assert.equal(harness.displays.at(-1)?.state, "blocked");
+			assert.equal(harness.context.statuses.get("auto-permissions-mode"), undefined, "the default mode shows no status");
+		},
+	);
+});
+
+test("51 · auto mode falls back to a live prompt on the third block in a row, and an approval breaks the run", async () => {
+	let verdict: "approve" | "ask_user" = "ask_user";
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			config: { approvalMode: "auto" },
+			completeSimple: () => assistantResponse(verdictText(verdict, verdict === "approve" ? "fine" : "pushing to main is block-listed")),
+		},
+		async (harness) => {
+			await harness.sessionStart();
+			assert.ok((await harness.toolCall("git push origin main", "c1"))?.block);
+			assert.ok((await harness.toolCall("git push origin main", "c2"))?.block);
+			verdict = "approve";
+			assert.equal(await harness.toolCall("git push origin feature", "c3"), undefined);
+			verdict = "ask_user";
+			assert.ok((await harness.toolCall("git push origin main", "c4"))?.block, "the approval reset the run");
+			assert.ok((await harness.toolCall("git push origin main", "c5"))?.block);
+			assert.equal(harness.customCalls, 0);
+
+			harness.answers.push("Allow");
+			assert.equal(await harness.toolCall("git push origin main", "c6"), undefined, "the third block in a row asks instead");
+			assert.equal(harness.customCalls, 1);
+			assert.match(harness.prompts.at(-1)?.join("\n") ?? JSON.stringify(harness.prompts), /Allow/u);
+
+			assert.ok((await harness.toolCall("git push origin main", "c7"))?.block, "after the prompt, auto blocks again");
+		},
+	);
+});
+
+test("52 · auto mode blocks a failed review too, saying a later retry may succeed", async () => {
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			config: { approvalMode: "auto" },
+			completeSimple: () => {
+				throw new Error("429 rate limited");
+			},
+		},
+		async (harness) => {
+			await harness.sessionStart();
+			const result = await harness.toolCall("git push origin feature");
+			assert.ok(result?.block);
+			assert.match(result.reason, /Automatic review failed: 429 rate limited/u);
+			assert.match(result.reason, /running the same command again later may succeed/u);
+			assert.doesNotMatch(result.reason, /Do not retry it unchanged/u);
+			assert.equal(harness.denied[0]?.decisionSource, "review_failure");
+			assert.equal(harness.customCalls, 0);
+		},
+	);
+});
+
+test("53 · /auto-permissions afk never prompts, adds the away guidance and a status; careful prompts at once", async () => {
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			config: { approvalMode: "auto" },
+			completeSimple: () => assistantResponse(verdictText("ask_user", "pushing to main is block-listed")),
+		},
+		async (harness) => {
+			await harness.sessionStart();
+			await harness.settingsCommand("afk");
+			assert.match(harness.context.notifications.at(-1)?.message ?? "", /afk/u);
+			assert.equal(harness.context.statuses.get("auto-permissions-mode"), "permissions: afk");
+			for (let i = 0; i < 5; i++) {
+				const result = await harness.toolCall("git push origin main", `afk-${i}`);
+				assert.match(result?.reason ?? "", /The user is away/u);
+			}
+			assert.equal(harness.customCalls, 0, "afk never falls back to a prompt");
+
+			const handler = harness.mock.events.get("before_agent_start")![0] as EventHandler;
+			const options = { contextFiles: [], sections: {} as Record<string, string> };
+			await handler({ type: "before_agent_start", prompt: "task", systemPrompt: "BASE", systemPromptOptions: options }, harness.ctx);
+			assert.match(options.sections.auto_permissions_afk ?? "", /^## Auto Permissions \(user away\)/u);
+
+			await harness.settingsCommand("careful");
+			assert.equal(harness.context.statuses.get("auto-permissions-mode"), "permissions: careful");
+			harness.answers.push("Block");
+			assert.equal((await harness.toolCall("git push origin main", "careful-1"))?.reason, "Blocked by user");
+			assert.equal(harness.customCalls, 1);
+
+			await harness.settingsCommand("auto");
+			assert.equal(harness.context.statuses.get("auto-permissions-mode"), undefined);
+			const away = { contextFiles: [], sections: {} as Record<string, string> };
+			await handler({ type: "before_agent_start", prompt: "task", systemPrompt: "BASE", systemPromptOptions: away }, harness.ctx);
+			assert.deepEqual(away.sections, {}, "auto adds no prompt section");
+		},
+	);
+});
+
+test("54 · an unattended session stays afk: the mode cannot be switched", async () => {
+	await asUnattended(() =>
+		withExtension({ rules: [GUARDED_RULE], mode: "rpc", config: { approvalMode: "careful" } }, async (harness) => {
+			await harness.sessionStart();
+			await harness.settingsCommand("careful");
+			assert.equal(harness.context.notifications.at(-1)?.level, "warning");
+			assert.match(harness.context.notifications.at(-1)?.message ?? "", /always afk/u);
+		}));
 });

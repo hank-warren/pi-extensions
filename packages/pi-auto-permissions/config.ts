@@ -17,6 +17,16 @@ export const DEFAULT_REVIEWER_TIMEOUT_MS = 30_000;
 export const MIN_REVIEWER_TIMEOUT_MS = 1_000;
 export const MAX_REVIEWER_TIMEOUT_MS = 300_000;
 export const DEFAULT_REVIEW_CONCURRENCY = 4;
+
+/**
+ * What happens when the guardian cannot approve a command on its own:
+ * - `auto`: block it with the guardian's reason so the agent keeps working and
+ *   asks in its reply; a live prompt only after repeated blocks.
+ * - `careful`: prompt the user immediately.
+ * - `afk`: block it and never prompt; the agent lists it in its final message.
+ */
+export const APPROVAL_MODES = ["auto", "careful", "afk"] as const;
+export type ApprovalMode = typeof APPROVAL_MODES[number];
 export const MAX_REVIEW_CONCURRENCY = 16;
 
 /**
@@ -31,6 +41,8 @@ export type SystemPromptSource =
 
 export interface AutoPermissionsConfig {
   enabled: boolean;
+  /** The default for new sessions; `/auto-permissions <mode>` changes it for one session. */
+  approvalMode: ApprovalMode;
   reviewer?: {
     provider: string;
     model: string;
@@ -346,6 +358,10 @@ export function loadAutoPermissionsConfig(path = autoPermissionsConfigPath()): A
   optionalBoolean(raw.enabled, "enabled");
   optionalBoolean(raw.reviewAllShell, "reviewAllShell");
   optionalBoolean(raw.remoteAnswers, "remoteAnswers");
+  const approvalMode = raw.approvalMode === undefined ? "auto" : raw.approvalMode;
+  if (!(APPROVAL_MODES as readonly unknown[]).includes(approvalMode)) {
+    throw new Error(`approvalMode must be one of ${APPROVAL_MODES.join(", ")}`);
+  }
   if (raw.rules !== undefined && !Array.isArray(raw.rules)) throw new Error("rules must be an array");
   // Absent means the built-in ruleset is active; an authored array replaces it
   // entirely unless it splices "$defaults" back in; an explicit [] gates
@@ -355,6 +371,7 @@ export function loadAutoPermissionsConfig(path = autoPermissionsConfigPath()): A
 
   return {
     enabled: raw.enabled !== false,
+    approvalMode: approvalMode as ApprovalMode,
     reviewer: resolveReviewer(raw),
     systemPrompt: prompt.prompt,
     systemPromptSource: prompt.source,

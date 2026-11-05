@@ -5,10 +5,13 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { SettingsList } from "@earendil-works/pi-tui";
 import {
+  APPROVAL_MODES,
   autoPermissionsConfigPath,
   loadAutoPermissionsConfig,
+  type ApprovalMode,
   type AutoPermissionsConfig,
 } from "./config.js";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { patchAutoPermissionsConfig } from "./config-writer.js";
 import { readRecentDenials } from "./denial-log.js";
 import type { GuardianReviewer } from "./guardian-reviewer.js";
@@ -35,9 +38,25 @@ import {
 const SETUP_SKILL_HANDOFF_MESSAGE =
   "Use the auto-permissions-setup skill to set up my Auto Permissions policy.";
 
+/** What each `/auto-permissions <mode>` confirms. */
+const MODE_NOTICES: Record<ApprovalMode, string> = {
+  auto: "Auto Permissions: auto — commands the guardian can't approve are blocked and the agent keeps working; you're prompted only after repeated blocks.",
+  careful: "Auto Permissions: careful — you're prompted as soon as the guardian can't approve a command.",
+  afk: "Auto Permissions: afk — nothing prompts; blocked commands are listed in the agent's final message. /auto-permissions auto when you're back.",
+};
+
+export interface ApprovalModeControl {
+  /** Switch this session's mode; returns why it cannot, or undefined. */
+  set(mode: ApprovalMode, ctx: ExtensionContext): string | undefined;
+}
+
 export function registerSettingsCommand(
   pi: ExtensionAPI,
-  { overrides, reviewer }: { overrides: SessionOverrides; reviewer: GuardianReviewer },
+  { overrides, reviewer, approvalMode }: {
+    overrides: SessionOverrides;
+    reviewer: GuardianReviewer;
+    approvalMode: ApprovalModeControl;
+  },
 ): void {
   /**
    * `/auto-permissions`: edit the reviewer model, thinking level, timeout,
@@ -55,9 +74,20 @@ export function registerSettingsCommand(
    * two paths were never equal and keeping both only split the maintenance.
    */
   pi.registerCommand("auto-permissions", {
-    description: "Configure Auto Permissions (\"setup\" hands off to the auto-permissions-setup skill)",
+    description: "Configure Auto Permissions; auto | careful | afk switch this session's approval mode; setup hands off to the auto-permissions-setup skill",
+    getArgumentCompletions: (prefix: string) =>
+      [...APPROVAL_MODES, "setup"]
+        .filter((value) => value.startsWith(prefix.trim()))
+        .map((value) => ({ value, label: value })),
     handler: async (args, ctx) => {
-      if ((args ?? "").trim() === "setup") {
+      const arg = (args ?? "").trim();
+      if ((APPROVAL_MODES as readonly string[]).includes(arg)) {
+        const mode = arg as ApprovalMode;
+        const refused = approvalMode.set(mode, ctx);
+        ctx.ui.notify(refused ? `Auto Permissions: ${refused}` : MODE_NOTICES[mode], refused ? "warning" : "info");
+        return;
+      }
+      if (arg === "setup") {
         // Dispatch rather than instruct: the point of the pointer is that the
         // interview starts on this keystroke.
         pi.sendUserMessage(SETUP_SKILL_HANDOFF_MESSAGE);
