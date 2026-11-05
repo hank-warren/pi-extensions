@@ -23,6 +23,8 @@ const READ_ONLY = [
 	"git fetch --prune origin",
 	"git fetch https://github.com/x/y.git main",
 	"git rev-parse --abbrev-ref HEAD",
+	"git shortlog -sn HEAD",
+	"git log -n 5 --oneline",
 	"git tag --contains=HEAD",
 	"git tag -l 'v1.*' --sort=-v:refname",
 	"gh pr view 12 --json state,mergedAt --jq '.state'",
@@ -162,6 +164,10 @@ const NOT_READ_ONLY = [
 	"test -f README.md && echo yes",
 	// jq is a language: its module system reads files.
 	`jq -n 'import "auth" as $a {"search":"~/.pi/agent"}; $a'`,
+	// A short value flag never swallows a following flag, whatever the program makes of it.
+	"git shortlog -n --output=report.txt HEAD",
+	"git log -n --output=report.txt",
+	"grep -e --include=x -r",
 	"gh pr list --json number | jq -r '.[].number'",
 ];
 

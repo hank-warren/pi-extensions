@@ -34,7 +34,10 @@ const META = new Set([
 interface FlagSpec {
   /** Boolean short flags, combinable (`-niw`). */
   short?: string;
-  /** Short flags taking the next argument, or the rest of this one (`-e PAT`, `-A3`). */
+  /**
+   * Short flags taking the rest of this argument (`-A3`), or the next one (`-e PAT`) unless
+   * it starts with `-`, which is then checked as a flag of its own.
+   */
   shortValue?: string;
   /** Short flags taking an attached value only (`-M50%`); never the next argument. */
   shortAttached?: string;
@@ -72,7 +75,9 @@ export function positionalsIfAllowed(args: readonly string[], spec: FlagSpec): s
       for (let j = 1; j < arg.length; j++) {
         const flag = arg[j];
         if (spec.shortValue?.includes(flag)) {
-          if (j === arg.length - 1) i++;
+          // A separate value is taken only when it cannot be a flag: if this one is really a
+          // boolean (`git shortlog -n`), a swallowed `--output=x` would go unchecked.
+          if (j === arg.length - 1 && i + 1 < args.length && !args[i + 1].startsWith("-")) i++;
           break;
         }
         if (spec.shortAttached?.includes(flag)) break;
@@ -117,7 +122,7 @@ function GREP_SPEC(): FlagSpec {
   };
 }
 
-/** Flags shared by git's history readers (log, show, rev-list, shortlog, stash show, reflog). */
+/** Flags shared by git's history readers (log, show, rev-list, stash show, reflog). */
 const GIT_HISTORY: FlagSpec = {
   short: "puswbaiEFPzRrtc",
   shortValue: "nSG",
@@ -153,7 +158,12 @@ const GIT: Record<string, FlagSpec> = {
   log: GIT_HISTORY,
   show: GIT_HISTORY,
   "rev-list": GIT_HISTORY,
-  shortlog: GIT_HISTORY,
+  // Its -n (sort by count) is a boolean, unlike log's -n <count>.
+  shortlog: {
+    short: "nsec",
+    long: ["--numbered", "--summary", "--email", "--committer", "--all", "--no-merges", "--merges"],
+    longValue: ["--since", "--until", "--after", "--before", "--author", "--format", "--group"],
+  },
   status: {
     short: "sbz",
     shortAttached: "u",
