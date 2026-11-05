@@ -1,5 +1,11 @@
 # @hank-warren/pi-auto-permissions
 
+## 0.22.1
+
+### Patch Changes
+
+- Approval prompts now report pi as blocked on a permission (OSC 7501 program status) while they are open, so herdr-core, the Herdr app and other terminals that support program status show the session as waiting on the user instead of working. Needs pi 1.5.0 or later; older pi ignores the option.
+
 ## 0.22.0
 
 ### Minor Changes

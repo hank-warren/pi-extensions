@@ -246,6 +246,8 @@ interface Harness {
 	/** What `buildContextEntries` returns: the evidence the guardian is built from. */
 	contextEntries: unknown[];
 	customCalls: number;
+	/** The options argument of each `ctx.ui.custom()` call, in order. */
+	customOptions: unknown[];
 	sessionStart(): Promise<void>;
 	sessionShutdown(): Promise<void>;
 	toolCall(command: string, toolCallId?: string, parentToolCallId?: string): Promise<BlockResult>;
@@ -303,6 +305,7 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 		branch,
 		contextEntries,
 		customCalls: 0,
+		customOptions: [],
 		ctx: undefined as never,
 		async sessionStart() {
 			await mock.events.get("session_start")?.[0]?.({ reason: "startup" }, harness.ctx);
@@ -400,8 +403,9 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 			calls.push(call);
 			return script(call, calls.length - 1);
 		},
-		custom: async (factory: unknown) => {
+		custom: async (factory: unknown, customOptions?: unknown) => {
 			harness.customCalls += 1;
+			harness.customOptions.push(customOptions);
 			if (options.custom) return options.custom(factory, harness);
 			return answerOptionSelector(factory, harness);
 		},
@@ -581,6 +585,11 @@ test("7 · an ask_user verdict prompts: Allow runs the command and records an ov
 			harness.answers.push("Allow");
 			assert.equal(await harness.toolCall("git push --force origin main", "call-1"), undefined);
 			assert.equal(harness.customCalls, 1);
+			assert.deepEqual(
+				harness.customOptions[0],
+				{ blocked: { kind: "permission", message: "Git push — Auto Permissions needs approval" } },
+				"the prompt reports pi as blocked (OSC 7501), so herdr-core and the Herdr app show it needs the user",
+			);
 			assert.match(harness.prompts[0].join("\n"), /Git push — Auto Permissions needs approval/u);
 			assert.match(harness.prompts[0].join("\n"), /force push rewrites history/u);
 			assert.equal(harness.denied.length, 0, "an allowed command is not a denial");

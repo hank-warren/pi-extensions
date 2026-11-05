@@ -8,7 +8,9 @@
  * normal document flow, which pushes the transcript up instead of covering it.
  *
  * That is one argument to `ctx.ui.custom()`, easy to "restore" by accident, and
- * invisible to every other test in this package — hence this one.
+ * invisible to every other test in this package — hence this one. The same
+ * argument carries `blocked`, which reports the dialog as program status
+ * (OSC 7501) so herdr-core and the Herdr app see pi waiting on the user.
  */
 
 import assert from "node:assert/strict";
@@ -75,15 +77,15 @@ function harness() {
 	return { execute: execute as Execute, ctx, customCalls, emitted };
 }
 
-test("the questionnaire is mounted in the editor area, never as an overlay", async () => {
+test("the questionnaire is mounted in the editor area, never as an overlay, and reports pi as blocked", async () => {
 	const h = harness();
 	await h.execute("call", params, undefined, undefined, h.ctx);
 
 	assert.equal(h.customCalls.length, 1);
-	assert.equal(
+	assert.deepEqual(
 		h.customCalls[0],
-		undefined,
-		"passing overlay options would cover the bottom of the transcript with no way to scroll to it",
+		{ blocked: { kind: "question", message: "Which database?" } },
+		"overlay options would cover the bottom of the transcript with no way to scroll to it; blocked must stay",
 	);
 });
 

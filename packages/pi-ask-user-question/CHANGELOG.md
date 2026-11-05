@@ -1,5 +1,11 @@
 # @hank-warren/pi-ask-user-question
 
+## 0.7.1
+
+### Patch Changes
+
+- The questionnaire now reports pi as blocked on a question (OSC 7501 program status) while it is open, so herdr-core, the Herdr app and other terminals that support program status show the session as waiting on the user instead of working. Needs pi 1.5.0 or later; older pi ignores the option.
+
 ## 0.7.0
 
 ### Minor Changes

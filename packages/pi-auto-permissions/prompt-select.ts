@@ -30,6 +30,10 @@ export function setHerdrBlocked(pi: ExtensionAPI, active: boolean, label?: strin
  * A Tab-typed note is delivered to the agent as a steering user message,
  * matching what the retired `ExtensionSelectorComponent` monkey patch in
  * pi-permission-selector did.
+ *
+ * `blocked` makes pi report the prompt as program status (OSC 7501), which
+ * `ctx.ui.select` does on its own and `custom()` does only when asked; that is
+ * how herdr-core and the Herdr app see a pane waiting on a human.
  */
 export function promptSelect(
   pi: ExtensionAPI,
@@ -80,5 +84,5 @@ export function promptSelect(
       terminalRows: () => tui.terminal.rows,
       requestRender: () => tui.requestRender(),
     });
-  });
+  }, { blocked: { kind: "permission", message: content.header } });
 }

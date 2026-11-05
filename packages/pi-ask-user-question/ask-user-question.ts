@@ -184,6 +184,9 @@ export function registerTool(pi: ExtensionAPI): void {
 				// This is also where `ctx.ui.select` renders, and where
 				// pi-auto-permissions' approval prompt already puts `OptionSelector`.
 				// pi restores the input editor when `done` fires.
+				//
+				// `blocked` makes pi report the dialog as program status (OSC 7501),
+				// which is how herdr-core and the Herdr app see it waiting on a human.
 				const result = await ctx.ui.custom<QuestionnaireResult | null>(
 					(tui, theme, _keybindings, done) => {
 						dialog = new QuestionnaireDialog({
@@ -210,6 +213,7 @@ export function registerTool(pi: ExtensionAPI): void {
 						}
 						return dialog;
 					},
+					{ blocked: { kind: "question", message: typed.questions[0]?.question ?? HERDR_BLOCKED_LABEL } },
 				);
 
 				// `custom()` resolving undefined means the host reported hasUI but
