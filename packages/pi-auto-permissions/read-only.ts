@@ -7,11 +7,12 @@
  * An allowlist all the way down, kept deliberately small:
  * - META programs print metadata only (names, sizes, counts, hashes), whatever
  *   their arguments.
- * - STDIN_FILTERS (`head`, `grep`, `jq`, ...) take listed flags and no file
+ * - STDIN_FILTERS (`head`, `grep`, `wc`, ...) take listed flags and no file
  *   arguments, so they only ever see what an earlier, itself-checked part of
  *   the pipeline produced.
  * - Read-only `git` and `gh` subcommands take listed flags only.
- * Anything else — a program that reads file contents (`cat`, `rg`), an
+ * Anything else — a program that reads file contents (`cat`, `rg`), a
+ * program with a language of its own (`jq`, `awk`, `sed`), an
  * unknown program, subcommand or flag, an unquoted glob, a substitution or
  * expansion, a subshell, a here-doc, a background job, an env-prefixed
  * command, a write redirect other than to /dev/null — goes to the guardian.
@@ -100,15 +101,6 @@ const STDIN_FILTERS: Record<string, { spec: FlagSpec; positionals: (args: readon
   grep: { spec: GREP_SPEC(), positionals: (args) => (args.some((arg) => /^-[^-]*e|^--regexp/u.test(arg)) ? 0 : 1) },
   egrep: { spec: GREP_SPEC(), positionals: (args) => (args.some((arg) => /^-[^-]*e|^--regexp/u.test(arg)) ? 0 : 1) },
   fgrep: { spec: GREP_SPEC(), positionals: (args) => (args.some((arg) => /^-[^-]*e|^--regexp/u.test(arg)) ? 0 : 1) },
-  // No -f/--from-file, --rawfile, --slurpfile: those read files.
-  jq: {
-    spec: {
-      short: "rncsSjeaCMR",
-      long: ["--raw-output", "--raw-output0", "--null-input", "--compact-output", "--slurp", "--sort-keys", "--join-output", "--exit-status", "--ascii-output", "--tab", "--raw-input", "--color-output", "--monochrome-output"],
-      longValue: ["--indent"],
-    },
-    positionals: () => 1,
-  },
 };
 
 function GREP_SPEC(): FlagSpec {
@@ -455,9 +447,7 @@ function segmentReadOnly(words: string[]): boolean {
   const filter = STDIN_FILTERS[program];
   if (filter) {
     const positionals = positionalsIfAllowed(args, filter.spec);
-    if (!positionals || positionals.length > filter.positionals(args)) return false;
-    // jq cannot write or execute, but its filter can read the environment.
-    return program !== "jq" || !positionals.some((arg) => /\$ENV|\benv\b/u.test(arg));
+    return !!positionals && positionals.length <= filter.positionals(args);
   }
   return META.has(program);
 }

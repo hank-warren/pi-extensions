@@ -29,7 +29,7 @@ const READ_ONLY = [
 	"gh pr checks 12 --watch --interval 10",
 	"gh run view 123 --log-failed | grep -n -i error | head -40",
 	"gh api repos/hank-warren/pi-extensions/pulls --paginate --jq '.[].number'",
-	"gh pr list --json number | jq -r '.[].number'",
+	"gh pr list --json number --jq '.[].number'",
 	"gh auth status",
 	"gh label list",
 	"ls -la 2>/dev/null | grep -c x >/dev/null && echo yes || echo no",
@@ -160,6 +160,9 @@ const NOT_READ_ONLY = [
 	// A builtin that evaluates an array subscript runs the substitution inside it.
 	"test -v 'BASH_VERSINFO[$(rm -rf ./pre-existing-dir)]'",
 	"test -f README.md && echo yes",
+	// jq is a language: its module system reads files.
+	`jq -n 'import "auth" as $a {"search":"~/.pi/agent"}; $a'`,
+	"gh pr list --json number | jq -r '.[].number'",
 ];
 
 test("known read-only commands skip review", () => {
