@@ -34,13 +34,13 @@ const READ_ONLY = [
 	"gh auth status",
 	"gh label list",
 	"ls -la 2>/dev/null | grep -c x >/dev/null && echo yes || echo no",
-	"du -sh . | cut -f1",
+	"df -h . | tail -1 | cut -c1-20",
 	"echo hi >&2",
 	"ls 2>&-",
 	"timeout 10 git fetch origin",
 	"# just a comment\nls",
 	"command -v node",
-	"wc -l README.md",
+	"git ls-files | wc -l",
 	"git log --format=%an | tr a-z A-Z",
 ];
 
@@ -93,6 +93,15 @@ const NOT_READ_ONLY = [
 	"cat README.md",
 	"cat ~/.pi/agent/auth.json",
 	"cat < input.txt",
+	// A filter fed a file through a redirect is reading that file.
+	"head < ~/.pi/agent/auth.json",
+	"grep x <~/.netrc",
+	"wc -l <&3",
+	// Flags that read a file named on the command line.
+	"wc --files0-from ~/.pi/agent/auth.json",
+	"wc -l README.md",
+	"du --files0-from=x",
+	"md5sum -c ~/.pi/agent/auth.json",
 	"rg -n todo src",
 	"head -20 ~/.ssh/id_ed25519",
 	"tail -f /var/log/syslog",

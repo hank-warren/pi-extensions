@@ -20,9 +20,9 @@
 
 /** Programs that print only metadata (names, sizes, counts, hashes), never file contents. */
 const META = new Set([
-  "ls", "pwd", "stat", "du", "df", "free", "id", "whoami", "uname", "uptime", "which", "type",
-  "basename", "dirname", "realpath", "readlink", "nproc", "lscpu", "lsblk", "true", "false",
-  "test", "sleep", "cd", "echo", "wc", "md5sum", "sha1sum", "sha256sum", "sha512sum", "cksum",
+  "ls", "pwd", "stat", "df", "free", "id", "whoami", "uname", "uptime", "which", "type",
+  "basename", "dirname", "realpath", "readlink", "nproc", "true", "false", "test", "sleep", "cd",
+  "echo",
 ]);
 
 /** The flags a program may be given. Anything else is not read-only. */
@@ -91,6 +91,8 @@ const STDIN_FILTERS: Record<string, { spec: FlagSpec; positionals: (args: readon
   tail: { spec: { short: "qvzfF", shortValue: "nc", numeric: true, longValue: ["--lines", "--bytes"], long: ["--quiet", "--silent", "--verbose", "--zero-terminated"] }, positionals: () => 0 },
   cut: { spec: { short: "sz", shortValue: "dfcb", longValue: ["--delimiter", "--fields", "--characters", "--bytes", "--output-delimiter"], long: ["--complement", "--only-delimited", "--zero-terminated"] }, positionals: () => 0 },
   tr: { spec: { short: "cCdst" }, positionals: () => 2 },
+  // No --files0-from: it reads a file and echoes its contents in errors.
+  wc: { spec: { short: "lwcmL", long: ["--lines", "--words", "--bytes", "--chars", "--max-line-length"] }, positionals: () => 0 },
   // No -r/-R/-d/--include/-f: those read files.
   grep: { spec: GREP_SPEC(), positionals: (args) => (args.some((arg) => /^-[^-]*e|^--regexp/u.test(arg)) ? 0 : 1) },
   egrep: { spec: GREP_SPEC(), positionals: (args) => (args.some((arg) => /^-[^-]*e|^--regexp/u.test(arg)) ? 0 : 1) },
@@ -415,8 +417,9 @@ export function tokenizeShell(command: string): Token[] | undefined {
       let j = i;
       while (j < command.length && "<>&".includes(command[j])) j++;
       const op = command.slice(i, j);
-      // Here-docs, here-strings and process substitution carry content this parser does not read.
-      if (op.includes("<<") || command[j] === "(") return undefined;
+      // Input redirects feed a file to a filter that must read only its pipe; here-docs,
+      // here-strings and process substitution carry content this parser does not read.
+      if (op.includes("<") || command[j] === "(") return undefined;
       if (op.endsWith("&")) {
         // fd duplication (`2>&1`, `>&2`, `<&0`) or closing (`>&-`) touches no file. The
         // whole word must be the fd: bash reads `>&1report.txt` as a redirect into a file.
@@ -430,8 +433,8 @@ export function tokenizeShell(command: string): Token[] | undefined {
       let target = "";
       while (j < command.length && !/[\s;&|<>()]/u.test(command[j])) target += command[j++];
       if (!target || /[$`'"\\]/u.test(target)) return undefined;
-      // Input redirects read; output redirects are allowed only into /dev/null.
-      if (op !== "<" && target !== "/dev/null") return undefined;
+      // Output redirects are allowed only into /dev/null.
+      if (target !== "/dev/null") return undefined;
       i = j - 1;
       continue;
     }
