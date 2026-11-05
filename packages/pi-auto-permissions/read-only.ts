@@ -203,7 +203,8 @@ const GIT: Record<string, FlagSpec> = {
     ],
     longValue: ["--exclude"],
   },
-  "ls-remote": { short: "htq", long: ["--heads", "--tags", "--refs", "--quiet", "--symref", "--get-url"], longValue: ["--sort"] },
+  // Not --get-url: it prints the remote URL as configured, token included.
+  "ls-remote": { short: "htq", long: ["--heads", "--tags", "--refs", "--quiet", "--symref"], longValue: ["--sort"] },
   "ls-tree": { short: "rdtlz", long: ["--name-only", "--name-status", "--full-name", "--full-tree", "--long", "--object-only"], longValue: ["--format", "--abbrev"] },
   "cat-file": { short: "tspe" },
   describe: { long: ["--tags", "--all", "--always", "--long", "--exact-match", "--contains"], longValue: ["--match", "--exclude", "--candidates", "--abbrev", "--dirty"] },
