@@ -35,10 +35,13 @@ interface FlagSpec {
   shortAttached?: string;
   /** Boolean long flags. */
   long?: readonly string[];
-  /** Long flags taking `=value` or the next argument. */
+  /**
+   * Long flags taking a value. Only the attached `--flag=value` form is read as
+   * one: whether a program takes a separate value, and whether it is optional,
+   * varies (`grep --color`), so a following argument is always checked on its
+   * own. Swallowing it could hide a flag; checking it costs at most a review.
+   */
   longValue?: readonly string[];
-  /** Long flags taking an optional attached `=value` only; never the next argument. */
-  longOptional?: readonly string[];
   /** Accept `-<number>` (`git log -5`). */
   numeric?: boolean;
 }
@@ -55,11 +58,7 @@ export function positionalsIfAllowed(args: readonly string[], spec: FlagSpec): s
     if (arg.startsWith("--")) {
       const eq = arg.indexOf("=");
       const name = eq < 0 ? arg : arg.slice(0, eq);
-      if (spec.longValue?.includes(name)) {
-        if (eq < 0) i++;
-        continue;
-      }
-      if (spec.longOptional?.includes(name)) continue;
+      if (spec.longValue?.includes(name)) continue;
       if (eq < 0 && spec.long?.includes(name)) continue;
       return undefined;
     }
@@ -144,8 +143,6 @@ const GIT_HISTORY: FlagSpec = {
   longValue: [
     "--format", "--date", "--since", "--until", "--after", "--before", "--author", "--committer",
     "--grep", "--max-count", "--skip", "--diff-filter", "--min-parents", "--max-parents",
-  ],
-  longOptional: [
     "--stat", "--dirstat", "--color", "--word-diff", "--relative", "--abbrev", "--decorate",
     "--pretty", "--find-renames", "--find-copies", "--unified",
   ],
@@ -165,7 +162,7 @@ const GIT: Record<string, FlagSpec> = {
     short: "sbz",
     shortAttached: "u",
     long: ["--short", "--branch", "--long", "--show-stash", "--no-ahead-behind", "--ahead-behind", "--renames", "--no-renames", "--null"],
-    longOptional: ["--porcelain", "--untracked-files", "--ignored", "--ignore-submodules"],
+    longValue: ["--porcelain", "--untracked-files", "--ignored", "--ignore-submodules"],
   },
   fetch: {
     short: "pqv",
@@ -179,7 +176,7 @@ const GIT: Record<string, FlagSpec> = {
       "--is-bare-repository", "--show-prefix", "--show-cdup", "--symbolic-full-name", "--verify",
       "--quiet", "--show-superproject-working-tree", "--all", "--branches", "--tags", "--remotes",
     ],
-    longOptional: ["--short", "--abbrev-ref"],
+    longValue: ["--short", "--abbrev-ref"],
   },
   "ls-files": {
     short: "cdmoisuz",
@@ -191,12 +188,12 @@ const GIT: Record<string, FlagSpec> = {
     longValue: ["--exclude"],
   },
   "ls-remote": { short: "htq", long: ["--heads", "--tags", "--refs", "--quiet", "--symref", "--get-url"], longValue: ["--sort"] },
-  "ls-tree": { short: "rdtlz", long: ["--name-only", "--name-status", "--full-name", "--full-tree", "--long", "--object-only"], longValue: ["--format"], longOptional: ["--abbrev"] },
+  "ls-tree": { short: "rdtlz", long: ["--name-only", "--name-status", "--full-name", "--full-tree", "--long", "--object-only"], longValue: ["--format", "--abbrev"] },
   "cat-file": { short: "tspe" },
-  describe: { long: ["--tags", "--all", "--always", "--long", "--exact-match", "--contains"], longValue: ["--match", "--exclude", "--candidates"], longOptional: ["--abbrev", "--dirty"] },
+  describe: { long: ["--tags", "--all", "--always", "--long", "--exact-match", "--contains"], longValue: ["--match", "--exclude", "--candidates", "--abbrev", "--dirty"] },
   blame: { short: "lstwefnp", shortValue: "L", shortAttached: "MC", long: ["--porcelain", "--line-porcelain", "--show-email", "--show-name", "--show-number"], longValue: ["--date"] },
   "merge-base": { long: ["--is-ancestor", "--all", "--octopus", "--independent", "--fork-point"] },
-  "show-ref": { short: "dsq", long: ["--heads", "--tags", "--head", "--verify", "--quiet", "--dereference"], longOptional: ["--hash", "--abbrev"] },
+  "show-ref": { short: "dsq", long: ["--heads", "--tags", "--head", "--verify", "--quiet", "--dereference"], longValue: ["--hash", "--abbrev"] },
   "for-each-ref": { longValue: ["--format", "--sort", "--count", "--points-at", "--merged", "--no-merged", "--contains"] },
   "name-rev": { long: ["--name-only", "--tags", "--all"] },
   cherry: { short: "v" },
@@ -274,7 +271,8 @@ const GH_READ: Record<string, ReadonlySet<string>> = {
 
 const GH_FLAGS: FlagSpec = {
   short: "c",
-  shortValue: "qtRLsAalBHSbwejiu",
+  // Not -w: it is --web, a boolean, on the view commands, and a value flag would swallow the next argument.
+  shortValue: "qtRLsAalBHSbejiu",
   long: [
     "--comments", "--log", "--log-failed", "--exit-status", "--watch", "--required", "--fail-fast",
     "--verbose", "--name-only", "--patch", "--draft", "--archived", "--fork", "--source",

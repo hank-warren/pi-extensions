@@ -14,7 +14,7 @@ const READ_ONLY = [
 	"git status --porcelain=v2 -uno",
 	"git branch --show-current",
 	"git branch -a",
-	"git branch --contains abc123",
+	"git branch --contains=abc123",
 	"git branch --list 'feat/*'",
 	"git stash list",
 	"git worktree list",
@@ -23,7 +23,7 @@ const READ_ONLY = [
 	"git fetch --prune origin",
 	"git fetch https://github.com/x/y.git main",
 	"git rev-parse --abbrev-ref HEAD",
-	"git tag --contains HEAD",
+	"git tag --contains=HEAD",
 	"git tag -l 'v1.*' --sort=-v:refname",
 	"gh pr view 12 --json state,mergedAt --jq '.state'",
 	"gh pr checks 12 --watch --interval 10",
@@ -151,6 +151,12 @@ const NOT_READ_ONLY = [
 	"echo overwrite >&1report.txt",
 	"echo x >&2x",
 	"echo x >& out.txt",
+	// A long flag with an optional value must not swallow the next argument.
+	"grep --color -r .",
+	"grep --colour -r . | head",
+	"git log --format --output=x",
+	"git status --porcelain --output=x",
+	"gh pr view 1 -w --show-token",
 ];
 
 test("known read-only commands skip review", () => {
@@ -162,7 +168,7 @@ test("anything that writes, executes, expands, reveals credentials or is unknown
 });
 
 test("a flag that takes an attached value never swallows the next argument", () => {
-	const spec = { shortAttached: "M", longOptional: ["--stat"] };
+	const spec = { shortAttached: "M", longValue: ["--stat"] };
 	assert.equal(positionalsIfAllowed(["-M", "--output=x"], spec), undefined);
 	assert.equal(positionalsIfAllowed(["--stat", "--output=x"], spec), undefined);
 	assert.deepEqual(positionalsIfAllowed(["-M50%", "--stat=200", "HEAD"], spec), ["HEAD"]);
