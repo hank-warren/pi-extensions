@@ -66,12 +66,12 @@ const QuestionSchema = Type.Object({
 	}),
 	header: Type.String({
 		description:
-			'MAX 16 CHARACTERS — hard limit, requests over the limit are rejected. Very short chip/tag shown next to the question. Examples: "Auth method", "Library", "Approach".',
+			'Very short chip/tag shown next to the question, at most 16 characters; a longer one is cut to 16 with an ellipsis. Examples: "Auth method", "Library", "Approach".',
 	}),
 	multiSelect: Type.Optional(
 		Type.Boolean({
 			description:
-				"Render this question as checkboxes so the user can pick more than one option. Use it when several answers can hold at once (\"which of these should change\", \"which checks to run before merging\"); keep mutually exclusive choices single-select. Multi-select questions may have 2-6 options instead of 2-4. The user toggles rows with Space or a digit and confirms with Enter, and the answer comes back as the chosen labels joined with \", \".",
+				"Render this question as checkboxes so the user can pick more than one option. Use it when several answers can hold at once (\"which of these should change\", \"which checks to run before merging\"); keep mutually exclusive choices single-select. Do not use it to ask which steps of your own plan to carry out: if you would recommend every option, state the plan and ask only about the genuinely optional parts. Multi-select questions may have 2-6 options instead of 2-4. The user toggles rows with Space or a digit and confirms with Enter, and the answer comes back as the chosen labels joined with \", \".",
 		}),
 	),
 	options: Type.Array(OptionSchema, {

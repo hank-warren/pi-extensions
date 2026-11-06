@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AskUserParams } from "../tool/schema.ts";
-import { validateParams } from "../tool/validate.ts";
+import { normalizeParams, validateParams } from "../tool/validate.ts";
 
 const ok = (): AskUserParams => ({
 	questions: [
@@ -93,12 +93,27 @@ test("preview is allowed alongside multiSelect", () => {
 	assert.equal(validateParams(params), undefined);
 });
 
-test("a header over 16 characters is rejected", () => {
+test("a header over 16 characters is clipped, not rejected", () => {
 	const params = ok();
-	params.questions[0].header = "x".repeat(17);
-	const error = validateParams(params);
-	assert.equal(error?.code, "header_too_long");
-	assert.match(error!.message, /17 characters/);
+	params.questions[0].header = "  Deploy targets!!  ";
+	const normalized = normalizeParams(params);
+	assert.equal(normalized.questions[0].header, "Deploy targets!!");
+	params.questions[0].header = "Release channel x";
+	assert.equal(normalizeParams(params).questions[0].header, "Release channel…");
+	assert.equal(validateParams(normalizeParams(params)), undefined);
+	params.questions[0].header = "Release chan nel";
+	assert.equal(normalizeParams(params).questions[0].header, "Release chan nel");
+	params.questions[0].header = "Model 🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀";
+	assert.equal(Array.from(normalizeParams(params).questions[0].header).length, 16);
+	assert.equal(params.questions[0].header, "Model 🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀", "input is not mutated");
+});
+
+test("normalizing passes malformed params through to validation", () => {
+	const bad = { questions: "nope" } as unknown as AskUserParams;
+	assert.equal(normalizeParams(bad), bad);
+	const noHeader = ok();
+	(noHeader.questions[0] as { header?: string }).header = undefined;
+	assert.equal(validateParams(normalizeParams(noHeader))?.code, "empty_question");
 });
 
 test("a header of exactly 16 characters is accepted", () => {

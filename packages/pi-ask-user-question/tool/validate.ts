@@ -2,8 +2,9 @@
  * Parameter validation for `ask_user_question`. Pure — no pi imports, no I/O.
  *
  * typebox enforces structure (array bounds, required fields, types). This
- * module enforces the semantic rules typebox cannot express: the header chip's
- * length cap, non-empty text, reserved sentinel labels, and duplicates.
+ * module enforces the semantic rules typebox cannot express: non-empty text,
+ * reserved sentinel labels, and duplicates. An over-long header chip is not an
+ * error: `normalizeParams` clips it before validation.
  *
  * Option labels are deliberately uncapped: the renderer wraps them and clamps
  * its own lines, so a length rule could only ever discard a questionnaire that
@@ -27,7 +28,6 @@ import {
 type ValidationCode =
 	| "bad_question_count"
 	| "bad_option_count"
-	| "header_too_long"
 	| "empty_label"
 	| "reserved_label"
 	| "duplicate_label"
@@ -36,6 +36,26 @@ type ValidationCode =
 interface ValidationError {
 	code: ValidationCode;
 	message: string;
+}
+
+/**
+ * Clip each header to the chip's cap rather than rejecting the call: a header a
+ * character or two over the limit was the only validation error models hit,
+ * and each one cost a full retry. Malformed input passes through to validation.
+ */
+export function normalizeParams(params: AskUserParams): AskUserParams {
+	if (!Array.isArray(params?.questions)) return params;
+	return {
+		...params,
+		questions: params.questions.map((q) => {
+			if (typeof q?.header !== "string") return q;
+			const chars = Array.from(q.header.trim());
+			const header = chars.length > MAX_HEADER_LENGTH
+				? `${chars.slice(0, MAX_HEADER_LENGTH - 1).join("").trimEnd()}…`
+				: chars.join("");
+			return header === q.header ? q : { ...q, header };
+		}),
+	};
 }
 
 const isReserved = (label: string): boolean =>
@@ -65,12 +85,6 @@ export function validateParams(params: AskUserParams): ValidationError | undefin
 		}
 		if (!q.header?.trim()) {
 			return { code: "empty_question", message: `${where}.header must not be empty.` };
-		}
-		if (q.header.length > MAX_HEADER_LENGTH) {
-			return {
-				code: "header_too_long",
-				message: `${where}.header is ${q.header.length} characters; the hard limit is ${MAX_HEADER_LENGTH}. Shorten it to a chip-sized tag.`,
-			};
 		}
 		// The cap is mode-aware: checkboxes are a shortlist UI and get six, a
 		// pick-one question still gets four.

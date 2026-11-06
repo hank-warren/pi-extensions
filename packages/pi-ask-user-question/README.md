@@ -79,6 +79,17 @@ Every question gets an appended **`Type something.`** row for a free-text
 answer. The model is not allowed to author that row itself — reserved labels
 are rejected at runtime.
 
+## What the model gets back
+
+`User has answered your questions: "<question>"="<answer>". … You can now continue with the user's answers in mind.`, with a few additions:
+
+- A note follows its answer as `user notes: …`.
+- Typed text is marked `(typed by the user)`, or `(includes text the user typed)` on a multi-select answer, because a typed answer is often a question or a change of direction rather than a choice.
+- On `Esc`, answers already given follow the decline: `User declined to answer questions. Before declining, the user answered: …`.
+- A chosen option's preview is not echoed back (the model wrote it); it stays in `details.answers[].preview`.
+
+A `header` over 16 characters is clipped to 15 plus `…` rather than rejected.
+
 ## Typing answers and notes
 
 The custom answer and notes are typed in pi's own input-box editor, so they
