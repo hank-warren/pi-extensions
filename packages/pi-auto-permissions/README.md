@@ -479,10 +479,11 @@ In a [herdr-core](https://herdr.dev/core/) terminal (`HC_TERMINAL_ID` set), anot
 - A message from the **parent** terminal is a relayed user record, `USER (relayed by parent agent t7)`. It authorizes exactly the operations and targets it names, because the parent's own guardian reviewed the `hc send` that delivered it against the parent's user messages: telling a child to push `main` needs the same approval in the parent as pushing it there.
 - A message from **any other** terminal (a helper reporting back, a sibling) or from hc itself is `AGENT MESSAGE` context with `source: "tool"`. It never authorizes anything, even when it says the user approved something.
 - If the parent cannot be found, nothing relayed authorizes.
+- Messages retained across a native compaction are classified the same way.
 
 The labels depend on hc's tag, and hc tags a message only when it is sent from an agent's terminal. Text sent from a plain shell or program terminal (for example `hc run -- hc send t7 "…"`) arrives untagged and is indistinguishable from typed input, so it reads as the user's own message. The control that holds either way is the sending agent's guardian reviewing the hand-off.
 
-The guardian judges a delegating command (`hc send`, or `hc run` with a task) as if the agent would do what the message asks, and asks for the message inline when the command reads it from a file or variable. The default rules also deny `hc keys`, `hc send` or `hc interrupt` aimed at the agent's own terminal and `hc send --force`, which would answer the agent's own prompts, and review `hc keys` into any other terminal.
+The guardian judges a delegating command (`hc send`, or `hc run` with a task) as if the agent would do what the message asks, and asks for the message inline when the command reads it from a file or variable. The default rules also deny `hc keys`, `hc send` or `hc interrupt` aimed at the agent's own terminal and `hc send --force`, which would answer the agent's own prompts, and review `hc keys` into any other terminal. `hc send` and `hc run` are reviewed by a default rule even without `reviewAllShell`, because a child's trust in its parent's messages rests on that review.
 
 ## Subagent sessions
 

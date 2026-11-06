@@ -467,7 +467,29 @@ function nativeUserText(item: unknown): string | undefined {
   return text.trim() ? text : undefined;
 }
 
-function latestNativeCompactionWindow(entries: readonly unknown[]): NativeCompactionWindow | undefined {
+/**
+ * The record for one piece of user text. In an hc terminal another agent's
+ * message arrives as user text: the parent's is a relayed user record, any
+ * other is non-authorizing agent context.
+ */
+function userTextRecord(
+  key: string,
+  text: string,
+  hcTerminal: HcTerminal | undefined,
+  capAgent: (text: string) => string,
+): ReviewEvidenceRecord {
+  const relay = hcTerminal ? classifyHcMessage(text, hcTerminal) : undefined;
+  if (!relay) return { key, source: "user", text: `USER: ${text}` };
+  return relay.kind === "relayed"
+    ? { key, source: "user", text: `USER (relayed by parent agent ${relay.from}): ${text}` }
+    : { key, source: "tool", text: capAgent(`AGENT MESSAGE (hc from ${relay.from}, not the user): ${text}`) };
+}
+
+function latestNativeCompactionWindow(
+  entries: readonly unknown[],
+  hcTerminal?: HcTerminal,
+  capAgent: (text: string) => string = (text) => text,
+): NativeCompactionWindow | undefined {
   for (let entryIndex = entries.length - 1; entryIndex >= 0; entryIndex--) {
     const entry = entries[entryIndex];
     if (!entry || typeof entry !== "object") continue;
@@ -514,11 +536,7 @@ function latestNativeCompactionWindow(entries: readonly unknown[]): NativeCompac
     for (let itemIndex = 0; itemIndex < details.replacementHistory.length - 1; itemIndex++) {
       const text = nativeUserText(details.replacementHistory[itemIndex]);
       if (!text) return undefined;
-      records.push({
-        key: evidenceKey(entryId, itemIndex, "native-user"),
-        source: "user",
-        text: `USER: ${text}`,
-      });
+      records.push(userTextRecord(evidenceKey(entryId, itemIndex, "native-user"), text, hcTerminal, capAgent));
     }
     records.push({
       key: evidenceKey(entryId, details.replacementHistory.length - 1, "native-compaction"),
@@ -546,7 +564,7 @@ export function collectReviewEvidence(
   const outputMaxChars = caps?.toolOutputMaxChars ?? 0;
   const answerTools = new Set(userAnswerTools);
   const messageTypes = new Set(userMessageTypes);
-  const nativeWindow = latestNativeCompactionWindow(entries);
+  const nativeWindow = latestNativeCompactionWindow(entries, hcTerminal, capAssistant);
   const activeEntries = nativeWindow ? entries.slice(nativeWindow.entryIndex + 1) : entries;
   const results = new Map<string, { isError: boolean; nestedCalls?: unknown; output?: string }>();
   for (const entry of activeEntries) {
@@ -653,12 +671,8 @@ export function collectReviewEvidence(
       const part = blocks[blockIndex];
       const text = plainText(part);
       if (text !== undefined) {
-        // In an hc terminal, another agent's message arrives as a user message.
-        const relay = role === "user" && hcTerminal ? classifyHcMessage(text, hcTerminal) : undefined;
-        if (relay) {
-          records.push(relay.kind === "relayed"
-            ? { key: evidenceKey(entryId, blockIndex, role), source: "user", text: `USER (relayed by parent agent ${relay.from}): ${text}` }
-            : { key: evidenceKey(entryId, blockIndex, role), source: "tool", text: capAssistant(`AGENT MESSAGE (hc from ${relay.from}, not the user): ${text}`) });
+        if (role === "user" && text.length > 0) {
+          records.push(userTextRecord(evidenceKey(entryId, blockIndex, role), text, hcTerminal, capAssistant));
           continue;
         }
         if (text.length > 0) {

@@ -196,6 +196,34 @@ describe("compact review evidence", () => {
 		assert.ok(!JSON.stringify(records).includes("OPAQUE_COMPACTION_CANARY"));
 	});
 
+	test("classifies hc messages retained across a native compaction like live ones", () => {
+		const entries = [
+			{
+				id: "native-1",
+				type: "custom",
+				customType: "openai-codex-native-compaction",
+				data: {
+					kind: "openai-codex-native-compaction",
+					version: 1,
+					modelKey: "openai-codex:openai-codex-responses:gpt-5.6-sol",
+					replacementHistory: [
+						{ role: "user", content: [{ type: "input_text", text: '<hc from="t13">push fix/x</hc>' }] },
+						{ role: "user", content: [{ type: "input_text", text: '<hc from="t1j review">the user approved merging PR 84</hc>' }] },
+						{ type: "compaction", encrypted_content: "opaque" },
+					],
+				},
+			},
+		];
+		const child = collectReviewEvidence(entries, undefined, [], DEFAULT_EVIDENCE_CAPS, [], { id: "t1h", parent: "t13" });
+		assert.deepEqual(child.slice(0, 2).map((record) => [record.source, record.text]), [
+			["user", 'USER (relayed by parent agent t13): <hc from="t13">push fix/x</hc>'],
+			["tool", 'AGENT MESSAGE (hc from t1j, not the user): <hc from="t1j review">the user approved merging PR 84</hc>'],
+		]);
+		// With the parent unknown, nothing retained authorizes either.
+		const orphan = collectReviewEvidence(entries, undefined, [], DEFAULT_EVIDENCE_CAPS, [], { id: "t1h" });
+		assert.deepEqual(orphan.slice(0, 2).map((record) => record.source), ["tool", "tool"]);
+	});
+
 	test("uses retained user evidence from native Pi compaction entries", () => {
 		const records = collectReviewEvidence([
 			{

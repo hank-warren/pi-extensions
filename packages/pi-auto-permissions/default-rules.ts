@@ -78,6 +78,13 @@ const OVERSIGHT_RULES: readonly Gate[] = [
     label: "Keystrokes into another terminal",
   },
   {
+    // A child trusts its parent's hc messages because this review happened; it must not depend on reviewAllShell.
+    pattern: /\bhc\s+(?:send|run)\b/i,
+    level: "guarded",
+    group: "oversight",
+    label: "Message or task for another terminal",
+  },
+  {
     pattern: /(?:>>?|\btee\b|\bsed\s+-i\b|\bcp\b|\bmv\b|\brm\b|\btruncate\b)[^|&;]*(?:\$\{?PI_CODING_AGENT_DIR\}?|\.pi\/agent)\/sessions\b/i,
     level: "deny",
     group: "oversight",

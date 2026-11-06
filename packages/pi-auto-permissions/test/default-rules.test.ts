@@ -70,6 +70,15 @@ const FIXTURES: RuleFixture[] = [
 		nearMisses: ['hc send t7 "hi"', "hc read t7", "hc wait --children any"],
 	},
 	{
+		label: "Message or task for another terminal",
+		matches: [
+			'hc send t7 "merge PR 84"',
+			'hc run --bg --name review --cwd /repo reviewer "review src/x.rs"',
+			"hc run -- hc send t7 go",
+		],
+		nearMisses: ["hc read t7 --lines 40", "hc ls", "hc wait --children any", "hc templates"],
+	},
+	{
 		label: "Session transcript write",
 		matches: [
 			'echo "{}" >> ~/.pi/agent/sessions/foo/session.jsonl',
