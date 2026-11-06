@@ -1,5 +1,15 @@
 # @hank-warren/pi-auto-permissions
 
+## 0.25.0
+
+### Minor Changes
+
+- Give the guardian more context and narrow the hard denies.
+
+  - **Shell output reaches the guardian.** Each finished shell call's evidence record ends with a head-and-tail excerpt of what it printed (about 400 characters), labelled `OUTPUT (untrusted excerpt)`. The guardian can see facts the command text hides, such as a directory not being a git repository, without the agent narrating them. Output never authorizes anything; file contents and other tools' payloads stay out.
+  - **Relayed approvals from a parent hc agent.** In a herdr-core terminal, a message from the terminal that started the session is a relayed user record that authorizes exactly what it names; any other agent's hc message is context only. The parent comes from `hc get` at session start, and an unknown parent relays nothing. The guardian judges a delegating `hc send` or `hc run` like doing the action itself.
+  - **Fewer hard denies.** Deleting the working directory or a parent and glob deletes under a shell variable are reviewed instead of hard-denied. Self-driving keystrokes now also cover `hc keys`/`hc send`/`hc interrupt` aimed at the agent's own terminal and `hc send --force`, and `hc keys` into any other terminal is reviewed.
+
 ## 0.24.0
 
 ### Minor Changes
