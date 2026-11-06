@@ -26,7 +26,7 @@ import {
 	QuestionParamsSchema,
 	TOOL_NAME,
 } from "./tool/schema.ts";
-import { validateParams } from "./tool/validate.ts";
+import { normalizeParams, validateParams } from "./tool/validate.ts";
 import { QuestionnaireDialog } from "./view/dialog.ts";
 
 const ERROR_NO_UI = "Error: UI not available (running in non-interactive mode)";
@@ -50,12 +50,13 @@ Preview feature:
 Use the optional \`preview\` field on an option when presenting a concrete artifact the user needs to compare visually: an ASCII mockup, a code snippet, a diagram or configuration variation. It renders as markdown in a pane below the options while that option is highlighted. Do not use it for simple preference questions where the label and description already say enough.
 
 Multi-select:
-Set \`multiSelect: true\` on a question when several answers can hold at once — "which of these packages should change", "which checks to run before merging". Keep mutually exclusive choices single-select; that is still the default and the common case. A multi-select question may have 2-6 options instead of 2-4, renders as checkboxes, and the user toggles rows with Space or a digit and confirms with Enter. The answer comes back as the chosen labels joined with ", ", and the user may add a typed value to the checked ones through the "Type something." row. \`preview\` works on multi-select options too.
+Set \`multiSelect: true\` on a question when several answers can hold at once — "which of these packages should change", "which checks to run before merging". Keep mutually exclusive choices single-select; that is still the default and the common case. Do not use it to ask which steps of your own plan to carry out: when you would recommend every option, state the plan instead and ask only about the parts that are genuinely optional. A multi-select question may have 2-6 options instead of 2-4, renders as checkboxes, and the user toggles rows with Space or a digit and confirms with Enter. The answer comes back as the chosen labels joined with ", ", and the user may add a typed value to the checked ones through the "Type something." row. \`preview\` works on multi-select options too.
 
 Usage notes:
 - The user can pick an option with the number keys, type a custom answer via the automatically appended "Type something." row, attach a note to their choice by pressing n, or press Esc to decline. Do NOT author "Other" or "Type something." labels yourself — reserved labels are rejected at runtime.
 - If you recommend a specific option, make it the first option and add "(Recommended)" at the end of the label.
-- Ask 1-4 questions per call, each with 2-4 options (2-6 when \`multiSelect\` is true). Multiple questions render as tabs the user cycles with Tab; every question must be answered before the call returns. Group questions that belong to one decision rather than asking them in separate calls, but do not pad a single decision into several questions.`;
+- Ask 1-4 questions per call, each with 2-4 options (2-6 when \`multiSelect\` is true). Multiple questions render as tabs the user cycles with Tab; every question must be answered before the call returns. Group questions that belong to one decision rather than asking them in separate calls, but do not pad a single decision into several questions.
+- To get approval for an action (running a command, deploying, deleting), ask it as its own question that names the exact action, with options such as "Approve" and "Don't run". Never fold an approval into an option of an unrelated decision: the user is choosing that decision, not approving the action, and a permission reviewer will not count it.`;
 
 function emitPrompt(pi: ExtensionAPI, id: string, params: AskUserParams): void {
 	const payload: AskUserPromptEventPayload = {
@@ -129,7 +130,7 @@ export function registerTool(pi: ExtensionAPI): void {
 		parameters: QuestionParamsSchema,
 
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-			const typed = params as unknown as AskUserParams;
+			const typed = normalizeParams(params as unknown as AskUserParams);
 
 			// Backstop only — reconcile.ts should already have stripped the tool
 			// in headless runs (subagent children must never block on a human).

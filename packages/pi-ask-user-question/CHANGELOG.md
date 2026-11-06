@@ -1,5 +1,11 @@
 # @hank-warren/pi-ask-user-question
 
+## 0.8.0
+
+### Minor Changes
+
+- Answers given before Esc now follow the decline message instead of being dropped, typed answers are marked `(typed by the user)`, a header over 16 characters is clipped instead of failing the call, and a chosen option's preview is no longer echoed back (it stays in `details`). The tool description tells the model to ask for approval as its own question naming the action, and not to use multi-select to ask which steps of its own plan to run.
+
 ## 0.7.1
 
 ### Patch Changes

@@ -300,6 +300,99 @@ describe("compact review evidence", () => {
 		assert.ok(AUTO_PERMISSIONS_SYSTEM_PROMPT.includes("USER (dialog answer):"));
 	});
 
+	test("quotes the selected options' descriptions from the dialog's tool call", () => {
+		const questions = [
+			{
+				question: "Where should the hub live?",
+				options: [
+					{ label: "Own hc session (Recommended)", description: "Approves me running the theo-probe test." },
+					{ label: "Default core", description: "UNSELECTED_DESCRIPTION_CANARY" },
+				],
+			},
+			{
+				question: "Enable which checks?",
+				multiSelect: true,
+				options: [
+					{ label: "lint", description: "Runs eslint." },
+					{ label: "tests", description: "x".repeat(1200) },
+					{ label: "e2e", description: "Runs playwright." },
+				],
+			},
+			{ question: "Free text?", options: [{ label: "Yes", description: "Says yes." }] },
+		];
+		const entries = (args: unknown) => [
+			{
+				id: "a1",
+				type: "message",
+				message: { role: "assistant", content: [{ type: "toolCall", id: "ask-1", name: "ask_user_question", arguments: args }] },
+			},
+			{
+				id: "r1",
+				type: "message",
+				message: {
+					role: "toolResult",
+					toolCallId: "ask-1",
+					toolName: "ask_user_question",
+					isError: false,
+					content: [],
+					details: {
+						answers: [
+							{ questionIndex: 0, question: "Where should the hub live?", kind: "option", answer: "Own hc session (Recommended)" },
+							{ questionIndex: 1, question: "Enable which checks?", kind: "multi", answer: "lint, tests", selected: ["lint", "tests"] },
+							{ questionIndex: 2, question: "Free text?", kind: "custom", answer: "only on Fridays" },
+						],
+						cancelled: false,
+					},
+				},
+			},
+		];
+		const userTexts = (args: unknown) => collectReviewEvidence(entries(args), undefined, ["ask_user_question"])
+			.filter((record) => record.source === "user")
+			.map((record) => record.text);
+
+		const texts = userTexts({ questions });
+		assert.equal(
+			texts[0],
+			'USER (dialog answer): selected "Own hc session (Recommended)" — assistant-drafted option description shown with the selection: "Approves me running the theo-probe test." — assistant-drafted question: "Where should the hub live?"',
+		);
+		assert.ok(texts[1].startsWith('USER (dialog answer): selected "lint; tests" — assistant-drafted option descriptions shown with the selection: "lint": "Runs eslint."; "tests": "xxx'));
+		assert.ok(texts[1].includes("[truncated 200 chars]"));
+		assert.ok(!texts[1].includes("playwright"));
+		assert.equal(texts[2], 'USER (dialog answer): selected "only on Fridays" — assistant-drafted question: "Free text?"');
+		assert.ok(!texts.join("\n").includes("UNSELECTED_DESCRIPTION_CANARY"));
+		assert.ok(AUTO_PERMISSIONS_SYSTEM_PROMPT.includes("includes any option description quoted in the record"));
+
+		// Typed text that matches a label is not a selection of that option.
+		const typedTexts = (answers: unknown[]) => collectReviewEvidence([
+			entries({ questions })[0],
+			{
+				id: "r2",
+				type: "message",
+				message: { role: "toolResult", toolCallId: "ask-1", toolName: "ask_user_question", isError: false, content: [], details: { answers, cancelled: false } },
+			},
+		], undefined, ["ask_user_question"]).filter((record) => record.source === "user").map((record) => record.text);
+		for (const flag of [{ custom: true }, { wasCustom: true }, { kind: "custom" }]) {
+			assert.equal(
+				typedTexts([{ questionIndex: 0, question: "Where should the hub live?", answer: "Default core", ...flag }])[0],
+				'USER (dialog answer): selected "Default core" — assistant-drafted question: "Where should the hub live?"',
+			);
+		}
+		const multiTyped = typedTexts([
+			{ questionIndex: 1, question: "Enable which checks?", answer: "lint, e2e", selected: ["lint", "e2e"], custom: true },
+		])[0];
+		assert.equal(
+			multiTyped,
+			'USER (dialog answer): selected "lint; e2e" — assistant-drafted option description shown with the selection: "Runs eslint." — assistant-drafted question: "Enable which checks?"',
+		);
+		assert.ok(!multiTyped.includes("playwright"));
+
+		// Stringified arguments resolve the same; unusable ones fall back to the bare answer.
+		assert.deepEqual(userTexts(JSON.stringify({ questions })), texts);
+		for (const args of [undefined, "{not json", { questions: "nope" }, { questions: [{ question: "Where should the hub live?", options: [{ label: 7 }] }] }]) {
+			assert.equal(userTexts(args)[0], 'USER (dialog answer): selected "Own hc session (Recommended)" — assistant-drafted question: "Where should the hub live?"');
+		}
+	});
+
 	test("ignores dialog answers that are not allowlisted, cancelled, errored, or malformed", () => {
 		const answers = [{ questionIndex: 0, question: "Which hosts first?", kind: "option", answer: "app-01" }];
 		const resultEntry = (details: unknown, isError: unknown = false, toolName = "ask_user_question") => [

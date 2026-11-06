@@ -144,7 +144,6 @@ Reject the whole call with a structured error when:
 |---|---|
 | `questions.length` outside 1..4 | `bad_question_count` |
 | `options.length` outside 2..4 | `bad_option_count` |
-| `header.length > 16` | `header_too_long` |
 | `label` empty or whitespace-only | `empty_label` |
 | A label case-insensitively equals a reserved sentinel (`other`, `type something.`, `type something`) | `reserved_label` |
 | Duplicate labels within one question | `duplicate_label` |
@@ -174,7 +173,12 @@ is pressure rather than a gate. **`empty_label` takes its place in the fatal
 set**: a blank row genuinely cannot be rendered or picked. Checked per option
 before the reserved and duplicate checks, and duplicate detection runs on labels
 exactly as authored — with no truncation there is no clipped-prefix collision.
-`header_too_long` stays fatal at 16: the chip is genuinely tight.
+
+**Amended (header clipped, 0.8.0).** `header_too_long` is gone too. It was the
+only validation error models hit in practice (4 of 5 errors across 355 calls),
+always one character over, and each cost a full retry. `normalizeParams` now
+trims the header and clips anything over 16 code points to 15 plus `…` before
+validation; the chip stays as tight as before.
 
 ### 5.3 The custom-answer row
 
@@ -213,6 +217,19 @@ continue with the user's answers in mind."
   one answer string is noise the model authored itself.
 - Cancelled (Esc), or zero answered questions → the single canonical string
   `User declined to answer questions`, with `details.cancelled = true`.
+
+**Amended (0.8.0).** Three departures from AUQ's envelope, each from observed
+use:
+
+- Answers given before an Esc follow the decline as `User declined to answer
+  questions. Before declining, the user answered: <segments>`; they were in
+  `details` but invisible to the model.
+- A typed answer is marked `(typed by the user)`, or `(includes text the user
+  typed)` on a multi-select answer: about one answer in twelve is typed, and
+  many are questions or redirections rather than choices.
+- `selected preview:` is no longer appended. The model authored the preview
+  and the label identifies it; echoing it cost a median 267 characters per
+  answer. It stays in `details.answers[].preview`.
 
 Return shape: `{ content: [{ type: "text", text }], details: QuestionnaireResult }`.
 
@@ -440,7 +457,7 @@ Node's built-in runner, `node --import tsx --test`, matching sibling packages.
 | File | Covers |
 |---|---|
 | `validate.test.ts` | every §5.2 rule, both directions |
-| `envelope.test.ts` | single/multi answers, preview suffix, notes suffix, cancelled, zero-answers → decline |
+| `envelope.test.ts` | single/multi answers, typed marker, preview kept out of the text, notes suffix, cancelled with and without earlier answers, zero-answers → decline |
 | `questionnaire.test.ts` | advance/revisit, sentinel append + strip, multiselect toggling, custom-answer override |
 | `option-list.test.ts` | digit hotkeys incl. >9 options guard, Tab→input transition, Esc unwinds input before dialog |
 | `reconcile.test.ts` | strip when `!hasUI`, restore when `hasUI`, idempotent, siblings untouched |
