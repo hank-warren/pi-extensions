@@ -9,6 +9,7 @@ import {
   type AutoPermissionsConfig,
 } from "./config.js";
 import { resolveGuardianCompleteSimple } from "./guardian-transport.js";
+import type { HcTerminal } from "./hc-terminal.js";
 import { detectSubagentContext } from "./subagent-context.js";
 import { detectUnattended, unattendedSystemPrompt } from "./unattended.js";
 import { mergeOverrideEvidence } from "./override-evidence.js";
@@ -197,7 +198,7 @@ export interface GuardianReviewer {
  * invalidates the cached conversation the other two describe.
  */
 export function createGuardianReviewer(
-  deps: { overrides: SessionOverrides },
+  deps: { overrides: SessionOverrides; hcTerminal?: () => HcTerminal | undefined },
 ): GuardianReviewer {
   let reviewerLineage: ReviewerLineage | undefined;
   /**
@@ -273,6 +274,7 @@ export function createGuardianReviewer(
         config.reviewEvidence.userAnswerTools,
         DEFAULT_EVIDENCE_CAPS,
         config.reviewEvidence.userMessageTypes,
+        deps.hcTerminal?.(),
       ),
       deps.overrides.list(),
     );
@@ -348,6 +350,7 @@ export function createGuardianReviewer(
     const evidenceKeys = evidence.map((record) => record.key);
     const budget = reviewContextBudget(model.contextWindow);
 
+    const hcTerminalId = deps.hcTerminal?.()?.id;
     const request = {
       tool: toolName,
       input,
@@ -355,6 +358,7 @@ export function createGuardianReviewer(
       gate: gate.label,
       group: gate.group,
       ...(subagentContext ? { execution: subagentContext } : {}),
+      ...(hcTerminalId ? { hcTerminal: hcTerminalId } : {}),
       ...(scope.target.scriptToolCallId ? { issuedByScript: scope.target.scriptToolCallId } : {}),
     };
     const makeUserMessage = (records: readonly ReviewEvidenceRecord[], mode: "full" | "delta"): Message => ({

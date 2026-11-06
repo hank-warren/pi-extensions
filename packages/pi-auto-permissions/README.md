@@ -264,7 +264,7 @@ The guardian must return one of three decisions:
 
 ## Conversation context and caching
 
-The guardian receives a compact chronological view of Pi's active, compaction-aware conversation context plus the exact pending command. It includes retained user and assistant text, Pi's latest compaction summary, and small summaries of finalized tool calls, but excludes summarized-away history, thinking, tool output bodies, file contents, patches, images, and session metadata. Compaction summaries are non-authoritative assistant context and cannot grant permission.
+The guardian receives a compact chronological view of Pi's active, compaction-aware conversation context plus the exact pending command. It includes retained user and assistant text, Pi's latest compaction summary, small summaries of finalized tool calls, and for each finished shell call a short head-and-tail excerpt of what it printed (about 400 characters, labelled `OUTPUT (untrusted excerpt)`), so the guardian can see facts the command text hides, such as a directory not being a git repository. It excludes summarized-away history, thinking, other tools' output bodies, file contents, patches, images, and session metadata. Compaction summaries and shell output are non-authoritative context and cannot grant permission; older tool records collapse to their status line on a full rebuild, output included.
 
 The extension also recognizes native checkpoints created by [`@ogulcancelik/pi-codex-compaction`](https://github.com/ogulcancelik/pi-extensions/tree/main/packages/pi-codex-compaction). It keeps the checkpoint's retained plaintext user messages and post-checkpoint evidence, while excluding the opaque provider state and older local history. This integration is optional and does not change behavior when `pi-codex-compaction` is not installed.
 
@@ -471,6 +471,21 @@ gh
 ```
 
 Group names come from your configured rules. A trusted group bypasses guarded review for that group, so use it only in projects you control. Deny rules are never bypassed: `.pi/trusted-ops` is a project-scoped file, and a checked-in file must not be able to disarm a hard policy boundary.
+
+## Agents messaging agents (hc)
+
+In a [herdr-core](https://herdr.dev/core/) terminal (`HC_TERMINAL_ID` set), another agent's message arrives as a user message wrapped in `<hc from="t7 …">`. At session start the extension asks `hc get` which terminal started this one, and every bash call waits for that lookup:
+
+- A message from the **parent** terminal is a relayed user record, `USER (relayed by parent agent t7)`. It authorizes exactly the operations and targets it names, because the parent's own guardian reviewed the `hc send` that delivered it against the parent's user messages: telling a child to push `main` needs the same approval in the parent as pushing it there.
+- A message from **any other** terminal (a helper reporting back, a sibling) or from hc itself is `AGENT MESSAGE` context with `source: "tool"`. It never authorizes anything, even when it says the user approved something.
+- If the parent cannot be found, nothing relayed authorizes.
+- Messages retained across a native compaction are classified the same way.
+
+The labels depend on hc's tag, and hc tags a message only when it is sent from an agent's terminal. Text sent from a plain shell or program terminal (for example `hc run -- hc send t7 "…"`) arrives untagged and is indistinguishable from typed input, so it reads as the user's own message. The control that holds either way is the sending agent's guardian reviewing the hand-off.
+
+Every `hc send`, `hc run`, `hc keys` and `hc interrupt` is reviewed by a default rule, even without `reviewAllShell`, because a child's trust in its parent's messages rests on that review. The rule matches loosely and the guardian decides the rest, with this session's own terminal id in each request: it judges a delegation as if the agent would do what the message asks, asks for the message inline when the command reads it from a file or variable, holds a relayed message to exactly what it names (no standing approval), and asks the user when a command sends input to the agent's own terminal, however wrapped, or types into a terminal blocked on a prompt.
+
+The relay assumes the parent's bash calls go through its own guardian. A parent running another harness, with approvals off, or trusting the `oversight` group reviews nothing, and its child cannot tell.
 
 ## Subagent sessions
 

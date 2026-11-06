@@ -55,7 +55,24 @@ const FIXTURES: RuleFixture[] = [
 			"tmux send-keys -t %5 'npm test' Enter",
 			"tmux send-keys -t build-pane Enter",
 			"tmux list-panes",
+			"hc send $HC_TERMINAL_ID yes",
 		],
+	},
+	{
+		label: "Input to another hc terminal",
+		matches: [
+			'hc send t7 "merge PR 84"',
+			'hc run --bg --name review --cwd /repo reviewer "review src/x.rs"',
+			"hc keys t7 down enter",
+			"hc interrupt t7",
+			// Wrapped and indirect forms are reviewed too; the guardian resolves the target.
+			'hc run -- hc send $HC_TERMINAL_ID "yes"',
+			"bash -c \"hc send \\$HC_TERMINAL_ID yes\"",
+			'T=$HC_TERMINAL_ID; hc send "$T" yes',
+			"if true; then hc send t20 yes; fi",
+			"hc --if idle send t20 yes",
+		],
+		nearMisses: ["hc read t7 --lines 40", "hc ls", "hc wait --children any", "hc templates", "hc get t7 --json"],
 	},
 	{
 		label: "Session transcript write",
@@ -348,6 +365,21 @@ const FIXTURES: RuleFixture[] = [
 ];
 
 describe("default ruleset", () => {
+	test("hard-denies only what no session should ever do", () => {
+		assert.deepEqual(
+			DEFAULT_RULES.filter((rule) => rule.level === "deny").map((rule) => rule.label),
+			[
+				"Agent oversight bypass",
+				"Self-driving keystrokes",
+				"Session transcript write",
+				"Delete of a critical path",
+				"Delete of the home directory",
+				// Stays deny: an unset variable turns it into a root delete, and its message already asks for the literal path.
+				"Glob delete under a shell variable",
+			],
+		);
+	});
+
 	test("ships a non-empty ruleset with unique labels and messages on every deny rule", () => {
 		assert.ok(DEFAULT_RULES.length >= 25, `expected a full ruleset, got ${DEFAULT_RULES.length}`);
 		const labels = DEFAULT_RULES.map((rule) => rule.label);

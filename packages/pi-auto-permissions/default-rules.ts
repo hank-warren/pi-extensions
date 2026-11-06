@@ -48,6 +48,14 @@ const OVERSIGHT_RULES: readonly Gate[] = [
     message: "Sending keystrokes to this agent's own terminal pane drives its own interface, which amounts to changing its own permissions or oversight. Target an explicit other pane with -t if you are automating a different process.",
   },
   {
+    // Matched loosely on purpose: the guardian, not this pattern, decides who the target is.
+    // A child trusts its parent's hc messages because this review happened; it must not depend on reviewAllShell.
+    pattern: /\bhc\b[^\n]*\b(?:send|run|keys|interrupt)\b/i,
+    level: "guarded",
+    group: "oversight",
+    label: "Input to another hc terminal",
+  },
+  {
     pattern: /(?:>>?|\btee\b|\bsed\s+-i\b|\bcp\b|\bmv\b|\brm\b|\btruncate\b)[^|&;]*(?:\$\{?PI_CODING_AGENT_DIR\}?|\.pi\/agent)\/sessions\b/i,
     level: "deny",
     group: "oversight",
@@ -73,10 +81,9 @@ const DESTRUCTIVE_RULES: readonly Gate[] = [
   },
   {
     pattern: /\b(?:rm|rmdir)\b[^|&;]*\s['"]?\.\.?\/?['"]?(?=\s|$|[;|&])/i,
-    level: "deny",
+    level: "guarded",
     group: "destructive",
     label: "Delete of the working directory or a parent",
-    message: "Deleting the current directory or a parent destroys the workspace this session runs in. Name the specific entry inside it you actually mean.",
   },
   {
     pattern: /\brm\b[^|&;]*\s['"]?\$\{?[A-Za-z_]\w*\}?['"]?\/\*/i,
