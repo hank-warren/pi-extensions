@@ -29,35 +29,6 @@ import type { Gate } from "./gates.js";
  *   these rules are the deterministic prefilter.
  */
 
-/** `hc` in command position, so an `hc send` quoted inside a message is not one. */
-const HC_COMMAND_START = String.raw`(?:^|[;&|(\n]\s*|\$\(\s*|` + "`" + String.raw`\s*|\b(?:sudo|exec|command|xargs|env|nohup|time|timeout\s+\S+)\s+|\b\w+=\S*\s+)`;
-/** hc keys/send/interrupt options before the terminal argument; only --if and --timeout take a value. */
-const HC_OPTIONS = String.raw`(?:\s+(?:--(?:if|timeout)(?:=\S+|\s+\S+)|--?[\w-]+))*`;
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-/**
- * Keystrokes or input into this agent's own terminal: a tmux send-keys without -t or
- * aimed at $TMUX_PANE, and hc keys/send/interrupt whose terminal argument (the first
- * word after any options) is $HC_TERMINAL_ID or this terminal's literal id, read from
- * the environment when the rules are built. Only the terminal argument counts, so a
- * message that mentions this terminal ("report back to t13") is not self-driving.
- */
-export function selfDrivingPattern(terminalId: string | undefined): RegExp {
-  const self = [String.raw`\$\{?HC_TERMINAL_ID\}?`];
-  if (terminalId && /^[\w.-]+$/.test(terminalId)) self.push(String.raw`(?:[\w.-]+/)?${escapeRegExp(terminalId)}`);
-  return new RegExp(
-    [
-      String.raw`\btmux\s+send-keys\b(?![^|&;]*\s-t)`,
-      String.raw`\btmux\s+send-keys\b[^|&;]*\s-t[= ]?\s*['"]?\$\{?TMUX_PANE`,
-      `${HC_COMMAND_START}hc\\s+(?:keys|send|interrupt)${HC_OPTIONS}\\s+['"]?(?:${self.join("|")})['"]?(?=\\s|$|[;|&])`,
-    ].join("|"),
-    "i",
-  );
-}
-
 /** Shell-write prefix: redirection or a write verb, then no command separator. */
 const WRITE = String.raw`(?:>>?|\btee\b|\bsed\s+-i\b|\bcp\b|\bmv\b)[^|&;]*`;
 
@@ -70,24 +41,19 @@ const OVERSIGHT_RULES: readonly Gate[] = [
     message: "Launching an agent with approvals or sandboxing disabled removes the oversight this session runs under. Run the agent with its normal approval flow instead.",
   },
   {
-    pattern: selfDrivingPattern(process.env.HC_TERMINAL_ID),
+    pattern: /\btmux\s+send-keys\b(?![^|&;]*\s-t)|\btmux\s+send-keys\b[^|&;]*\s-t[= ]?\s*['"]?\$\{?TMUX_PANE/i,
     level: "deny",
     group: "oversight",
     label: "Self-driving keystrokes",
-    message: "Sending keystrokes or input to this agent's own terminal answers prompts meant for a human. Target another terminal explicitly if you are automating a different process.",
+    message: "Sending keystrokes to this agent's own terminal pane drives its own interface, which amounts to changing its own permissions or oversight. Target an explicit other pane with -t if you are automating a different process.",
   },
   {
-    pattern: /\bhc\s+keys\b/i,
-    level: "guarded",
-    group: "oversight",
-    label: "Keystrokes into another terminal",
-  },
-  {
+    // Matched loosely on purpose: the guardian, not this pattern, decides who the target is.
     // A child trusts its parent's hc messages because this review happened; it must not depend on reviewAllShell.
-    pattern: /\bhc\s+(?:send|run)\b/i,
+    pattern: /\bhc\b[^\n]*\b(?:send|run|keys|interrupt)\b/i,
     level: "guarded",
     group: "oversight",
-    label: "Message or task for another terminal",
+    label: "Input to another hc terminal",
   },
   {
     pattern: /(?:>>?|\btee\b|\bsed\s+-i\b|\bcp\b|\bmv\b|\brm\b|\btruncate\b)[^|&;]*(?:\$\{?PI_CODING_AGENT_DIR\}?|\.pi\/agent)\/sessions\b/i,

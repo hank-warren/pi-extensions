@@ -350,6 +350,7 @@ export function createGuardianReviewer(
     const evidenceKeys = evidence.map((record) => record.key);
     const budget = reviewContextBudget(model.contextWindow);
 
+    const hcTerminalId = deps.hcTerminal?.()?.id;
     const request = {
       tool: toolName,
       input,
@@ -357,6 +358,7 @@ export function createGuardianReviewer(
       gate: gate.label,
       group: gate.group,
       ...(subagentContext ? { execution: subagentContext } : {}),
+      ...(hcTerminalId ? { hcTerminal: hcTerminalId } : {}),
       ...(scope.target.scriptToolCallId ? { issuedByScript: scope.target.scriptToolCallId } : {}),
     };
     const makeUserMessage = (records: readonly ReviewEvidenceRecord[], mode: "full" | "delta"): Message => ({
