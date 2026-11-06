@@ -1,6 +1,5 @@
 import type { AutoPermissionsConfig } from "./config.js";
 import { ALL_SHELL_GATE, findGates, type Gate } from "./gates.js";
-import { isReadOnlyCommand } from "./read-only.js";
 
 /**
  * What the ruleset says about one command, before any guardian is involved.
@@ -40,13 +39,8 @@ export function classifyCommand(
   // guardian review under the generic gate. "No rule" is judged before the
   // trusted-groups filter: a command whose matching group the project
   // trusts was explicitly waved through, not left unnamed, and must not be
-  // re-captured by the blanket gate. Known read-only commands skip it too,
-  // but only the blanket gate: a rule that names a read (credential files,
-  // say) still reviews it.
-  if (
-    !gate && !ruleMatches.length && config.reviewAllShell && !trustedGroups.has(ALL_SHELL_GATE.group)
-    && !isReadOnlyCommand(command)
-  ) {
+  // re-captured by the blanket gate.
+  if (!gate && !ruleMatches.length && config.reviewAllShell && !trustedGroups.has(ALL_SHELL_GATE.group)) {
     gate = ALL_SHELL_GATE;
   }
   return gate ? { kind: "review", gate } : { kind: "pass" };

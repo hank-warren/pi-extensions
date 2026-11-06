@@ -626,12 +626,10 @@ test("8 · reviewAllShell reviews an unmatched command under the generic gate, u
 		async (harness) => {
 			await harness.sessionStart();
 
-			assert.equal(await harness.toolCall("npm install left-pad"), undefined);
+			assert.equal(await harness.toolCall("echo hello"), undefined);
 			assert.equal(harness.calls.length, 1);
 			assert.match(harness.calls[0].envelope, /"gate": "shell command"/u);
 			assert.match(harness.calls[0].envelope, /"group": "all-shell"/u);
-			assert.equal(await harness.toolCall("cd /tmp && git status && ls | head"), undefined);
-			assert.equal(harness.calls.length, 1, "a known read-only command skips the blanket review");
 		},
 	);
 
@@ -646,7 +644,7 @@ test("8 · reviewAllShell reviews an unmatched command under the generic gate, u
 		async (harness) => {
 			await harness.sessionStart();
 
-			assert.equal(await harness.toolCall("npm install left-pad"), undefined);
+			assert.equal(await harness.toolCall("echo hello"), undefined);
 			assert.deepEqual(harness.calls, [], "a trusted all-shell group is not re-captured by the blanket gate");
 			assert.deepEqual(harness.displays, []);
 		},
