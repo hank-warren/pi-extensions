@@ -32,7 +32,7 @@ describe("auto permissions config", () => {
 		assert.deepEqual(config.rules, [...DEFAULT_RULES]);
 		assert.ok(config.rules.length > 0, "a fresh install ships a live default policy");
 		assert.deepEqual(config.reviewEvidence, {
-			projectInstructions: false,
+			projectInstructions: true,
 			userAnswerTools: [],
 			userMessageTypes: [],
 		});
@@ -111,7 +111,7 @@ describe("auto permissions config", () => {
 				timeoutMs: 12_000,
 			},
 			systemPrompt: "custom permission policy",
-			reviewEvidence: { projectInstructions: true },
+			reviewEvidence: { projectInstructions: false },
 			ui: { enabled: true, resultDisplayMs: 5000 },
 			rules: [
 				{
@@ -132,7 +132,7 @@ describe("auto permissions config", () => {
 		});
 		assert.equal(config.systemPrompt, "custom permission policy");
 		assert.deepEqual(config.reviewEvidence, {
-			projectInstructions: true,
+			projectInstructions: false,
 			userAnswerTools: [],
 			userMessageTypes: [],
 		});
@@ -153,7 +153,7 @@ describe("auto permissions config", () => {
 			reviewEvidence: { userAnswerTools: [" ask_user_question ", "plan_review", "ask_user_question"] },
 		});
 		assert.deepEqual(loadAutoPermissionsConfig(path).reviewEvidence, {
-			projectInstructions: false,
+			projectInstructions: true,
 			userAnswerTools: ["ask_user_question", "plan_review"],
 			userMessageTypes: [],
 		});
@@ -193,7 +193,7 @@ describe("auto permissions config", () => {
 			},
 		});
 		assert.deepEqual(loadAutoPermissionsConfig(path).reviewEvidence, {
-			projectInstructions: false,
+			projectInstructions: true,
 			userAnswerTools: [],
 			userMessageTypes: [],
 		});

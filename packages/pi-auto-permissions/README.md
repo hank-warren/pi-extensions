@@ -47,7 +47,7 @@ What happens when the guardian cannot approve a command (an `ask_user` verdict, 
 
 Set the default with the **Approval mode** row in `/auto-permissions` or `"approvalMode": "auto" | "careful" | "afk"` in the config, and switch one session with `/auto-permissions auto`, `/auto-permissions careful` or `/auto-permissions afk`. A session switch lasts until the session ends, switches again, or the default changes in the menu, and a new or resumed session starts in the configured default. A blocked command lands in the denial log, so **Recent denials → Allow on retry** clears it too.
 
-To keep the agent working while being careful about specific things, say so in your message ("don't push", "treat vistra as read-only"): the guardian blocks matching actions until a later message lifts the boundary. Boundaries you state live in the transcript, so a compaction can drop them; for anything that must always hold, use `guardianPolicy.softDeny` / `hardDeny` or a deny rule.
+To keep the agent working while being careful about specific things, say so in your message ("don't push", "treat vistra as read-only"): the guardian blocks matching actions until a later message lifts the boundary. Boundaries you state live in the transcript, so a compaction can drop them; for anything that must always hold, write it in your own `AGENTS.md` (see [Policy from your instruction files](#policy-from-your-instruction-files)) or use a deny rule.
 
 Subagents keep their own revise-first behavior (see [Subagent sessions](#subagent-sessions)), and an unattended session is always `afk` (see [Unattended sessions](#unattended-sessions)).
 
@@ -157,9 +157,29 @@ Set `enabled` to `false` to disable the extension. Invalid configuration fails c
 
 Set `"reviewAllShell": true` to review every bash command that matches no rule under a generic `shell command` gate (group `all-shell`), the analogue of Claude Code's `classifyAllShell`. The rules then act as a severity layer on top of blanket coverage: deny rules still block outright, and everything else — named by a rule or not — goes to the guardian. The trade is one guardian call per command; pair it with a cheap reviewer model. A command whose matching group is listed in `.pi/trusted-ops` was explicitly waved through and is not re-captured by the blanket gate; trusting `all-shell` itself opts a project out of blanket review while keeping the ruleset live. Lineage caching and the evaluation log apply to `all-shell` reviews unchanged.
 
+## Policy from your instruction files
+
+The guardian reads the same `AGENTS.md` / `CLAUDE.md` files Pi loaded into the agent's prompt: the agent directory's, and those in the working directory and its parents. Pi reports them each turn, so the guardian and the agent never disagree about which files apply. Where a file lives decides what it can do:
+
+| File | Treated as | It can |
+|---|---|---|
+| In the agent directory (`~/.pi/agent/AGENTS.md`), or outside any git repository (`~/repos/AGENTS.md`) | **Your policy** | Name what is yours (orgs, hosts, services), make an action routine even if it is block-listed, and require approval for an action. |
+| Inside a git repository | **Project guidance** | Only tighten: its restrictions bind, and it can make an already-allowed step routine. It never clears a block-listed action, because anyone who can change the repository can edit it. |
+
+So write the boundaries you care about where the agent reads them too, for example in `~/repos/AGENTS.md`:
+
+```markdown
+## Approvals
+- Our GitHub orgs acme-corp and example-labs are our own source control.
+- Removing merged worktrees under ~/repos/worktrees is routine cleanup.
+- Customer production hosts (*-prod-*.example.internal) need the exact operation and host named before any change.
+```
+
+In an untrusted project only the agent directory's files are used. Set `reviewEvidence.projectInstructions` to `false` to turn the files off. They end the reviewer prompt and take part in its fingerprint, so editing one starts a fresh reviewer lineage.
+
 ## Define trusted infrastructure
 
-The rules decide *which* commands are reviewed; `guardianPolicy` tells the guardian *how to judge them* against your infrastructure. All four lists are prose — write entries the way you would describe your environment to a new engineer:
+`guardianPolicy` is the reviewer-only alternative to your instruction files: entries the agent never sees, kept in the user-scoped config. The rules decide *which* commands are reviewed; `guardianPolicy` tells the guardian *how to judge them* against your infrastructure. All four lists are prose — write entries the way you would describe your environment to a new engineer:
 
 ```json
 {
@@ -282,17 +302,7 @@ A codemode script runs shell commands from inside it, so judging one of its `bas
 
 Scripts are capped at 8000 characters (head and tail, with an elision marker), and a full reviewer rebuild keeps the source of only the five newest; older ones collapse to `SCRIPT codemode [<call id>] (source elided)`.
 
-Trusted projects may optionally provide their root `AGENTS.md`, or `CLAUDE.md` when no `AGENTS.md` exists, as policy evidence:
-
-```json
-{
-  "reviewEvidence": {
-    "projectInstructions": true
-  }
-}
-```
-
-Project instructions help interpret the requested workflow, but cannot independently authorize an action or override guardian policy.
+Instruction files are covered in [Policy from your instruction files](#policy-from-your-instruction-files).
 
 ### Interactive dialog answers
 

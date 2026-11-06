@@ -34,6 +34,7 @@ import { createReviewDisplay } from "./review-display.js";
 import { createSessionOverrides } from "./session-overrides.js";
 import { createGuardianReviewer } from "./guardian-reviewer.js";
 import { detectHcTerminal, hcTerminalFromEnv, type HcTerminal } from "./hc-terminal.js";
+import type { InstructionFile } from "./instruction-files.js";
 import { registerSettingsCommand } from "./settings-command.js";
 import type { BlockResult, ReviewScope, ReviewTarget } from "./review-scope.js";
 import { detectSubagentContext } from "./subagent-context.js";
@@ -285,7 +286,8 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   // The session is active exactly while the reviewer lifecycle is unaborted:
   // session_shutdown aborts it, session_start synchronously aborts and replaces
   // it, and nothing else touches it.
-  const reviewer = createGuardianReviewer({ overrides, hcTerminal: () => hcTerminal });
+  let instructionFiles: readonly InstructionFile[] | undefined;
+  const reviewer = createGuardianReviewer({ overrides, hcTerminal: () => hcTerminal, instructionFiles: () => instructionFiles });
   const display = createReviewDisplay({ isSessionActive: () => !reviewer.lifecycleSignal.aborted });
 
   /**
@@ -926,6 +928,8 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", (event, ctx) => {
+    // Kept by reference: an extension that runs after this one may still add files.
+    instructionFiles = event.systemPromptOptions?.contextFiles ?? instructionFiles;
     let config: AutoPermissionsConfig | undefined;
     try {
       config = loadAutoPermissionsConfig();
