@@ -24,6 +24,7 @@ EXPECTED_EXTENSION_ENTRYPOINTS = [
     "./packages/pi-auto-name/index.ts",
     "./packages/pi-agents/index.ts",
     "./packages/pi-image-prune/index.ts",
+    "./packages/pi-claude/index.ts",
 ]
 # Public resources must live in inventoried packages: a top-level extensions/
 # or skills/ directory would bypass package validation and ship through the
@@ -73,6 +74,7 @@ PUBLIC_PACKAGES = {
     "packages/pi-auto-name": "@hank-warren/pi-auto-name",
     "packages/pi-agents": "@hank-warren/pi-agents",
     "packages/pi-image-prune": "@hank-warren/pi-image-prune",
+    "packages/pi-claude": "@hank-warren/pi-claude",
 }
 # Sources deliberately duplicated byte-for-byte instead of shared through a
 # package dependency, because sharing them would cost far more than copying
@@ -113,6 +115,10 @@ FORBIDDEN_TEXT = {
     "$CLAUDE_PLUGIN_ROOT": "unresolved Claude plugin root",
     "mcp__": "excluded MCP tool dependency",
 }
+# pi-claude serves Pi's own tools to Claude Code over MCP, so its transcript
+# module must spell Claude Code's MCP tool namespace. That is the wire format of
+# the bridge, not a dependency on an excluded MCP tool; no other file is exempt.
+MCP_NAMESPACE_FILES = {"packages/pi-claude/src/transcript.ts"}
 FORBIDDEN_PARTS = {"__pycache__", ".claude-plugin", ".mcp.json"}
 FORBIDDEN_SUFFIXES = {".pyc", ".pyo"}
 
@@ -457,6 +463,8 @@ def main() -> int:
         if path.suffix in {".md", ".sh", ".py", ".json", ".ts"} and path != Path(__file__).resolve():
             text = path.read_text(encoding="utf-8")
             for needle, message in FORBIDDEN_TEXT.items():
+                if needle == "mcp__" and rel_path.as_posix() in MCP_NAMESPACE_FILES:
+                    continue
                 if needle in text:
                     errors.append(f"{rel_path}: {message} ({needle})")
         if path.read_bytes().startswith(b"#!") and path.suffix != ".py":
