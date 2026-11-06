@@ -163,8 +163,8 @@ The guardian reads the same `AGENTS.md` / `CLAUDE.md` files Pi loaded into the a
 
 | File | Treated as | It can |
 |---|---|---|
-| In the agent directory (`~/.pi/agent/AGENTS.md`), or outside any git repository (`~/repos/AGENTS.md`) | **Your policy** | Name what is yours (orgs, hosts, services), make an action routine even if it is block-listed, and require approval for an action. |
-| Inside a git repository | **Project guidance** | Only tighten: its restrictions bind, and it can make an already-allowed step routine. It never clears a block-listed action, because anyone who can change the repository can edit it. |
+| Directly in the agent directory (`~/.pi/agent/AGENTS.md`), or outside any git repository and outside the agent directory's installed packages (`~/repos/AGENTS.md`) | **Your policy** | Name what is yours (orgs, hosts, services), make an action routine even if it is block-listed, and require approval for an action. |
+| Inside a git repository, or in a package installed under the agent directory | **Project guidance** | Only tighten: its restrictions bind, and it can make an already-allowed step routine. It never clears a block-listed action, because anyone who can change the repository can edit it. |
 
 So write the boundaries you care about where the agent reads them too, for example in `~/repos/AGENTS.md`:
 

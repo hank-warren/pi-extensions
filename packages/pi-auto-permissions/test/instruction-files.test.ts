@@ -30,6 +30,16 @@ describe("instruction files for the guardian", () => {
 		assert.deepEqual(sorted.user, [agent]);
 	});
 
+	test("a package cloned below the agent directory is classified like any other path", () => {
+		const pkg = { path: "/home/u/.pi/agent/git/github.com/x/pkg/AGENTS.md", content: "PKG" };
+		const fromPkg = (dir: string) => dir.startsWith("/home/u/.pi/agent/git/");
+		assert.deepEqual(sortInstructionFiles([agent, pkg], "/home/u/.pi/agent", true, fromPkg), { user: [agent], project: [pkg] });
+		assert.deepEqual(sortInstructionFiles([agent, pkg], "/home/u/.pi/agent", false, fromPkg), { user: [agent], project: [] });
+		// npm installs are not repositories, and still never the user's policy.
+		const npm = { path: "/home/u/.pi/agent/npm/node_modules/@x/pkg/AGENTS.md", content: "NPM" };
+		assert.deepEqual(sortInstructionFiles([npm], "/home/u/.pi/agent", true, () => false), { user: [], project: [npm] });
+	});
+
 	test("a sibling path that only starts like the agent directory is not in it", () => {
 		const lookalike = { path: "/home/u/.pi/agent-evil/AGENTS.md", content: "X" };
 		assert.deepEqual(sortInstructionFiles([lookalike], "/home/u/.pi/agent", true, () => true).project, [lookalike]);

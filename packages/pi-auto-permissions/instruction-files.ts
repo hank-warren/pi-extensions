@@ -1,7 +1,9 @@
 /**
  * The instruction files Pi loaded into the main agent's prompt, sorted for the
- * guardian. A file is the user's own policy when it is in the agent directory,
- * or, in a trusted project, outside any git repository (~/repos/AGENTS.md).
+ * guardian. A file is the user's own policy when it sits directly in the agent
+ * directory, or, in a trusted project, outside both the agent directory (whose
+ * subdirectories hold installed packages) and any git repository
+ * (~/repos/AGENTS.md).
  * A file inside a repository is project guidance that can only tighten, since
  * anyone who can change the repository can edit it. In an untrusted project
  * only the agent directory's files are used.
@@ -32,14 +34,14 @@ export function sortInstructionFiles(
   projectTrusted: boolean,
   inRepository: (dir: string) => boolean = insideGitRepository,
 ): SortedInstructionFiles {
-  const agentRoot = resolve(agentDir) + sep;
+  const agentRoot = resolve(agentDir);
   const sorted: SortedInstructionFiles = { user: [], project: [] };
   for (const file of files) {
     const path = resolve(file.path);
     const entry = { path, content: file.content };
-    if (path.startsWith(agentRoot)) sorted.user.push(entry);
+    if (dirname(path) === agentRoot) sorted.user.push(entry);
     else if (!projectTrusted) continue;
-    else if (inRepository(dirname(path))) sorted.project.push(entry);
+    else if (path.startsWith(agentRoot + sep) || inRepository(dirname(path))) sorted.project.push(entry);
     else sorted.user.push(entry);
   }
   return sorted;
