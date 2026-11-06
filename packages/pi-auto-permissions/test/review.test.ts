@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { findGates } from "../gates.ts";
 import {
+	applyFullRebuildEviction,
 	AUTO_PERMISSIONS_SYSTEM_PROMPT,
 	buildGuardianPolicySection,
 	buildReviewEnvelope,
@@ -20,6 +21,52 @@ function throwsWith(fn: () => unknown, needle: string): void {
 }
 
 describe("compact review evidence", () => {
+	test("carries an untrusted excerpt of shell output, and no other tool's payload", () => {
+		const long = `${"a".repeat(300)}MIDDLE_CANARY${"z".repeat(300)}`;
+		const entries = [
+			{ id: "u1", type: "message", message: { role: "user", content: "clean up the canary" } },
+			{
+				id: "a1",
+				type: "message",
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "toolCall", id: "bash-1", name: "bash", arguments: { command: "git -C /tmp/canary/work status" } },
+						{ type: "toolCall", id: "bash-2", name: "functions.bash", arguments: { command: "cat big.log" } },
+						{ type: "toolCall", id: "bash-3", name: "bash", arguments: { command: "true" } },
+						{ type: "toolCall", id: "read-1", name: "read", arguments: { path: "/repo/README.md" } },
+						{ type: "toolCall", id: "pending", name: "bash", arguments: { command: "git push --force origin main" } },
+					],
+				},
+			},
+			{ id: "r1", type: "message", message: { role: "toolResult", toolCallId: "bash-1", toolName: "bash", isError: true, content: [{ type: "text", text: "fatal: not a git repository\n" }] } },
+			{ id: "r2", type: "message", message: { role: "toolResult", toolCallId: "bash-2", toolName: "functions.bash", isError: false, content: [{ type: "text", text: long }] } },
+			{ id: "r3", type: "message", message: { role: "toolResult", toolCallId: "bash-3", toolName: "bash", isError: false, content: [{ type: "text", text: "  \n" }] } },
+			{ id: "r4", type: "message", message: { role: "toolResult", toolCallId: "read-1", toolName: "read", isError: false, content: [{ type: "text", text: "FILE_CONTENT_CANARY" }] } },
+		];
+
+		const records = collectReviewEvidence(entries, "pending", [], DEFAULT_EVIDENCE_CAPS);
+		assert.deepEqual(records.map((record) => record.source), ["user", "tool", "tool", "tool", "tool"]);
+		assert.equal(
+			records[1]!.text,
+			'TOOL bash {"command":"git -C /tmp/canary/work status"} → error\nOUTPUT (untrusted excerpt): fatal: not a git repository',
+		);
+		assert.match(records[2]!.text, /\nOUTPUT \(untrusted excerpt\): a{280}\n…\[truncated \d+ chars\]…\nz{120}$/u);
+		assert.ok(!records[2]!.text.includes("MIDDLE_CANARY"), "the middle of long output is elided");
+		assert.equal(records[3]!.text, 'TOOL bash {"command":"true"} → success', "blank output adds nothing");
+		assert.equal(records[4]!.text, 'TOOL read {"path":"/repo/README.md"} → success');
+		assert.ok(!JSON.stringify(records).includes("FILE_CONTENT_CANARY"));
+
+		// Older records collapse to their status; an excerpt never changes it.
+		const collapsed = applyFullRebuildEviction(records, 1);
+		assert.deepEqual(collapsed.slice(1).map((record) => record.text), [
+			"TOOL bash → error",
+			"TOOL functions.bash → success",
+			"TOOL bash → success",
+			'TOOL read {"path":"/repo/README.md"} → success',
+		]);
+	});
+
 	test("keeps chronological text and finalized tool status without leaking bulk content or the pending call", () => {
 		const entries = [
 			{ id: "u1", type: "message", message: { role: "user", content: "squash this then push" } },
@@ -469,6 +516,7 @@ describe("evidence pruning", () => {
 			compactionRecordMaxChars: 4000,
 			scriptRecordMaxChars: 8000,
 			nestedRecordMaxChars: 2000,
+			toolOutputMaxChars: 400,
 		});
 		assert.equal(FULL_REBUILD_KEEP_TOOL_RECORDS, 60);
 	});
@@ -693,8 +741,9 @@ describe("unresolvable-target rule", () => {
 			.split("\n\n")
 			.find((block) => block.startsWith("Unresolvable destructive targets:"));
 		assert.ok(paragraph, "the unresolvable-target paragraph must exist");
-		// The reviewer is output-blind, so an unassigned variable is unknowable.
-		assert.ok(paragraph.includes("you never see command output"));
+		// The reviewer sees only excerpts of output, so an unassigned variable is usually unknowable.
+		assert.ok(paragraph.includes("you see at most a short excerpt of earlier shell output"));
+		assert.ok(paragraph.includes("or a shell output excerpt that shows it"));
 		assert.ok(paragraph.includes("must not be approved unless the evidence you can see assigns that variable a literal value"));
 		// Globs rooted at a variable are covered, not just bare variables.
 		assert.ok(paragraph.includes("a glob or path rooted at one"));
