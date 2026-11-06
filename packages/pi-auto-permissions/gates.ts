@@ -18,6 +18,12 @@ export interface Gate {
   group: string;
   label: string;
   message?: string;
+  /**
+   * Match against normalizeCommandLines(command) rather than the raw command.
+   * Set only on the built-in rules, which are written for it; authored rules
+   * keep matching the raw text, so their anchors and newlines mean what they did.
+   */
+  normalizedLines?: true;
 }
 
 /**
@@ -95,9 +101,11 @@ export function normalizeCommandLines(command: string): string {
 }
 
 export function findGates(command: string, rules: readonly Gate[]): Gate[] {
-  const joined = normalizeCommandLines(command);
+  let normalized: string | undefined;
   return rules.filter((gate) => {
     gate.pattern.lastIndex = 0;
-    return gate.pattern.test(joined);
+    if (!gate.normalizedLines) return gate.pattern.test(command);
+    normalized ??= normalizeCommandLines(command);
+    return gate.pattern.test(normalized);
   });
 }

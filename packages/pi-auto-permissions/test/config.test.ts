@@ -389,6 +389,9 @@ describe("auto permissions config", () => {
 			config.rules.map((rule) => rule.label),
 			[...DEFAULT_RULES.map((rule) => rule.label), "Custom"],
 		);
+		// Only the built-ins match normalized command lines; an authored rule sees the raw text.
+		assert.ok(config.rules.slice(0, -1).every((rule) => rule.normalizedLines === true));
+		assert.equal(config.rules.at(-1)!.normalizedLines, undefined);
 	});
 
 	test("loads a prompt file relative to the config", () => {

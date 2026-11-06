@@ -497,6 +497,14 @@ describe("default ruleset", () => {
 		assert.equal(normalizeCommandLines("echo a#b\nrm x"), "echo a#b\nrm x", "# inside a word is not a comment");
 	});
 
+	test("authored rules match the raw command, so their anchors keep working", () => {
+		const anchored = { pattern: /^rm\b/im, level: "deny" as const, group: "custom", label: "Line-start rm", message: "no" };
+		const command = 'echo "$(pwd)"\nrm -rf /tmp/work';
+		assert.deepEqual(findGates(command, [anchored]).map((gate) => gate.label), ["Line-start rm"]);
+		assert.deepEqual(findGates("echo 'a\nrm b'", [anchored]).map((gate) => gate.label), ["Line-start rm"]);
+		assert.ok(DEFAULT_RULES.every((rule) => rule.normalizedLines === true), "every built-in rule opts in");
+	});
+
 	test("an escaped backslash before a newline does not continue the command", () => {
 		assert.equal(normalizeCommandLines("echo a\\\\\nrm -rf /"), "echo a\\\\\nrm -rf /");
 		assert.equal(normalizeCommandLines("echo a\\\\\\\nb"), "echo a\\\\b");

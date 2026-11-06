@@ -29,8 +29,9 @@ import type { Gate } from "./gates.js";
  *   these rules are the deterministic prefilter.
  */
 
-// "Same command" below is `[^|&;\n]*`: no `|`, `&`, `;` or newline. findGates joins line
-// continuations and quoted newlines first (normalizeCommandLines), so neither ends a command.
+// "Same command" below is `[^|&;\n]*`: no `|`, `&`, `;` or newline. These rules are marked
+// normalizedLines, so findGates joins line continuations and quoted newlines first
+// (normalizeCommandLines) and neither ends a command. Authored rules match the raw text.
 
 /** Shell-write prefix: redirection or a write verb, then no command separator. */
 const WRITE = String.raw`(?:>>?|\btee\b|\bsed\s+-i\b|\bcp\b|\bmv\b)[^|&;\n]*`;
@@ -265,4 +266,4 @@ export const DEFAULT_RULES: readonly Gate[] = [
   ...SUPPLY_CHAIN_RULES,
   ...REVIEW_RULES,
   ...PROTECTED_PATH_RULES,
-];
+].map((rule) => ({ ...rule, normalizedLines: true as const }));
