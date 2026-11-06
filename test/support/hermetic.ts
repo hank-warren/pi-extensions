@@ -57,6 +57,10 @@ const CLEARED_ENV = [
 	// Auto Permissions: unattended sessions and who may approve in them.
 	"PI_AUTO_PERMISSIONS_UNATTENDED",
 	"PI_AUTO_PERMISSIONS_APPROVERS",
+	// herdr-core: the terminal a test process runs in, which Auto Permissions reads to find its parent and itself.
+	"HC_SCOPE",
+	"HC_TERMINAL_ID",
+	"HC_TERMINAL_SOCKET",
 	// pi-agents: everything a parent sets for its child, and the config override.
 	"PI_AGENTS_CHILD",
 	"PI_AGENTS_NAME",
