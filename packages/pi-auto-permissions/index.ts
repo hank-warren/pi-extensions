@@ -919,10 +919,12 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     return decide(scope, input, lifecycleSignal, early ?? runReview(scope, input, lifecycleSignal));
   });
 
-  pi.on("before_agent_start", (event) => {
+  pi.on("before_agent_start", (event, ctx) => {
     let config: AutoPermissionsConfig | undefined;
     try {
       config = loadAutoPermissionsConfig();
+      // Another session's menu may have changed the configured mode since this one started.
+      showApprovalMode(ctx, approvalModeOf(config));
       if (!config.enabled) return;
     } catch {
       // An invalid config fails closed on the first bash call; the guidance still applies.
@@ -961,6 +963,12 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
         blocks.reset();
         showApprovalMode(ctx, mode);
         return undefined;
+      },
+      followConfig(mode, ctx) {
+        if (unattendedSession) return;
+        sessionApprovalMode = undefined;
+        blocks.reset();
+        showApprovalMode(ctx, mode);
       },
     },
   });

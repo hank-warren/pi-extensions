@@ -22,6 +22,7 @@ const HOME = "/home/tester";
 function settings(overrides: Partial<ReviewerSettings> = {}): ReviewerSettings {
 	return {
 		enabled: true,
+		approvalMode: "auto",
 		reviewer: { provider: "openai-codex", model: "gpt-5.6-luna", reasoningEffort: "medium", timeoutMs: 30_000 },
 		reviewConcurrency: 4,
 		systemPromptSource: { kind: "file", path: `${HOME}/.pi/agent/pi-auto-permissions/system-prompt.md` },
@@ -38,6 +39,7 @@ describe("settings rows", () => {
 		const items = buildSettingItems(settings(), {}, HOME);
 		assert.deepEqual(items.map((item) => item.id), [
 			"enabled",
+			"approvalMode",
 			"reviewerModel",
 			"reasoningEffort",
 			"timeoutMs",
@@ -46,6 +48,7 @@ describe("settings rows", () => {
 		]);
 		assert.deepEqual(values(items), {
 			enabled: "on",
+			approvalMode: "auto",
 			reviewerModel: "openai-codex/gpt-5.6-luna",
 			reasoningEffort: "medium",
 			timeoutMs: "30s",
@@ -62,6 +65,7 @@ describe("settings rows", () => {
 		);
 		assert.deepEqual(values(items), {
 			enabled: "off",
+			approvalMode: "auto",
 			reviewerModel: "(unset)",
 			reasoningEffort: "low",
 			timeoutMs: "30s",
@@ -98,6 +102,16 @@ describe("enabled toggle", () => {
 
 	test("an unknown value is rejected", () => {
 		assert.equal(applySettingChange(settings(), "enabled", "maybe").kind, "error");
+	});
+
+	test("approval mode cycles through the modes and rejects anything else", () => {
+		const row = buildSettingItems(settings(), {}, HOME).find((item) => item.id === "approvalMode");
+		assert.deepEqual(row?.values, ["auto", "careful", "afk"]);
+		const change = applySettingChange(settings(), "approvalMode", "afk");
+		assert.equal(change.kind, "settings");
+		assert.equal(change.kind === "settings" && change.settings.approvalMode, "afk");
+		assert.equal(applySettingChange(settings(), "approvalMode", "auto").kind, "ignored");
+		assert.equal(applySettingChange(settings(), "approvalMode", "yolo").kind, "error");
 	});
 });
 
@@ -290,7 +304,7 @@ describe("submenu-owned rows", () => {
 });
 
 describe("recent denials row", () => {
-	const settings = { enabled: true, reviewConcurrency: 4, systemPromptSource: { kind: "builtin" } } as const;
+	const settings = { enabled: true, approvalMode: "auto", reviewConcurrency: 4, systemPromptSource: { kind: "builtin" } } as const;
 
 	test("appears only when the submenu is wired, with the count as its value", () => {
 		const submenu = (() => { throw new Error("unused"); }) as never;

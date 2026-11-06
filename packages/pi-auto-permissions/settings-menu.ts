@@ -18,6 +18,8 @@ import {
   truncateToWidth,
 } from "@earendil-works/pi-tui";
 import {
+  APPROVAL_MODES,
+  type ApprovalMode,
   DEFAULT_REVIEWER_REASONING_EFFORT,
   DEFAULT_REVIEWER_TIMEOUT_MS,
   MAX_REVIEW_CONCURRENCY,
@@ -30,6 +32,7 @@ import {
 } from "./config.js";
 
 const ENABLED_ID = "enabled";
+const APPROVAL_MODE_ID = "approvalMode";
 const REVIEWER_MODEL_ID = "reviewerModel";
 const THINKING_LEVEL_ID = "reasoningEffort";
 const TIMEOUT_ID = "timeoutMs";
@@ -48,6 +51,7 @@ const NO_REVIEWER_MESSAGE = "Select a reviewer model first";
 /** The slice of the config the menu edits, plus the read-only prompt source. */
 export interface ReviewerSettings {
   enabled: boolean;
+  approvalMode: ApprovalMode;
   reviewer?: ReviewerConfig;
   reviewConcurrency: number;
   systemPromptSource: SystemPromptSource;
@@ -170,6 +174,14 @@ export function buildSettingItems(
       values: TOGGLE_VALUES,
     },
     {
+      id: APPROVAL_MODE_ID,
+      label: "Approval mode",
+      description:
+        "When the guardian can't approve a command: auto blocks it and prompts only after repeated blocks, careful prompts at once, afk never prompts. Applies to every session; /auto-permissions <mode> overrides one session. Unattended sessions are always afk.",
+      currentValue: settings.approvalMode,
+      values: [...APPROVAL_MODES],
+    },
+    {
       id: REVIEWER_MODEL_ID,
       label: "Reviewer model",
       description: "Model the guardian reviews guarded commands with.",
@@ -239,6 +251,14 @@ export function applySettingChange(
     const enabled = value === ON;
     if (enabled === settings.enabled) return { kind: "ignored" };
     return { kind: "settings", settings: { ...settings, enabled } };
+  }
+
+  if (id === APPROVAL_MODE_ID) {
+    if (!(APPROVAL_MODES as readonly string[]).includes(value)) {
+      return { kind: "error", message: `Unknown approval mode: ${value}` };
+    }
+    if (value === settings.approvalMode) return { kind: "ignored" };
+    return { kind: "settings", settings: { ...settings, approvalMode: value as ApprovalMode } };
   }
 
   if (id === THINKING_LEVEL_ID) {

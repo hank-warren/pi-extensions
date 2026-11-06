@@ -48,6 +48,8 @@ const MODE_NOTICES: Record<ApprovalMode, string> = {
 export interface ApprovalModeControl {
   /** Switch this session's mode; returns why it cannot, or undefined. */
   set(mode: ApprovalMode, ctx: ExtensionContext): string | undefined;
+  /** The configured mode changed in the menu: drop this session's override and follow it. */
+  followConfig(mode: ApprovalMode, ctx: ExtensionContext): void;
 }
 
 export function registerSettingsCommand(
@@ -105,6 +107,7 @@ export function registerSettingsCommand(
         const config = loadAutoPermissionsConfig(path);
         settings = {
           enabled: config.enabled,
+          approvalMode: config.approvalMode,
           reviewer: config.reviewer,
           reviewConcurrency: config.reviewConcurrency,
           systemPromptSource: config.systemPromptSource,
@@ -131,7 +134,8 @@ export function registerSettingsCommand(
           patchAutoPermissionsConfig(path, {
             enabled: settings.enabled,
             reviewer: settings.reviewer,
-            // Only when this edit changed it, so a hand-written value is never rewritten by an unrelated save.
+            // Only when this edit changed them, so a hand-written value is never rewritten by an unrelated save.
+            ...(settings.approvalMode !== previous.approvalMode ? { approvalMode: settings.approvalMode } : {}),
             ...(settings.reviewConcurrency !== previous.reviewConcurrency
               ? { reviewConcurrency: settings.reviewConcurrency }
               : {}),
@@ -143,6 +147,7 @@ export function registerSettingsCommand(
           return;
         }
         if (change.kind === "warn") ctx.ui.notify(change.message, "warning");
+        if (settings.approvalMode !== previous.approvalMode) approvalMode.followConfig(settings.approvalMode, ctx);
         // A breakage elsewhere in the file would otherwise surface at the next
         // bash call, looking like this edit caused it.
         try {
