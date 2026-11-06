@@ -145,7 +145,7 @@ Rule fields are:
 - `label`: short description shown during review
 - `message`: optional feedback; required for deny rules
 
-A deny rule is a hard policy boundary: it blocks immediately with its message, is evaluated before every other level, and nothing lifts it — not a trusted group, not user approval at a prompt. Reserve it for operations that should never happen in an agent session (disabling agent oversight, deleting critical paths), and use `guarded` where a human judgment call is legitimate.
+A deny rule is a hard policy boundary: it blocks immediately with its message, is evaluated before every other level, and nothing lifts it — not a trusted group, not user approval at a prompt. Reserve it for operations that should never happen in an agent session (disabling agent oversight, deleting critical paths), and use `guarded` where a human judgment call is legitimate. One exception: rules match raw text, so in a multi-line command a deny pattern can match across lines the shell runs as separate commands. A deny match on a command containing a newline is therefore sent to the guardian under that rule's label instead of blocked outright; it is still reviewed, never passed. Single-line matches stay hard denies.
 
 When several rules match one command, the most severe level wins (deny, then guarded) regardless of their order in the list.
 

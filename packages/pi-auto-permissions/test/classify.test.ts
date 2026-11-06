@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { classifyCommand } from "../classify.ts";
+import { DEFAULT_RULES } from "../default-rules.ts";
 import type { AutoPermissionsConfig } from "../config.ts";
 import type { Gate, GateLevel } from "../gates.ts";
 
@@ -36,6 +37,21 @@ describe("classifyCommand", () => {
 		const classified = classifyCommand("echo danger", config(rules), NOTHING);
 		assert.equal(classified.kind, "deny");
 		assert.equal(classified.kind === "deny" && classified.gate.label, "Deny last");
+	});
+
+	test("a deny match in a multi-line command is reviewed, never blocked outright or passed", () => {
+		const defaults = config([...DEFAULT_RULES]);
+		// Observed live: the sed address on line two read as a root-level delete target.
+		const script = "rm -f /tmp/agents-hc-wait.py\nsed -n '/^## Delegation/,/^## Background/p' ~/.pi/agent/AGENTS.md";
+		const reviewed = classifyCommand(script, defaults, NOTHING);
+		assert.equal(reviewed.kind, "review");
+		assert.equal(reviewed.kind === "review" && reviewed.gate.label, "Delete of a critical path");
+
+		assert.equal(classifyCommand("rm -rf /", defaults, NOTHING).kind, "deny", "a single line stays a hard deny");
+		assert.equal(classifyCommand("true\nrm -rf /", defaults, NOTHING).kind, "review");
+		assert.equal(classifyCommand("true\r\nrm -rf /", defaults, NOTHING).kind, "review");
+		// Trusting the deny rule's group lifts nothing here either.
+		assert.equal(classifyCommand("true\nrm -rf /", defaults, new Set(["destructive"])).kind, "review");
 	});
 
 	test("a trusted group lifts a guarded rule but never a deny rule", () => {

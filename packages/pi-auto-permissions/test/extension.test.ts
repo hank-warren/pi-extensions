@@ -480,6 +480,21 @@ test("2 · a deny rule wins over a guarded rule that matched earlier in config o
 	});
 });
 
+test("2b · a deny match in a multi-line command goes to the guardian, which can approve it", async () => {
+	const rules = [{ pattern: "danger", level: "deny", group: "third", label: "Deny last", message: "Never run this." }];
+	await withExtension(
+		{ rules, completeSimple: () => assistantResponse(verdictText("approve", "the match spans two separate commands")) },
+		async (harness) => {
+			await harness.sessionStart();
+			assert.equal(await harness.toolCall("echo safe\necho danger-zone-docs"), undefined, "approved by the guardian");
+			assert.equal(harness.calls.length, 1, "reviewed under the deny rule's gate");
+			assert.match(JSON.stringify(harness.calls[0]), /Deny last/u);
+			assert.ok((await harness.toolCall("echo danger"))?.block, "the same rule on one line stays a hard deny");
+			assert.equal(harness.calls.length, 1);
+		},
+	);
+});
+
 test("3 · a legacy convention rule blocks as deny without review, and trusted-ops cannot lift it", async () => {
 	const rules = [{
 		pattern: "^npm install",
