@@ -1,5 +1,11 @@
 # @hank-warren/pi-auto-permissions
 
+## 0.27.0
+
+### Minor Changes
+
+- Dialog-answer evidence now quotes the description of each option the user selected, read from the dialog's tool call, so the guardian sees what the user saw beside the label. Typed text never pulls in a description, even when it matches a label, and an unselected option's wording authorizes nothing.
+
 ## 0.26.0
 
 ### Minor Changes
