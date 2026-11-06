@@ -38,6 +38,7 @@ const READ_ONLY = [
 	"ls -la 2>/dev/null | grep -c x >/dev/null && echo yes || echo no",
 	"df -h . | tail -1 | cut -c1-20",
 	"echo hi >&2",
+	"ls 2>/dev/null | head -n 3 2>&1",
 	"ls 2>&-",
 	"timeout 10 git fetch origin",
 	"# just a comment\nls",
@@ -153,6 +154,10 @@ const NOT_READ_ONLY = [
 	'git log "--output\\\n=x"',
 	// A redirect whose fd word is really a file name.
 	"echo overwrite >&1report.txt",
+	// Quoted digits glued to a redirect are an argument, not its fd.
+	"head -c '100000'0>&1 ~/.pi/agent/auth.json",
+	'head -c "5"2>/dev/null ~/.netrc',
+	"head -c \\5>/dev/null secret",
 	"echo x >&2x",
 	"echo x >& out.txt",
 	// A long flag with an optional value must not swallow the next argument.

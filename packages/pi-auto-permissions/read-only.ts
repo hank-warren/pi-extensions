@@ -326,10 +326,14 @@ export function tokenizeShell(command: string): Token[] | undefined {
   const tokens: Token[] = [];
   let word = "";
   let inWord = false;
+  // Whether any part of the current word was quoted or escaped: bash reads only an
+  // unquoted all-digit word glued to a redirect as its fd.
+  let quoted = false;
   const flush = () => {
     if (inWord) tokens.push({ kind: "word", text: word });
     word = "";
     inWord = false;
+    quoted = false;
   };
   for (let i = 0; i < command.length; i++) {
     const c = command[i];
@@ -338,6 +342,7 @@ export function tokenizeShell(command: string): Token[] | undefined {
       if (end < 0) return undefined;
       word += command.slice(i + 1, end);
       inWord = true;
+      quoted = true;
       i = end;
       continue;
     }
@@ -366,6 +371,7 @@ export function tokenizeShell(command: string): Token[] | undefined {
       }
       if (j >= command.length) return undefined;
       inWord = true;
+      quoted = true;
       i = j;
       continue;
     }
@@ -374,6 +380,7 @@ export function tokenizeShell(command: string): Token[] | undefined {
       if (command[i + 1] !== "\n") {
         word += command[i + 1];
         inWord = true;
+        quoted = true;
       }
       i++;
       continue;
@@ -413,7 +420,9 @@ export function tokenizeShell(command: string): Token[] | undefined {
     }
     if (c === "&" && command[i + 1] !== ">") return undefined; // a background job
     if (c === ">" || c === "<" || c === "&") {
-      // A digit-only word glued to the operator is its fd (`2>/dev/null`), not an argument.
+      // A word glued to the operator is ambiguous when partly quoted (`'100'0>&1` is an
+      // argument, not an fd); an unquoted all-digit one is its fd (`2>/dev/null`).
+      if (inWord && quoted) return undefined;
       if (inWord && /^\d+$/u.test(word) && /\d/u.test(command[i - 1] ?? "")) {
         word = "";
         inWord = false;
