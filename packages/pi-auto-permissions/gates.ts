@@ -34,9 +34,19 @@ export const ALL_SHELL_GATE: Gate = {
   label: "shell command",
 };
 
+/**
+ * Join line continuations the way the shell does, so a rule sees `rm -rf \⏎/usr`
+ * as `rm -rf /usr`. Only an unescaped backslash continues a line: `\\⏎` is a
+ * literal backslash followed by a command-ending newline.
+ */
+export function joinLineContinuations(command: string): string {
+  return command.replace(/(?<!\\)((?:\\\\)*)\\\r?\n/g, "$1");
+}
+
 export function findGates(command: string, rules: readonly Gate[]): Gate[] {
+  const joined = joinLineContinuations(command);
   return rules.filter((gate) => {
     gate.pattern.lastIndex = 0;
-    return gate.pattern.test(command);
+    return gate.pattern.test(joined);
   });
 }

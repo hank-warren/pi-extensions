@@ -29,29 +29,29 @@ import type { Gate } from "./gates.js";
  *   these rules are the deterministic prefilter.
  */
 
-// "Same command" below is `(?:\\[\s\S]|[^|&;\n\\])*`: no `|`, `&`, `;` or unescaped newline, while a
-// backslash-escaped character, including a line continuation, stays inside the command.
+// "Same command" below is `[^|&;\n]*`: no `|`, `&`, `;` or newline. findGates joins line
+// continuations first, so a backslash-newline never ends a command.
 
 /** Shell-write prefix: redirection or a write verb, then no command separator. */
-const WRITE = String.raw`(?:>>?|\btee\b|\bsed\s+-i\b|\bcp\b|\bmv\b)(?:\\[\s\S]|[^|&;\n\\])*`;
+const WRITE = String.raw`(?:>>?|\btee\b|\bsed\s+-i\b|\bcp\b|\bmv\b)[^|&;\n]*`;
 
 const OVERSIGHT_RULES: readonly Gate[] = [
   {
-    pattern: /--dangerously-skip-permissions\b|--dangerously-bypass-approvals-and-sandbox\b|--yes-always\b|\b(?:pi|claude|codex)\b(?:\\[\s\S]|[^|&;\n\\])*--no-sandbox\b/i,
+    pattern: /--dangerously-skip-permissions\b|--dangerously-bypass-approvals-and-sandbox\b|--yes-always\b|\b(?:pi|claude|codex)\b[^|&;\n]*--no-sandbox\b/i,
     level: "deny",
     group: "oversight",
     label: "Agent oversight bypass",
     message: "Launching an agent with approvals or sandboxing disabled removes the oversight this session runs under. Run the agent with its normal approval flow instead.",
   },
   {
-    pattern: /\btmux\s+send-keys\b(?!(?:\\[\s\S]|[^|&;\n\\])*\s-t)|\btmux\s+send-keys\b(?:\\[\s\S]|[^|&;\n\\])*\s-t[= ]?\s*['"]?\$\{?TMUX_PANE/i,
+    pattern: /\btmux\s+send-keys\b(?![^|&;\n]*\s-t)|\btmux\s+send-keys\b[^|&;\n]*\s-t[= ]?\s*['"]?\$\{?TMUX_PANE/i,
     level: "deny",
     group: "oversight",
     label: "Self-driving keystrokes",
     message: "Sending keystrokes to this agent's own terminal pane drives its own interface, which amounts to changing its own permissions or oversight. Target an explicit other pane with -t if you are automating a different process.",
   },
   {
-    pattern: /(?:>>?|\btee\b|\bsed\s+-i\b|\bcp\b|\bmv\b|\brm\b|\btruncate\b)(?:\\[\s\S]|[^|&;\n\\])*(?:\$\{?PI_CODING_AGENT_DIR\}?|\.pi\/agent)\/sessions\b/i,
+    pattern: /(?:>>?|\btee\b|\bsed\s+-i\b|\bcp\b|\bmv\b|\brm\b|\btruncate\b)[^|&;\n]*(?:\$\{?PI_CODING_AGENT_DIR\}?|\.pi\/agent)\/sessions\b/i,
     level: "deny",
     group: "oversight",
     label: "Session transcript write",
@@ -61,47 +61,47 @@ const OVERSIGHT_RULES: readonly Gate[] = [
 
 const DESTRUCTIVE_RULES: readonly Gate[] = [
   {
-    pattern: /\b(?:rm|rmdir)\b(?:\\[\s\S]|[^|&;\n\\])*\s['"]?\/[^/\s'"]*\/?['"]?(?=\s|$|[;|&])/i,
+    pattern: /\b(?:rm|rmdir)\b[^|&;\n]*\s['"]?\/[^/\s'"]*\/?['"]?(?=\s|$|[;|&])/i,
     level: "deny",
     group: "destructive",
     label: "Delete of a critical path",
     message: "Deleting the filesystem root or a top-level directory is irreversible system destruction. Name the specific deeper path you actually mean.",
   },
   {
-    pattern: /\b(?:rm|rmdir)\b(?:\\[\s\S]|[^|&;\n\\])*\s['"]?(?:~|\$\{?HOME\}?)\/?['"]?(?=\s|$|[;|&])/i,
+    pattern: /\b(?:rm|rmdir)\b[^|&;\n]*\s['"]?(?:~|\$\{?HOME\}?)\/?['"]?(?=\s|$|[;|&])/i,
     level: "deny",
     group: "destructive",
     label: "Delete of the home directory",
     message: "Deleting the home directory is irreversible. Name the specific path under it you actually mean.",
   },
   {
-    pattern: /\b(?:rm|rmdir)\b(?:\\[\s\S]|[^|&;\n\\])*\s['"]?\.\.?\/?['"]?(?=\s|$|[;|&])/i,
+    pattern: /\b(?:rm|rmdir)\b[^|&;\n]*\s['"]?\.\.?\/?['"]?(?=\s|$|[;|&])/i,
     level: "deny",
     group: "destructive",
     label: "Delete of the working directory or a parent",
     message: "Deleting the current directory or a parent destroys the workspace this session runs in. Name the specific entry inside it you actually mean.",
   },
   {
-    pattern: /\brm\b(?:\\[\s\S]|[^|&;\n\\])*\s['"]?\$\{?[A-Za-z_]\w*\}?['"]?\/\*/i,
+    pattern: /\brm\b[^|&;\n]*\s['"]?\$\{?[A-Za-z_]\w*\}?['"]?\/\*/i,
     level: "deny",
     group: "destructive",
     label: "Glob delete under a shell variable",
     message: "A glob rooted at a shell variable becomes a root delete when the variable is empty or unset. Re-run the delete with the resolved literal path written into the command.",
   },
   {
-    pattern: /\brm\b(?:\\[\s\S]|[^|&;\n\\])*\s(?:['"]?\/tmp\/|['"]?\$\{?TMPDIR\}?[/'"]?)(?:\\[\s\S]|[^|&;\n\\])*\*/i,
+    pattern: /\brm\b[^|&;\n]*\s(?:['"]?\/tmp\/|['"]?\$\{?TMPDIR\}?[/'"]?)[^|&;\n]*\*/i,
     level: "guarded",
     group: "destructive",
     label: "Wildcard delete in shared temp",
   },
   {
-    pattern: /\bfind\b(?:\\[\s\S]|[^|&;\n\\])*\s(?:-delete\b|-exec\s+rm\b)/i,
+    pattern: /\bfind\b[^|&;\n]*\s(?:-delete\b|-exec\s+rm\b)/i,
     level: "guarded",
     group: "destructive",
     label: "Filesystem sweep via find",
   },
   {
-    pattern: /\brm\b(?:\\[\s\S]|[^|&;\n\\])*\s['"]?\$\{?[A-Za-z_]\w*\}?\/?['"]?(?=\s|$|[;|&])/i,
+    pattern: /\brm\b[^|&;\n]*\s['"]?\$\{?[A-Za-z_]\w*\}?\/?['"]?(?=\s|$|[;|&])/i,
     level: "guarded",
     group: "destructive",
     label: "Delete of a shell-variable target",
@@ -110,7 +110,7 @@ const DESTRUCTIVE_RULES: readonly Gate[] = [
 
 const GIT_RULES: readonly Gate[] = [
   {
-    pattern: /\bgit\s+push\b(?:\\[\s\S]|[^|&;\n\\])*(?:\s--force\b|\s--force-with-lease\b|\s-f\b)/i,
+    pattern: /\bgit\s+push\b[^|&;\n]*(?:\s--force\b|\s--force-with-lease\b|\s-f\b)/i,
     level: "guarded",
     group: "git",
     label: "Force push",
@@ -122,7 +122,7 @@ const GIT_RULES: readonly Gate[] = [
     label: "Uncommitted-work destruction",
   },
   {
-    pattern: /\bgit\s+commit\b(?:\\[\s\S]|[^|&;\n\\])*--amend\b/i,
+    pattern: /\bgit\s+commit\b[^|&;\n]*--amend\b/i,
     level: "guarded",
     group: "git",
     label: "Commit amend",
@@ -134,7 +134,7 @@ const GIT_RULES: readonly Gate[] = [
     label: "Remote reconfiguration",
   },
   {
-    pattern: /\bgit\s+push\b(?:\\[\s\S]|[^|&;\n\\])*[\s:](?:production|release|gh-pages)(?=\s|$|[:;|&])/i,
+    pattern: /\bgit\s+push\b[^|&;\n]*[\s:](?:production|release|gh-pages)(?=\s|$|[:;|&])/i,
     level: "guarded",
     group: "git",
     label: "Push to a deploy branch",
@@ -143,19 +143,19 @@ const GIT_RULES: readonly Gate[] = [
 
 const IAC_RULES: readonly Gate[] = [
   {
-    pattern: /\b(?:terraform|pulumi|cdk|terragrunt)\b(?:\\[\s\S]|[^|&;\n\\])*\bdestroy\b/i,
+    pattern: /\b(?:terraform|pulumi|cdk|terragrunt)\b[^|&;\n]*\bdestroy\b/i,
     level: "guarded",
     group: "iac",
     label: "Infrastructure destroy",
   },
   {
-    pattern: /\bkubectl\b(?:\\[\s\S]|[^|&;\n\\])*\s(?:drain|delete\s+node|exec|port-forward)\b/i,
+    pattern: /\bkubectl\b[^|&;\n]*\s(?:drain|delete\s+node|exec|port-forward)\b/i,
     level: "guarded",
     group: "iac",
     label: "Cluster node or pod intrusion",
   },
   {
-    pattern: /\bkubectl\b(?:\\[\s\S]|[^|&;\n\\])*\s(?:delete|scale|patch|label|annotate|cordon|uncordon|taint)\b(?:\\[\s\S]|[^|&;\n\\])*(?:\s--all\b|\s-l[= ]|\s--selector[= ])/i,
+    pattern: /\bkubectl\b[^|&;\n]*\s(?:delete|scale|patch|label|annotate|cordon|uncordon|taint)\b[^|&;\n]*(?:\s--all\b|\s-l[= ]|\s--selector[= ])/i,
     level: "guarded",
     group: "iac",
     label: "Cluster-wide write",
@@ -164,13 +164,13 @@ const IAC_RULES: readonly Gate[] = [
 
 const NET_EXEC_RULES: readonly Gate[] = [
   {
-    pattern: /\b(?:curl|wget)\b(?:\\[\s\S]|[^|&;\n\\])*\|\s*(?:sudo\s+)?(?:bash|sh|zsh|python3?|perl|node)\b/i,
+    pattern: /\b(?:curl|wget)\b[^|&;\n]*\|\s*(?:sudo\s+)?(?:bash|sh|zsh|python3?|perl|node)\b/i,
     level: "guarded",
     group: "net-exec",
     label: "Piped remote code execution",
   },
   {
-    pattern: /\bngrok\b|\bcloudflared\s+tunnel\b|\bssh\b(?:\\[\s\S]|[^|&;\n\\])*\s-R\b|\/dev\/tcp\//i,
+    pattern: /\bngrok\b|\bcloudflared\s+tunnel\b|\bssh\b[^|&;\n]*\s-R\b|\/dev\/tcp\//i,
     level: "guarded",
     group: "net-exec",
     label: "Tunnel or reverse shell",
@@ -179,19 +179,19 @@ const NET_EXEC_RULES: readonly Gate[] = [
 
 const SECRETS_RULES: readonly Gate[] = [
   {
-    pattern: /\baws\s+secretsmanager\s+(?:put|create|update|delete|rotate)|\bvault\s+kv\s+(?:put|patch|destroy|delete)|\bgcloud\s+dns\b|\bcertbot\b|\baz\s+keyvault\b(?:\\[\s\S]|[^|&;\n\\])*\s(?:set|import|delete)\b/i,
+    pattern: /\baws\s+secretsmanager\s+(?:put|create|update|delete|rotate)|\bvault\s+kv\s+(?:put|patch|destroy|delete)|\bgcloud\s+dns\b|\bcertbot\b|\baz\s+keyvault\b[^|&;\n]*\s(?:set|import|delete)\b/i,
     level: "guarded",
     group: "secrets",
     label: "Secret store, DNS, or certificate write",
   },
   {
-    pattern: /\benv\b\s*\|\s*grep\b(?:\\[\s\S]|[^|&;\n\\])*(?:key|token|secret|pass)|\bcat\b(?:\\[\s\S]|[^|&;\n\\])*\.env['"]?\s*[|>]|\bprintenv\b(?:\\[\s\S]|[^|&;\n\\])*(?:key|token|secret)/i,
+    pattern: /\benv\b\s*\|\s*grep\b[^|&;\n]*(?:key|token|secret|pass)|\bcat\b[^|&;\n]*\.env['"]?\s*[|>]|\bprintenv\b[^|&;\n]*(?:key|token|secret)/i,
     level: "guarded",
     group: "secrets",
     label: "Credential print",
   },
   {
-    pattern: /\b(?:cat|cp|scp|rsync|curl|tar|base64|grep|head|tail)\b(?:\\[\s\S]|[^|&;\n\\])*(?:~|\$\{?HOME\}?)\/\.(?:ssh|aws|config\/gcloud)\b|\b(?:cat|grep|head|tail)\b(?:\\[\s\S]|[^|&;\n\\])*\.(?:bash_history|zsh_history)\b/i,
+    pattern: /\b(?:cat|cp|scp|rsync|curl|tar|base64|grep|head|tail)\b[^|&;\n]*(?:~|\$\{?HOME\}?)\/\.(?:ssh|aws|config\/gcloud)\b|\b(?:cat|grep|head|tail)\b[^|&;\n]*\.(?:bash_history|zsh_history)\b/i,
     level: "guarded",
     group: "secrets",
     label: "Credential store read",
@@ -200,13 +200,13 @@ const SECRETS_RULES: readonly Gate[] = [
 
 const SUPPLY_CHAIN_RULES: readonly Gate[] = [
   {
-    pattern: /\b(?:npm|yarn|pnpm|bun)\b(?:\\[\s\S]|[^|&;\n\\])*\s--registry\b|\bpip3?\b(?:\\[\s\S]|[^|&;\n\\])*\s(?:-i|--index-url)[= ]/i,
+    pattern: /\b(?:npm|yarn|pnpm|bun)\b[^|&;\n]*\s--registry\b|\bpip3?\b[^|&;\n]*\s(?:-i|--index-url)[= ]/i,
     level: "guarded",
     group: "supply-chain",
     label: "Registry override install",
   },
   {
-    pattern: /\bgh\s+repo\s+fork\b|\bgh\s+pr\s+create\b(?:\\[\s\S]|[^|&;\n\\])*\s(?:--repo|-R)[= ]/i,
+    pattern: /\bgh\s+repo\s+fork\b|\bgh\s+pr\s+create\b[^|&;\n]*\s(?:--repo|-R)[= ]/i,
     level: "guarded",
     group: "supply-chain",
     label: "Cross-repo contribution",
@@ -215,13 +215,13 @@ const SUPPLY_CHAIN_RULES: readonly Gate[] = [
 
 const REVIEW_RULES: readonly Gate[] = [
   {
-    pattern: /\bgh\s+pr\s+merge\b|\bgh\s+pr\s+review\b(?:\\[\s\S]|[^|&;\n\\])*--approve\b/i,
+    pattern: /\bgh\s+pr\s+merge\b|\bgh\s+pr\s+review\b[^|&;\n]*--approve\b/i,
     level: "guarded",
     group: "review",
     label: "Merge or approve a pull request",
   },
   {
-    pattern: /\bgit\s+(?:commit|push|merge)\b(?:\\[\s\S]|[^|&;\n\\])*--no-verify\b|\b(?:curl|wget)\b(?:\\[\s\S]|[^|&;\n\\])*(?:\s-k\b|\s--insecure\b)|--skip-checks\b/i,
+    pattern: /\bgit\s+(?:commit|push|merge)\b[^|&;\n]*--no-verify\b|\b(?:curl|wget)\b[^|&;\n]*(?:\s-k\b|\s--insecure\b)|--skip-checks\b/i,
     level: "guarded",
     group: "review",
     label: "Safety guard bypass flag",
