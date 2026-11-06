@@ -185,12 +185,13 @@ function buildMenuComponent(
 /** The settings rows `buildSettingItems` produces, in order. */
 const MENU_ROW = {
 	enabled: 0,
-	reviewerModel: 1,
-	thinkingLevel: 2,
-	timeout: 3,
-	reviewConcurrency: 4,
-	systemPrompt: 5,
-	recentDenials: 6,
+	approvalMode: 1,
+	reviewerModel: 2,
+	thinkingLevel: 3,
+	timeout: 4,
+	reviewConcurrency: 5,
+	systemPrompt: 6,
+	recentDenials: 7,
 } as const;
 
 /** Resolve with the promise's value, or the sentinel while it is still pending. */
@@ -477,6 +478,21 @@ test("2 · a deny rule wins over a guarded rule that matched earlier in config o
 		assert.equal(denials[0].gate.label, "Deny last");
 		assert.equal(denials[0].reason, "Never run this.");
 	});
+});
+
+test("2b · a deny match in a multi-line command goes to the guardian, which can approve it", async () => {
+	const rules = [{ pattern: "danger", level: "deny", group: "third", label: "Deny last", message: "Never run this." }];
+	await withExtension(
+		{ rules, completeSimple: () => assistantResponse(verdictText("approve", "the match spans two separate commands")) },
+		async (harness) => {
+			await harness.sessionStart();
+			assert.equal(await harness.toolCall("echo safe\necho danger-zone-docs"), undefined, "approved by the guardian");
+			assert.equal(harness.calls.length, 1, "reviewed under the deny rule's gate");
+			assert.match(JSON.stringify(harness.calls[0]), /Deny last/u);
+			assert.ok((await harness.toolCall("echo danger"))?.block, "the same rule on one line stays a hard deny");
+			assert.equal(harness.calls.length, 1);
+		},
+	);
 });
 
 test("3 · a legacy convention rule blocks as deny without review, and trusted-ops cannot lift it", async () => {
@@ -1153,6 +1169,48 @@ test("22b · the settings menu sets parallel reviews, and setting the default ba
 
 			assert.deepEqual(saved, [8, 16, 1, 2, undefined]);
 			assert.deepEqual(harness.context.notifications.filter((notification) => notification.level === "warning"), []);
+		},
+	);
+});
+
+test("22c · the settings menu sets the approval mode for every session and drops this session's override", async () => {
+	const saved: unknown[] = [];
+	const statuses: unknown[] = [];
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			completeSimple: () => assistantResponse(verdictText("ask_user", "pushing to main is block-listed")),
+			custom: async (factory, harness) => {
+				if (harness.customCalls > 1) return answerOptionSelector(factory, harness);
+				const menu = buildMenuComponent(factory, () => {});
+				for (let row = MENU_ROW.enabled; row < MENU_ROW.approvalMode; row += 1) menu.handleInput(KEY_DOWN);
+				// The harness config pins careful: careful -> afk -> auto -> careful
+				for (let step = 0; step < 3; step += 1) {
+					menu.handleInput(KEY_ENTER);
+					saved.push(JSON.parse(readFileSync(harness.configPath, "utf8")).approvalMode);
+					statuses.push(harness.context.statuses.get("auto-permissions-mode"));
+				}
+				return undefined;
+			},
+		},
+		async (harness) => {
+			await harness.sessionStart();
+			await harness.settingsCommand("afk");
+			await harness.settingsCommand();
+
+			assert.deepEqual(saved, ["afk", undefined, "careful"], "auto is the default, so it removes the key");
+			assert.deepEqual(statuses, ["permissions: afk", undefined, "permissions: careful"]);
+			// The menu left the config at careful; the /auto-permissions afk override is gone.
+			harness.answers.push("Block");
+			assert.equal((await harness.toolCall("git push origin main", "menu-careful"))?.reason, "Blocked by user");
+			assert.equal(harness.customCalls, 2, "the menu, then careful's immediate prompt");
+
+			// Another session's menu switches the config to afk: this session's status follows at its next prompt.
+			const config = JSON.parse(readFileSync(harness.configPath, "utf8"));
+			writeFileSync(harness.configPath, `${JSON.stringify({ ...config, approvalMode: "afk" }, null, 2)}\n`);
+			const handler = harness.mock.events.get("before_agent_start")![0] as EventHandler;
+			await handler({ type: "before_agent_start", prompt: "task", systemPrompt: "BASE", systemPromptOptions: { contextFiles: [], sections: {} } }, harness.ctx);
+			assert.equal(harness.context.statuses.get("auto-permissions-mode"), "permissions: afk");
 		},
 	);
 });

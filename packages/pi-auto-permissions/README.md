@@ -45,7 +45,7 @@ What happens when the guardian cannot approve a command (an `ask_user` verdict, 
 | `careful` | You are prompted as soon as the guardian cannot approve a command, and the agent waits for your answer. |
 | `afk` | Nothing prompts. Blocked commands are refused, the agent gets a short system prompt section saying you are away, and it lists what it needs approved in its final message. |
 
-Set the default with `"approvalMode": "auto" | "careful" | "afk"` in the config, and switch one session with `/auto-permissions auto`, `/auto-permissions careful` or `/auto-permissions afk`. A session switch lasts until the session ends or switches again, and a new or resumed session starts in the configured default. A blocked command lands in the denial log, so **Recent denials → Allow on retry** clears it too.
+Set the default with the **Approval mode** row in `/auto-permissions` or `"approvalMode": "auto" | "careful" | "afk"` in the config, and switch one session with `/auto-permissions auto`, `/auto-permissions careful` or `/auto-permissions afk`. A session switch lasts until the session ends, switches again, or the default changes in the menu, and a new or resumed session starts in the configured default. A blocked command lands in the denial log, so **Recent denials → Allow on retry** clears it too.
 
 To keep the agent working while being careful about specific things, say so in your message ("don't push", "treat vistra as read-only"): the guardian blocks matching actions until a later message lifts the boundary. Boundaries you state live in the transcript, so a compaction can drop them; for anything that must always hold, use `guardianPolicy.softDeny` / `hardDeny` or a deny rule.
 
@@ -145,7 +145,7 @@ Rule fields are:
 - `label`: short description shown during review
 - `message`: optional feedback; required for deny rules
 
-A deny rule is a hard policy boundary: it blocks immediately with its message, is evaluated before every other level, and nothing lifts it — not a trusted group, not user approval at a prompt. Reserve it for operations that should never happen in an agent session (disabling agent oversight, deleting critical paths), and use `guarded` where a human judgment call is legitimate.
+A deny rule is a hard policy boundary: it blocks immediately with its message, is evaluated before every other level, and nothing lifts it — not a trusted group, not user approval at a prompt. Reserve it for operations that should never happen in an agent session (disabling agent oversight, deleting critical paths), and use `guarded` where a human judgment call is legitimate. One exception: rules match raw text, so in a multi-line command a deny pattern can match across lines the shell runs as separate commands. A deny match on a command containing a newline is therefore sent to the guardian under that rule's label instead of blocked outright; it is still reviewed, never passed. Single-line matches stay hard denies.
 
 When several rules match one command, the most severe level wins (deny, then guarded) regardless of their order in the list.
 
@@ -234,6 +234,7 @@ The reviewer settings that change most often are editable from a settings menu i
 | Row | What it edits |
 | --- | --- |
 | Enabled | `enabled` — off disables all gating, including deny rules; every command runs unreviewed |
+| Approval mode | `approvalMode`, cycling through `auto`, `careful` and `afk` (see [Approval modes](#approval-modes)); the session you change it from drops its own `/auto-permissions <mode>` switch |
 | Reviewer model | `reviewer.provider` / `reviewer.model`, picked from the models you are signed in to |
 | Thinking level | `reviewer.reasoningEffort` |
 | Review timeout | `reviewer.timeoutMs`, entered as `30s` or `45000ms` |

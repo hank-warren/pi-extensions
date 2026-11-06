@@ -73,6 +73,17 @@ describe("config writer", () => {
 		assert.equal(Object.hasOwn(read(path), "enabled"), false);
 	});
 
+	test("writes approvalMode and removes the key when set back to auto", () => {
+		const path = fixtureFile();
+		patchAutoPermissionsConfig(path, { approvalMode: "careful" });
+		assert.equal(read(path).approvalMode, "careful");
+		assert.equal(loadAutoPermissionsConfig(path).approvalMode, "careful");
+
+		patchAutoPermissionsConfig(path, { approvalMode: "auto" });
+		assert.equal(Object.hasOwn(read(path), "approvalMode"), false);
+		assert.equal(loadAutoPermissionsConfig(path).approvalMode, "auto");
+	});
+
 	test("writes reviewConcurrency and removes the key when set back to the default", () => {
 		const path = fixtureFile();
 		patchAutoPermissionsConfig(path, { reviewConcurrency: 1 });

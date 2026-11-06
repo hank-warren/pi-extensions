@@ -20,6 +20,13 @@ export type CommandClassification =
  * Deny rules are hard policy boundaries: a project-scoped trusted-ops file
  * must not be able to lift one, or a checked-in file could disarm the
  * circuit breaker. Only guarded matches honor the bypass.
+ *
+ * Rules match raw text, so in a multi-line command a deny can match across
+ * lines that the shell runs as separate commands (an `rm` on one line, a
+ * quoted `/^##` on the next). Telling those apart takes a shell parser, so a
+ * deny match on a multi-line command goes to the guardian instead, which
+ * reads the real commands; it is reviewed, never waved through. A
+ * single-line match stays a hard deny.
  */
 export function classifyCommand(
   command: string,
@@ -32,7 +39,7 @@ export function classifyCommand(
   );
 
   const deny = matches.find((gate) => gate.level === "deny");
-  if (deny) return { kind: "deny", gate: deny };
+  if (deny) return { kind: /[\r\n]/.test(command) ? "review" : "deny", gate: deny };
 
   let gate = matches.find((candidate) => candidate.level === "guarded");
   // With reviewAllShell on, a command no rule names at all still gets a
