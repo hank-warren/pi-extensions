@@ -116,9 +116,10 @@ const DESTRUCTIVE_RULES: readonly Gate[] = [
   },
   {
     pattern: /\brm\b[^|&;]*\s['"]?\$\{?[A-Za-z_]\w*\}?['"]?\/\*/i,
-    level: "guarded",
+    level: "deny",
     group: "destructive",
     label: "Glob delete under a shell variable",
+    message: "A glob rooted at a shell variable becomes a root delete when the variable is empty or unset. Re-run the delete with the resolved literal path written into the command.",
   },
   {
     pattern: /\brm\b[^|&;]*\s(?:['"]?\/tmp\/|['"]?\$\{?TMPDIR\}?[/'"]?)[^|&;]*\*/i,

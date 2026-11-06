@@ -378,6 +378,8 @@ describe("default ruleset", () => {
 				"Session transcript write",
 				"Delete of a critical path",
 				"Delete of the home directory",
+				// Stays deny: an unset variable turns it into a root delete, and its message already asks for the literal path.
+				"Glob delete under a shell variable",
 			],
 		);
 	});

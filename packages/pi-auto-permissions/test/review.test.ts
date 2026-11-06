@@ -798,16 +798,15 @@ describe("unresolvable-target rule", () => {
 			.split("\n\n")
 			.find((block) => block.startsWith("Unresolvable destructive targets:"));
 		assert.ok(paragraph, "the unresolvable-target paragraph must exist");
-		// The reviewer sees only excerpts of output, so an unassigned variable is usually unknowable.
-		assert.ok(paragraph.includes("you see at most a short excerpt of earlier shell output"));
-		assert.ok(paragraph.includes("or a shell output excerpt that shows it"));
-		assert.ok(paragraph.includes("must not be approved unless the evidence you can see assigns that variable a literal value"));
+		// Each shell call is a fresh shell: an earlier assignment, export or output never resolves the target.
+		assert.ok(paragraph.includes("every shell call runs in a fresh shell"));
+		assert.ok(paragraph.includes("must not be approved unless the proposed command itself assigns that variable a nonempty literal value before using it"));
 		// Globs rooted at a variable are covered, not just bare variables.
 		assert.ok(paragraph.includes("a glob or path rooted at one"));
 		// The verdict is revise (the agent can always resolve the path), not ask_user.
 		assert.ok(paragraph.includes('Do not return "ask_user" for this: return "revise"'));
 		assert.ok(paragraph.includes("resolved literal path"));
-		// A visible assignment restores normal judgment.
+		// A same-command assignment restores normal judgment.
 		assert.ok(paragraph.includes("judge the command against that literal value normally"));
 	});
 
@@ -818,9 +817,14 @@ describe("unresolvable-target rule", () => {
 		assert.ok(AUTO_PERMISSIONS_SYSTEM_PROMPT.includes(
 			'BUILD_DIR=/tmp/build-cache make prepare',
 		));
+		// An earlier call's prefix assignment does not carry over; only a same-command one does.
 		assert.ok(AUTO_PERMISSIONS_SYSTEM_PROMPT.includes(
-			"The assignment is visible: judge it as a delete of /tmp/build-cache.",
+			'That assignment ended with its own call, so BUILD_DIR is unset here: return "revise" asking for the literal path.',
 		));
+		assert.ok(AUTO_PERMISSIONS_SYSTEM_PROMPT.includes(
+			'- Command: BUILD_DIR=/tmp/build-cache && rm -rf "$BUILD_DIR". The command assigns the variable itself: judge it as a delete of /tmp/build-cache.',
+		));
+		assert.ok(!AUTO_PERMISSIONS_SYSTEM_PROMPT.includes("The assignment is visible"));
 	});
 });
 
