@@ -449,7 +449,16 @@ function confirmedDialogAnswers(details: unknown, callArguments?: unknown): stri
   const texts: string[] = [];
   for (const entry of record.answers) {
     if (!entry || typeof entry !== "object") continue;
-    const answer = entry as { question?: unknown; questionIndex?: unknown; answer?: unknown; selected?: unknown; notes?: unknown };
+    const answer = entry as {
+      question?: unknown;
+      questionIndex?: unknown;
+      answer?: unknown;
+      selected?: unknown;
+      notes?: unknown;
+      custom?: unknown;
+      wasCustom?: unknown;
+      kind?: unknown;
+    };
     if (typeof answer.question !== "string" || !answer.question.trim()) continue;
     const parts: string[] = [];
     const selected = Array.isArray(answer.selected)
@@ -469,11 +478,14 @@ function confirmedDialogAnswers(details: unknown, callArguments?: unknown): stri
     }
     const question = answer.question.trim();
     // The user saw each option's description beside its label, so it is part of what they chose.
+    // Typed text is not a choice even when it matches a label; on a multi-select answer it is the last part.
+    const typed = answer.custom === true || answer.wasCustom === true || answer.kind === "custom";
+    const picked = !typed ? labels : selected.length > 0 ? labels.slice(0, -1) : [];
     const options = askedQuestion(questions, answer.questionIndex, question)?.options;
-    const shown = labels.flatMap((label) => {
+    const shown = picked.flatMap((label) => {
       const description = options?.get(label);
       return description
-        ? [labels.length > 1 ? `${JSON.stringify(label)}: ${JSON.stringify(truncateEvidenceText(description, OPTION_DESCRIPTION_MAX_CHARS))}` : JSON.stringify(truncateEvidenceText(description, OPTION_DESCRIPTION_MAX_CHARS))]
+        ? [picked.length > 1 ? `${JSON.stringify(label)}: ${JSON.stringify(truncateEvidenceText(description, OPTION_DESCRIPTION_MAX_CHARS))}` : JSON.stringify(truncateEvidenceText(description, OPTION_DESCRIPTION_MAX_CHARS))]
         : [];
     });
     const described = shown.length === 0

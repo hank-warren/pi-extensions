@@ -362,6 +362,30 @@ describe("compact review evidence", () => {
 		assert.ok(!texts.join("\n").includes("UNSELECTED_DESCRIPTION_CANARY"));
 		assert.ok(AUTO_PERMISSIONS_SYSTEM_PROMPT.includes("includes any option description quoted in the record"));
 
+		// Typed text that matches a label is not a selection of that option.
+		const typedTexts = (answers: unknown[]) => collectReviewEvidence([
+			entries({ questions })[0],
+			{
+				id: "r2",
+				type: "message",
+				message: { role: "toolResult", toolCallId: "ask-1", toolName: "ask_user_question", isError: false, content: [], details: { answers, cancelled: false } },
+			},
+		], undefined, ["ask_user_question"]).filter((record) => record.source === "user").map((record) => record.text);
+		for (const flag of [{ custom: true }, { wasCustom: true }, { kind: "custom" }]) {
+			assert.equal(
+				typedTexts([{ questionIndex: 0, question: "Where should the hub live?", answer: "Default core", ...flag }])[0],
+				'USER (dialog answer): selected "Default core" — assistant-drafted question: "Where should the hub live?"',
+			);
+		}
+		const multiTyped = typedTexts([
+			{ questionIndex: 1, question: "Enable which checks?", answer: "lint, e2e", selected: ["lint", "e2e"], custom: true },
+		])[0];
+		assert.equal(
+			multiTyped,
+			'USER (dialog answer): selected "lint; e2e" — assistant-drafted option description shown with the selection: "Runs eslint." — assistant-drafted question: "Enable which checks?"',
+		);
+		assert.ok(!multiTyped.includes("playwright"));
+
 		// Stringified arguments resolve the same; unusable ones fall back to the bare answer.
 		assert.deepEqual(userTexts(JSON.stringify({ questions })), texts);
 		for (const args of [undefined, "{not json", { questions: "nope" }, { questions: [{ question: "Where should the hub live?", options: [{ label: 7 }] }] }]) {
