@@ -480,6 +480,8 @@ In a [herdr-core](https://herdr.dev/core/) terminal (`HC_TERMINAL_ID` set), anot
 - A message from **any other** terminal (a helper reporting back, a sibling) or from hc itself is `AGENT MESSAGE` context with `source: "tool"`. It never authorizes anything, even when it says the user approved something.
 - If the parent cannot be found, nothing relayed authorizes.
 
+The labels depend on hc's tag, and hc tags a message only when it is sent from an agent's terminal. Text sent from a plain shell or program terminal (for example `hc run -- hc send t7 "…"`) arrives untagged and is indistinguishable from typed input, so it reads as the user's own message. The control that holds either way is the sending agent's guardian reviewing the hand-off.
+
 The guardian judges a delegating command (`hc send`, or `hc run` with a task) as if the agent would do what the message asks, and asks for the message inline when the command reads it from a file or variable. The default rules also deny `hc keys`, `hc send` or `hc interrupt` aimed at the agent's own terminal and `hc send --force`, which would answer the agent's own prompts, and review `hc keys` into any other terminal.
 
 ## Subagent sessions
