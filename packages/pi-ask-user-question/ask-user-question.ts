@@ -55,7 +55,8 @@ Set \`multiSelect: true\` on a question when several answers can hold at once â€
 Usage notes:
 - The user can pick an option with the number keys, type a custom answer via the automatically appended "Type something." row, attach a note to their choice by pressing n, or press Esc to decline. Do NOT author "Other" or "Type something." labels yourself â€” reserved labels are rejected at runtime.
 - If you recommend a specific option, make it the first option and add "(Recommended)" at the end of the label.
-- Ask 1-4 questions per call, each with 2-4 options (2-6 when \`multiSelect\` is true). Multiple questions render as tabs the user cycles with Tab; every question must be answered before the call returns. Group questions that belong to one decision rather than asking them in separate calls, but do not pad a single decision into several questions.`;
+- Ask 1-4 questions per call, each with 2-4 options (2-6 when \`multiSelect\` is true). Multiple questions render as tabs the user cycles with Tab; every question must be answered before the call returns. Group questions that belong to one decision rather than asking them in separate calls, but do not pad a single decision into several questions.
+- To get approval for an action (running a command, deploying, deleting), ask it as its own question that names the exact action, with options such as "Approve" and "Don't run". Never fold an approval into an option of an unrelated decision: the user is choosing that decision, not approving the action, and a permission reviewer will not count it.`;
 
 function emitPrompt(pi: ExtensionAPI, id: string, params: AskUserParams): void {
 	const payload: AskUserPromptEventPayload = {
