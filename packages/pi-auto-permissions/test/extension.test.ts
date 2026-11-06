@@ -18,7 +18,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createExtensionRuntime, ExtensionRunner, initTheme, SessionManager } from "@earendil-works/pi-coding-agent";
+import { createExtensionRuntime, ExtensionRunner, getAgentDir, initTheme, SessionManager } from "@earendil-works/pi-coding-agent";
 import autoPermissionsExtension from "../index.ts";
 import { builtinTool, createCustomSelectorHarness, createMockContext, createMockPi } from "../../../test/support/mock-pi.ts";
 
@@ -2479,4 +2479,34 @@ test("54 · an unattended session stays afk: the mode cannot be switched", async
 			assert.equal(harness.context.notifications.at(-1)?.level, "warning");
 			assert.match(harness.context.notifications.at(-1)?.message ?? "", /always afk/u);
 		}));
+});
+
+test("the guardian reads the instruction files Pi loaded for the agent, sorted by where they live", async () => {
+	const outside = mkdtempSync(join(tmpdir(), "ap-workspace-"));
+	const contextFiles = [
+		{ path: join(getAgentDir(), "AGENTS.md"), content: "AGENT DIR POLICY" },
+		{ path: join(outside, "AGENTS.md"), content: "WORKSPACE POLICY" },
+		// The test runs inside this repository's checkout, so a file beside it is a project file.
+		{ path: join(process.cwd(), "AGENTS.md"), content: "REPO GUIDANCE" },
+	];
+	const promptAfterFiles = async (config: Record<string, unknown>): Promise<string> => {
+		let prompt = "";
+		await withExtension({ rules: [GUARDED_RULE], projectTrusted: true, config }, async (harness) => {
+			await harness.sessionStart();
+			const handler = harness.mock.events.get("before_agent_start")![0] as EventHandler;
+			await handler({ type: "before_agent_start", prompt: "task", systemPrompt: "BASE", systemPromptOptions: { contextFiles, sections: {} } }, harness.ctx);
+			await harness.toolCall("git push origin main");
+			prompt = harness.calls[0]!.request.systemPrompt;
+		});
+		return prompt;
+	};
+	const prompt = await promptAfterFiles({});
+	const user = prompt.split("<USER_POLICY_FILES>")[1]?.split("</USER_POLICY_FILES>")[0] ?? "";
+	const project = prompt.split("<PROJECT_INSTRUCTION_FILES>")[1]?.split("</PROJECT_INSTRUCTION_FILES>")[0] ?? "";
+	assert.match(user, /AGENT DIR POLICY[\s\S]*WORKSPACE POLICY/u, "the agent directory's and a non-repository file are the user's policy");
+	assert.doesNotMatch(user, /REPO GUIDANCE/u);
+	assert.match(project, /REPO GUIDANCE/u, "a file inside a repository is project guidance");
+	assert.ok(prompt.trimEnd().endsWith("</PROJECT_INSTRUCTION_FILES>"), "the files end the prompt");
+
+	assert.doesNotMatch(await promptAfterFiles({ reviewEvidence: { projectInstructions: false } }), /USER_POLICY_FILES|PROJECT_INSTRUCTION_FILES/u, "and none when turned off");
 });

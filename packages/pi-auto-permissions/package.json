@@ -1,6 +1,6 @@
 {
   "name": "@hank-warren/pi-auto-permissions",
-  "version": "0.25.0",
+  "version": "0.26.0",
   "description": "Fork of @ogulcancelik/pi-auto-permissions with dialog-answer user evidence: context-aware Bash permissions for Pi with automated guardian review.",
   "type": "module",
   "keywords": [
@@ -54,6 +54,7 @@
     "evaluation-log.ts",
     "gates.ts",
     "hc-terminal.ts",
+    "instruction-files.ts",
     "jsonl-sidecar.ts",
     "override-evidence.ts",
     "review.ts",

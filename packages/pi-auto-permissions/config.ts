@@ -281,7 +281,8 @@ function resolveReviewEvidence(raw: Record<string, unknown>): AutoPermissionsCon
   const userAnswerTools = stringList(evidence.userAnswerTools, "reviewEvidence.userAnswerTools");
   const userMessageTypes = stringList(evidence.userMessageTypes, "reviewEvidence.userMessageTypes");
   return {
-    projectInstructions: projectInstructions === true,
+    // The guardian reads what the agent reads unless turned off.
+    projectInstructions: projectInstructions !== false,
     userAnswerTools,
     userMessageTypes,
   };

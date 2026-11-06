@@ -1,5 +1,13 @@
 # @hank-warren/pi-auto-permissions
 
+## 0.26.0
+
+### Minor Changes
+
+- **The guardian reads the instruction files Pi loaded for the agent.** It takes the `AGENTS.md` / `CLAUDE.md` files Pi reports each turn, not just the working directory's. Files directly in the agent directory, or outside any git repository and the agent directory's installed packages (for example `~/repos/AGENTS.md`), are the user's policy: they name what is the user's own, can make an action routine even when it is block-listed, and can require approval. Files inside a repository or an installed package can only tighten. An untrusted project keeps only the agent directory's files. `reviewEvidence.projectInstructions` is now on by default; set it to `false` to turn the files off. `guardianPolicy` still works as the reviewer-only alternative.
+
+  **End-to-end requests.** "Open a PR for this, merge it and deploy it" now authorizes merging the pull request the session opened for that work and running the documented deploy for it, without a prompt for each step.
+
 ## 0.25.0
 
 ### Minor Changes

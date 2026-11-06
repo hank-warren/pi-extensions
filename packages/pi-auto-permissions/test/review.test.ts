@@ -796,6 +796,17 @@ describe("guardian policy section", () => {
 	});
 });
 
+describe("end-to-end requests", () => {
+	test("a request listing PR, merge and deploy authorizes those steps for this session's own change only", () => {
+		assert.ok(AUTO_PERMISSIONS_SYSTEM_PROMPT.includes(
+			'"open a PR for this, merge it and deploy it" authorizes merging the pull request this session opened for that work and running the deploy the instruction files document for that change, on the target they name, but no other pull request, target, or unlisted step.',
+		));
+		assert.ok(AUTO_PERMISSIONS_SYSTEM_PROMPT.includes('Approve each: the user listed every step, and each applies to this session\'s own change.'));
+		// Deploying alone still does not name the merge.
+		assert.ok(AUTO_PERMISSIONS_SYSTEM_PROMPT.includes('- User: "deploy the vault-server fix". Command: gh pr merge 241 --squash. Return "ask_user"'));
+	});
+});
+
 describe("unresolvable-target rule", () => {
 	test("the system prompt refuses destructive commands with unassigned variable targets via revise", () => {
 		const paragraph = AUTO_PERMISSIONS_SYSTEM_PROMPT
