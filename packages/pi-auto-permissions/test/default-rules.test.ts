@@ -3,7 +3,7 @@
 // commit, push a feature branch) triggers zero gates.
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { DEFAULT_RULES } from "../default-rules.ts";
+import { DEFAULT_RULES, selfDrivingPattern } from "../default-rules.ts";
 import { ALL_SHELL_GATE, findGates } from "../gates.ts";
 
 function labelsFor(command: string): string[] {
@@ -50,12 +50,24 @@ const FIXTURES: RuleFixture[] = [
 			"tmux send-keys 'ls' Enter",
 			'tmux send-keys -t "$TMUX_PANE" y Enter',
 			"tmux send-keys -t $TMUX_PANE Escape",
+			'hc keys "$HC_TERMINAL_ID" 1 enter',
+			"hc send $HC_TERMINAL_ID yes",
+			"hc interrupt ${HC_TERMINAL_ID}",
+			'hc send --force t7 "1"',
 		],
 		nearMisses: [
 			"tmux send-keys -t %5 'npm test' Enter",
 			"tmux send-keys -t build-pane Enter",
 			"tmux list-panes",
+			'hc send t7 "review only src/x.rs"',
+			'hc send "$PARENT_TERMINAL" done',
+			"hc read t7 --lines 40",
 		],
+	},
+	{
+		label: "Keystrokes into another terminal",
+		matches: ["hc keys t7 down enter", "hc keys ap-canary 2"],
+		nearMisses: ['hc send t7 "hi"', "hc read t7", "hc wait --children any"],
 	},
 	{
 		label: "Session transcript write",
@@ -348,6 +360,30 @@ const FIXTURES: RuleFixture[] = [
 ];
 
 describe("default ruleset", () => {
+	test("hard-denies only what no session should ever do", () => {
+		assert.deepEqual(
+			DEFAULT_RULES.filter((rule) => rule.level === "deny").map((rule) => rule.label),
+			[
+				"Agent oversight bypass",
+				"Self-driving keystrokes",
+				"Session transcript write",
+				"Delete of a critical path",
+				"Delete of the home directory",
+			],
+		);
+	});
+
+	test("self-driving keystrokes also catch this terminal's own literal hc id", () => {
+		const pattern = selfDrivingPattern("t13");
+		for (const command of ["hc keys t13 1 enter", 'hc send "t13" yes', "hc interrupt oracle-vps/t13"]) {
+			assert.ok(pattern.test(command), command);
+		}
+		for (const command of ["hc keys t130 enter", "hc send t7 yes", "hc keys t1 enter"]) {
+			assert.ok(!pattern.test(command), command);
+		}
+		assert.ok(!selfDrivingPattern("t13; rm").test("hc keys t13 1"), "an id that is not a plain address adds no pattern");
+	});
+
 	test("ships a non-empty ruleset with unique labels and messages on every deny rule", () => {
 		assert.ok(DEFAULT_RULES.length >= 25, `expected a full ruleset, got ${DEFAULT_RULES.length}`);
 		const labels = DEFAULT_RULES.map((rule) => rule.label);

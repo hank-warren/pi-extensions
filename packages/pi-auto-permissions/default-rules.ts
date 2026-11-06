@@ -29,6 +29,30 @@ import type { Gate } from "./gates.js";
  *   these rules are the deterministic prefilter.
  */
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Keystrokes or forced input into this agent's own terminal: a tmux send-keys without
+ * -t or aimed at $TMUX_PANE, hc keys/send/interrupt aimed at $HC_TERMINAL_ID or this
+ * terminal's literal id (read from the environment when the rules are built), and
+ * hc send --force, which types past a terminal that is blocked on a prompt.
+ */
+export function selfDrivingPattern(terminalId: string | undefined): RegExp {
+  const self = [String.raw`\$\{?HC_TERMINAL_ID\}?`];
+  if (terminalId && /^[\w.-]+$/.test(terminalId)) self.push(String.raw`(?:[\w.-]+/)?${escapeRegExp(terminalId)}`);
+  return new RegExp(
+    [
+      String.raw`\btmux\s+send-keys\b(?![^|&;]*\s-t)`,
+      String.raw`\btmux\s+send-keys\b[^|&;]*\s-t[= ]?\s*['"]?\$\{?TMUX_PANE`,
+      String.raw`\bhc\s+(?:keys|send|interrupt)\b[^|&;]*\s['"]?(?:${self.join("|")})['"]?(?=\s|$|[;|&])`,
+      String.raw`\bhc\s+send\b[^|&;]*\s--force\b`,
+    ].join("|"),
+    "i",
+  );
+}
+
 /** Shell-write prefix: redirection or a write verb, then no command separator. */
 const WRITE = String.raw`(?:>>?|\btee\b|\bsed\s+-i\b|\bcp\b|\bmv\b)[^|&;]*`;
 
@@ -41,11 +65,17 @@ const OVERSIGHT_RULES: readonly Gate[] = [
     message: "Launching an agent with approvals or sandboxing disabled removes the oversight this session runs under. Run the agent with its normal approval flow instead.",
   },
   {
-    pattern: /\btmux\s+send-keys\b(?![^|&;]*\s-t)|\btmux\s+send-keys\b[^|&;]*\s-t[= ]?\s*['"]?\$\{?TMUX_PANE/i,
+    pattern: selfDrivingPattern(process.env.HC_TERMINAL_ID),
     level: "deny",
     group: "oversight",
     label: "Self-driving keystrokes",
-    message: "Sending keystrokes to this agent's own terminal pane drives its own interface, which amounts to changing its own permissions or oversight. Target an explicit other pane with -t if you are automating a different process.",
+    message: "Sending keystrokes or forced input to this agent's own terminal, or forcing input past a terminal blocked on a prompt, answers prompts meant for a human. Target another terminal explicitly, without --force, if you are automating a different process.",
+  },
+  {
+    pattern: /\bhc\s+keys\b/i,
+    level: "guarded",
+    group: "oversight",
+    label: "Keystrokes into another terminal",
   },
   {
     pattern: /(?:>>?|\btee\b|\bsed\s+-i\b|\bcp\b|\bmv\b|\brm\b|\btruncate\b)[^|&;]*(?:\$\{?PI_CODING_AGENT_DIR\}?|\.pi\/agent)\/sessions\b/i,
@@ -73,17 +103,15 @@ const DESTRUCTIVE_RULES: readonly Gate[] = [
   },
   {
     pattern: /\b(?:rm|rmdir)\b[^|&;]*\s['"]?\.\.?\/?['"]?(?=\s|$|[;|&])/i,
-    level: "deny",
+    level: "guarded",
     group: "destructive",
     label: "Delete of the working directory or a parent",
-    message: "Deleting the current directory or a parent destroys the workspace this session runs in. Name the specific entry inside it you actually mean.",
   },
   {
     pattern: /\brm\b[^|&;]*\s['"]?\$\{?[A-Za-z_]\w*\}?['"]?\/\*/i,
-    level: "deny",
+    level: "guarded",
     group: "destructive",
     label: "Glob delete under a shell variable",
-    message: "A glob rooted at a shell variable becomes a root delete when the variable is empty or unset. Re-run the delete with the resolved literal path written into the command.",
   },
   {
     pattern: /\brm\b[^|&;]*\s(?:['"]?\/tmp\/|['"]?\$\{?TMPDIR\}?[/'"]?)[^|&;]*\*/i,
