@@ -34,17 +34,68 @@ export const ALL_SHELL_GATE: Gate = {
   label: "shell command",
 };
 
+const UNMODELLED_SHELL = /\$\(|`|[<>]\(|<<|\$\{(?![A-Za-z_]\w*\})/;
+
 /**
- * Join line continuations the way the shell does, so a rule sees `rm -rf \⏎/usr`
- * as `rm -rf /usr`. Only an unescaped backslash continues a line: `\\⏎` is a
- * literal backslash followed by a command-ending newline.
+ * Rewrite a command so that a newline remains only where the shell ends a command.
+ * Rules stop at a newline, so this is what keeps them inside one command:
+ * - an unescaped backslash-newline is a line continuation and is removed
+ *   (`rm -rf \⏎/usr` is `rm -rf /usr`), outside quotes and inside "…" or $'…';
+ * - a newline inside quotes is part of an argument and becomes a space
+ *   (`git commit -m 'a⏎⏎b' --amend` stays one command);
+ * - a `#` comment is inert, so a quote character in it changes nothing.
+ * An unterminated quote keeps joining to the end, which only matches more. A
+ * command using what this scan does not model (command or process substitution,
+ * backticks, heredocs, `${…}` beyond a plain name), where quotes nest or lines
+ * are data, keeps no newline at all: the whole command is one line, as before
+ * rules stopped at newlines.
  */
-export function joinLineContinuations(command: string): string {
-  return command.replace(/(?<!\\)((?:\\\\)*)\\\r?\n/g, "$1");
+export function normalizeCommandLines(command: string): string {
+  if (UNMODELLED_SHELL.test(command)) return command.replace(/\\\r?\n/g, "").replace(/\r?\n/g, " ");
+  let out = "";
+  let quote: "'" | "\"" | "$'" | "#" | undefined;
+  for (let index = 0; index < command.length; index++) {
+    const char = command[index]!;
+    const newline = char === "\n" ? 1 : char === "\r" && command[index + 1] === "\n" ? 2 : 0;
+    if (newline > 0) {
+      if (quote === "#") quote = undefined;
+      out += quote ? " " : "\n";
+      index += newline - 1;
+      continue;
+    }
+    if (quote === "#") {
+      out += char;
+      continue;
+    }
+    if (char === "\\" && quote !== "'") {
+      const next = command[index + 1];
+      if (next === "\n") {
+        index += 1;
+        continue;
+      }
+      if (next === "\r" && command[index + 2] === "\n") {
+        index += 2;
+        continue;
+      }
+      out += next === undefined ? char : char + next;
+      index += 1;
+      continue;
+    }
+    if (quote) {
+      if ((quote === "\"" && char === "\"") || (quote !== "\"" && char === "'")) quote = undefined;
+      out += char;
+      continue;
+    }
+    if (char === "'") quote = out.endsWith("$") ? "$'" : "'";
+    else if (char === "\"") quote = "\"";
+    else if (char === "#" && (out.length === 0 || /[\s;&|()]$/.test(out))) quote = "#";
+    out += char;
+  }
+  return out;
 }
 
 export function findGates(command: string, rules: readonly Gate[]): Gate[] {
-  const joined = joinLineContinuations(command);
+  const joined = normalizeCommandLines(command);
   return rules.filter((gate) => {
     gate.pattern.lastIndex = 0;
     return gate.pattern.test(joined);

@@ -7,7 +7,7 @@
 - Approval mode in the `/auto-permissions` menu, and default rules that stop at a newline.
 
   - **Approval mode row.** The `/auto-permissions` menu has an **Approval mode** row that sets `approvalMode` (auto, careful, afk) like the other rows, with `auto` removing the key. The session it is changed from drops its own `/auto-permissions <mode>` switch, and every session refreshes its mode status at its next prompt. Unattended sessions stay afk.
-  - **Default rules stop at a newline.** Default rules ended a command only at `|`, `&` or `;`, so a rule could span lines. A delete on one line plus a quoted path-like string on a later line (such as a `sed` address) matched the hard-deny **Delete of a critical path**. An unescaped newline now ends the command; a backslash-newline still continues it.
+  - **Default rules stop at a newline.** Default rules ended a command only at `|`, `&` or `;`, so a rule could span lines. A delete on one line plus a quoted path-like string on a later line (such as a `sed` address) matched the hard-deny **Delete of a critical path**. A newline now ends the command only where the shell ends it: a line continuation or a newline inside quotes keeps the command going, and a command with substitutions, backticks or heredocs is still matched as one line.
 
 ## 0.23.0
 

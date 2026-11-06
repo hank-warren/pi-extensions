@@ -30,7 +30,7 @@ import type { Gate } from "./gates.js";
  */
 
 // "Same command" below is `[^|&;\n]*`: no `|`, `&`, `;` or newline. findGates joins line
-// continuations first, so a backslash-newline never ends a command.
+// continuations and quoted newlines first (normalizeCommandLines), so neither ends a command.
 
 /** Shell-write prefix: redirection or a write verb, then no command separator. */
 const WRITE = String.raw`(?:>>?|\btee\b|\bsed\s+-i\b|\bcp\b|\bmv\b)[^|&;\n]*`;
