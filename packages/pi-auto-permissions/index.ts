@@ -33,6 +33,7 @@ import { RemotePrompts, type RemotePromptHandle } from "./remote-answers.js";
 import { createReviewDisplay } from "./review-display.js";
 import { createSessionOverrides } from "./session-overrides.js";
 import { createGuardianReviewer } from "./guardian-reviewer.js";
+import { detectHcTerminal, hcTerminalFromEnv, type HcTerminal } from "./hc-terminal.js";
 import { registerSettingsCommand } from "./settings-command.js";
 import type { BlockResult, ReviewScope, ReviewTarget } from "./review-scope.js";
 import { detectSubagentContext } from "./subagent-context.js";
@@ -217,6 +218,10 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   let unattendedSession = false;
   // Set by `/auto-permissions <mode>` for this session; otherwise the config default applies.
   let sessionApprovalMode: ApprovalMode | undefined;
+  // Set per session: the hc terminal this session runs in and its parent, for relayed messages.
+  // The id is known at once; the parent arrives with hcLookup, which every bash call awaits.
+  let hcTerminal: HcTerminal | undefined;
+  let hcLookup: Promise<void> | undefined;
   const blocks = new BlockCounter();
   let turnGeneration = 0;
   const reviseFirst = new Map<string, number>();
@@ -280,7 +285,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   // The session is active exactly while the reviewer lifecycle is unaborted:
   // session_shutdown aborts it, session_start synchronously aborts and replaces
   // it, and nothing else touches it.
-  const reviewer = createGuardianReviewer({ overrides });
+  const reviewer = createGuardianReviewer({ overrides, hcTerminal: () => hcTerminal });
   const display = createReviewDisplay({ isSessionActive: () => !reviewer.lifecycleSignal.aborted });
 
   /**
@@ -869,6 +874,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
 
   pi.on("tool_call", async (event, ctx) => {
     if (!isBashTool(event.toolName)) return;
+    if (hcLookup) await hcLookup;
     const command = (event.input as { command: string }).command;
     const lifecycleSignal = reviewer.lifecycleSignal;
 
@@ -998,6 +1004,14 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     if (config) warnAboutMissingReviewerProvider(ctx, config);
 
     resetCallTracking();
+    // Until the lookup settles the parent is unknown, so no hc message can authorize.
+    hcTerminal = hcTerminalFromEnv();
+    const lookup: Promise<void> | undefined = hcTerminal
+      ? detectHcTerminal().then((found) => {
+        if (hcLookup === lookup) hcTerminal = found;
+      })
+      : undefined;
+    hcLookup = lookup;
     subagentSession = detectSubagentContext(ctx.cwd) !== undefined;
     unattendedSession = detectUnattended() !== undefined;
     sessionApprovalMode = undefined;

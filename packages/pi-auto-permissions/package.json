@@ -53,6 +53,7 @@
     "unattended.ts",
     "evaluation-log.ts",
     "gates.ts",
+    "hc-terminal.ts",
     "jsonl-sidecar.ts",
     "override-evidence.ts",
     "review.ts",
