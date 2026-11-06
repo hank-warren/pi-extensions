@@ -53,7 +53,10 @@ const FIXTURES: RuleFixture[] = [
 			'hc keys "$HC_TERMINAL_ID" 1 enter',
 			"hc send $HC_TERMINAL_ID yes",
 			"hc interrupt ${HC_TERMINAL_ID}",
-			'hc send --force t7 "1"',
+			'hc send --wait "$HC_TERMINAL_ID" yes',
+			"cd /repo && hc keys $HC_TERMINAL_ID 1",
+			"env X=1 hc send $HC_TERMINAL_ID yes",
+			"echo $(hc keys $HC_TERMINAL_ID enter)",
 		],
 		nearMisses: [
 			"tmux send-keys -t %5 'npm test' Enter",
@@ -62,6 +65,10 @@ const FIXTURES: RuleFixture[] = [
 			'hc send t7 "review only src/x.rs"',
 			'hc send "$PARENT_TERMINAL" done',
 			"hc read t7 --lines 40",
+			// The terminal argument is t7; this terminal only appears in the message.
+			'hc send t7 "Review x.rs. Report with hc send $HC_TERMINAL_ID when done."',
+			'hc send --force t7 "1"',
+			"echo 'next: hc send $HC_TERMINAL_ID done'",
 		],
 	},
 	{
@@ -386,10 +393,22 @@ describe("default ruleset", () => {
 
 	test("self-driving keystrokes also catch this terminal's own literal hc id", () => {
 		const pattern = selfDrivingPattern("t13");
-		for (const command of ["hc keys t13 1 enter", 'hc send "t13" yes', "hc interrupt oracle-vps/t13"]) {
+		for (const command of [
+			"hc keys t13 1 enter",
+			'hc send "t13" yes',
+			"hc interrupt oracle-vps/t13",
+			"hc send --if idle t13 go",
+			"hc send --force --timeout 30 t13 go",
+		]) {
 			assert.ok(pattern.test(command), command);
 		}
-		for (const command of ["hc keys t130 enter", "hc send t7 yes", "hc keys t1 enter"]) {
+		for (const command of [
+			"hc keys t130 enter",
+			"hc send t7 yes",
+			"hc keys t1 enter",
+			'hc send t7 "Review the patch and report back to t13"',
+			"hc send --wait t7 t13",
+		]) {
 			assert.ok(!pattern.test(command), command);
 		}
 		assert.ok(!selfDrivingPattern("t13; rm").test("hc keys t13 1"), "an id that is not a plain address adds no pattern");

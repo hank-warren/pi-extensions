@@ -29,15 +29,21 @@ import type { Gate } from "./gates.js";
  *   these rules are the deterministic prefilter.
  */
 
+/** `hc` in command position, so an `hc send` quoted inside a message is not one. */
+const HC_COMMAND_START = String.raw`(?:^|[;&|(\n]\s*|\$\(\s*|` + "`" + String.raw`\s*|\b(?:sudo|exec|command|xargs|env|nohup|time|timeout\s+\S+)\s+|\b\w+=\S*\s+)`;
+/** hc keys/send/interrupt options before the terminal argument; only --if and --timeout take a value. */
+const HC_OPTIONS = String.raw`(?:\s+(?:--(?:if|timeout)(?:=\S+|\s+\S+)|--?[\w-]+))*`;
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**
- * Keystrokes or forced input into this agent's own terminal: a tmux send-keys without
- * -t or aimed at $TMUX_PANE, hc keys/send/interrupt aimed at $HC_TERMINAL_ID or this
- * terminal's literal id (read from the environment when the rules are built), and
- * hc send --force, which types past a terminal that is blocked on a prompt.
+ * Keystrokes or input into this agent's own terminal: a tmux send-keys without -t or
+ * aimed at $TMUX_PANE, and hc keys/send/interrupt whose terminal argument (the first
+ * word after any options) is $HC_TERMINAL_ID or this terminal's literal id, read from
+ * the environment when the rules are built. Only the terminal argument counts, so a
+ * message that mentions this terminal ("report back to t13") is not self-driving.
  */
 export function selfDrivingPattern(terminalId: string | undefined): RegExp {
   const self = [String.raw`\$\{?HC_TERMINAL_ID\}?`];
@@ -46,8 +52,7 @@ export function selfDrivingPattern(terminalId: string | undefined): RegExp {
     [
       String.raw`\btmux\s+send-keys\b(?![^|&;]*\s-t)`,
       String.raw`\btmux\s+send-keys\b[^|&;]*\s-t[= ]?\s*['"]?\$\{?TMUX_PANE`,
-      String.raw`\bhc\s+(?:keys|send|interrupt)\b[^|&;]*\s['"]?(?:${self.join("|")})['"]?(?=\s|$|[;|&])`,
-      String.raw`\bhc\s+send\b[^|&;]*\s--force\b`,
+      `${HC_COMMAND_START}hc\\s+(?:keys|send|interrupt)${HC_OPTIONS}\\s+['"]?(?:${self.join("|")})['"]?(?=\\s|$|[;|&])`,
     ].join("|"),
     "i",
   );
@@ -69,7 +74,7 @@ const OVERSIGHT_RULES: readonly Gate[] = [
     level: "deny",
     group: "oversight",
     label: "Self-driving keystrokes",
-    message: "Sending keystrokes or forced input to this agent's own terminal, or forcing input past a terminal blocked on a prompt, answers prompts meant for a human. Target another terminal explicitly, without --force, if you are automating a different process.",
+    message: "Sending keystrokes or input to this agent's own terminal answers prompts meant for a human. Target another terminal explicitly if you are automating a different process.",
   },
   {
     pattern: /\bhc\s+keys\b/i,
