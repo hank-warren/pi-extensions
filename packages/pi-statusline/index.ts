@@ -92,9 +92,11 @@ export function renderUsageSegment(
 	const dot = styled(palette.dim, "\u00b7");
 	const parts: string[] = [];
 	if (usage.claude) {
-		let claude = `${percent(usage.claude.fiveHour)}${dot}${percent(usage.claude.sevenDay)}`;
-		if (usage.claude.scopedWeekly !== undefined) claude += `${dot}${percent(usage.claude.scopedWeekly)}`;
-		parts.push(`${styled(palette.text, CLAUDE_ICON)} ${claude}`);
+		const claude = [usage.claude.fiveHour, usage.claude.sevenDay, usage.claude.scopedWeekly]
+			.filter((remaining): remaining is number => remaining !== undefined)
+			.map(percent)
+			.join(dot);
+		if (claude.length > 0) parts.push(`${styled(palette.text, CLAUDE_ICON)} ${claude}`);
 	}
 	if (usage.codex) {
 		// Shortest window first, mirroring Claude. Plans without a 5-hour limit
@@ -391,8 +393,8 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 			usage_remaining: {
 				claude: usage.claude
 					? {
-							five_hour: usage.claude.fiveHour,
-							seven_day: usage.claude.sevenDay,
+							five_hour: usage.claude.fiveHour ?? null,
+							seven_day: usage.claude.sevenDay ?? null,
 							scoped_weekly: usage.claude.scopedWeekly ?? null,
 						}
 					: null,
@@ -664,6 +666,11 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 		// Turn end is the event-driven trigger, mirroring how Claude Code re-runs a
 		// statusline command when a new assistant message arrives.
 		if (settings.showCustomItems) customItems.refresh();
+	});
+	// Claude responses carry the account's rate-limit windows in their headers, so
+	// the meter stays current without polling the rate-limited usage endpoint.
+	pi.on("after_provider_response", (event, ctx) => {
+		if (settings.showUsage) runInBackground(usageTracker.observeClaudeHeaders(ctx.model?.provider, event.headers));
 	});
 	// The meters follow the main model's account, so a switch between two logins
 	// of the same provider family has to re-point the tracker before it repaints.

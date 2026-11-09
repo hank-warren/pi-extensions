@@ -14,7 +14,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
  * which is also what an entry written by an older statusline looks like.
  */
 export interface UsageSnapshot {
-	claude?: { fiveHour: number; sevenDay: number; scopedWeekly?: number };
+	claude?: { fiveHour?: number; sevenDay?: number; scopedWeekly?: number };
 	/**
 	 * Codex reports one or two windows depending on the plan: a short (5-hour)
 	 * window, a long one, or both. Every field is optional because which of them
@@ -113,8 +113,11 @@ export function parseClaudeUsage(json: unknown): UsageSnapshot["claude"] | undef
 	};
 	const fiveHour = toRemaining(body.five_hour?.utilization);
 	const sevenDay = toRemaining(body.seven_day?.utilization);
-	if (fiveHour === undefined || sevenDay === undefined) return undefined;
-	const result: UsageSnapshot["claude"] = { fiveHour, sevenDay };
+	// Some plans report no 5-hour window (`five_hour: null`); keep whichever windows exist.
+	if (fiveHour === undefined && sevenDay === undefined) return undefined;
+	const result: NonNullable<UsageSnapshot["claude"]> = {};
+	if (fiveHour !== undefined) result.fiveHour = fiveHour;
+	if (sevenDay !== undefined) result.sevenDay = sevenDay;
 	if (Array.isArray(body.limits)) {
 		const scoped = body.limits.find(
 			(entry): entry is ClaudeLimitEntry =>
@@ -127,6 +130,33 @@ export function parseClaudeUsage(json: unknown): UsageSnapshot["claude"] | undef
 		if (scopedWeekly !== undefined) result.scopedWeekly = scopedWeekly;
 	}
 	return result;
+}
+
+/**
+ * Parse the unified rate-limit headers Anthropic sends on every Messages
+ * response. Utilizations are fractions (0–1) and resets are epoch seconds; a
+ * window the account does not have is simply absent. The model-scoped weekly
+ * limit is not in the headers, only in the usage endpoint. Undefined when no
+ * window header is present, as for another provider or an API-key account.
+ */
+export function parseClaudeHeaders(
+	headers: Record<string, string | undefined>,
+): { value: NonNullable<UsageSnapshot["claude"]>; resetsAt?: number } | undefined {
+	const window = (name: string) => {
+		const used = Number(headers[`anthropic-ratelimit-unified-${name}-utilization`] ?? Number.NaN);
+		const reset = Number(headers[`anthropic-ratelimit-unified-${name}-reset`] ?? Number.NaN);
+		return {
+			remaining: Number.isFinite(used) ? toRemaining(used * 100) : undefined,
+			reset: Number.isFinite(reset) ? reset * 1_000 : undefined,
+		};
+	};
+	const fiveHour = window("5h");
+	const sevenDay = window("7d");
+	if (fiveHour.remaining === undefined && sevenDay.remaining === undefined) return undefined;
+	const value: NonNullable<UsageSnapshot["claude"]> = {};
+	if (fiveHour.remaining !== undefined) value.fiveHour = fiveHour.remaining;
+	if (sevenDay.remaining !== undefined) value.sevenDay = sevenDay.remaining;
+	return { value, resetsAt: earliestReset([fiveHour.reset, sevenDay.reset]) };
 }
 
 interface CodexWindow {
@@ -649,6 +679,46 @@ export class UsageTracker {
 		const updated: UsageCache = { accounts: updatedAccounts };
 		this.publish(this.merge({ claude, codex }, incomingResets, auth, accounts, now), auth, accounts, updated);
 		await this.writeCache(updated);
+	}
+
+	/**
+	 * Adopt the usage a Claude response carried in its rate-limit headers. They
+	 * cost no request, so they keep the meter current between endpoint polls and
+	 * while the endpoint is rate limiting. The scoped weekly value only comes from
+	 * the endpoint, so the last polled one is kept. Never throws.
+	 *
+	 * @param providerId Provider of the model that made the request; the event
+	 *   itself does not say, so responses are attributed to the session's model.
+	 */
+	async observeClaudeHeaders(providerId: string | undefined, headers: Record<string, string>): Promise<void> {
+		try {
+			if (providerId === undefined || familyOf(providerId) !== "claude") return;
+			const fetched = parseClaudeHeaders(headers);
+			if (fetched === undefined) return;
+			const auth = (await this.readAuth()) ?? {};
+			const identity = accountFingerprint(auth, providerId);
+			if (identity === undefined) return;
+			const cache = pruneCache((await this.readCache()) ?? EMPTY_CACHE, auth);
+			const previous = cache.accounts[providerId];
+			const value = { ...fetched.value };
+			if (previous?.claude?.scopedWeekly !== undefined) value.scopedWeekly = previous.claude.scopedWeekly;
+			const entry: UsageAccountEntry = { ...previous, identity, attemptedAt: previous?.attemptedAt ?? 0, claude: value };
+			if (fetched.resetsAt === undefined) delete entry.resetsAt;
+			else entry.resetsAt = fetched.resetsAt;
+			if (JSON.stringify(entry) !== JSON.stringify(previous)) {
+				await this.writeCache({ accounts: { ...cache.accounts, [providerId]: entry } });
+			}
+			if (resolveUsageAccounts(this.activeProvider).claude !== providerId) return;
+			const resets = { ...this.currentResets };
+			if (entry.resetsAt === undefined) delete resets.claude;
+			else resets.claude = entry.resetsAt;
+			this.currentResets = resets;
+			if (JSON.stringify(value) === JSON.stringify(this.current.claude)) return;
+			this.current = { ...this.current, claude: value };
+			this.onChange?.();
+		} catch {
+			// Usage display is best-effort and must never interrupt the agent.
+		}
 	}
 
 	/**
