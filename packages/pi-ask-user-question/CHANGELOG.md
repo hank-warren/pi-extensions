@@ -1,5 +1,11 @@
 # @hank-warren/pi-ask-user-question
 
+## 0.8.1
+
+### Patch Changes
+
+- The approval guidance now asks for the approving option's label to name the exact action and target instead of a generic "Approve", since a permission reviewer counts the label the user picked, not the question text.
+
 ## 0.8.0
 
 ### Minor Changes
