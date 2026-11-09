@@ -41,6 +41,7 @@ const EXPECTED_SURFACES = {
 	"./packages/pi-statusline/index.ts": {
 		commands: ["statusline"],
 		handlers: [
+			"after_provider_response",
 			"model_select",
 			"session_shutdown",
 			"session_start",

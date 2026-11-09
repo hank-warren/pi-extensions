@@ -8,6 +8,7 @@ import {
 	CODEX_USAGE_REFRESH_INTERVAL_MS,
 	claudeResetAt,
 	codexResetAt,
+	parseClaudeHeaders,
 	parseClaudeUsage,
 	parseCodexUsage,
 	parseRetryAfter,
@@ -29,6 +30,24 @@ const claudePayload = {
 		{ kind: "session", group: "session", percent: 3, severity: "normal", scope: null, is_active: false },
 		{ kind: "weekly_all", group: "weekly", percent: 46, severity: "normal", scope: null, is_active: false },
 	],
+};
+
+/** Header sets captured from real responses: one account without a 5-hour window, one with. */
+const personalHeaders = {
+	"anthropic-ratelimit-unified-7d-reset": "1794553200",
+	"anthropic-ratelimit-unified-7d-status": "allowed",
+	"anthropic-ratelimit-unified-7d-utilization": "0.35",
+	"anthropic-ratelimit-unified-representative-claim": "seven_day",
+	"anthropic-ratelimit-unified-status": "allowed",
+};
+const teamHeaders = {
+	"anthropic-ratelimit-unified-5h-reset": "1794273000",
+	"anthropic-ratelimit-unified-5h-status": "allowed",
+	"anthropic-ratelimit-unified-5h-utilization": "0.01",
+	"anthropic-ratelimit-unified-7d-reset": "1794531600",
+	"anthropic-ratelimit-unified-7d-status": "allowed",
+	"anthropic-ratelimit-unified-7d-utilization": "0.0",
+	"anthropic-ratelimit-unified-status": "allowed",
 };
 
 const claudeScopedPayload = {
@@ -112,8 +131,41 @@ test("parseClaudeUsage rejects malformed payloads", () => {
 	assert.equal(parseClaudeUsage(undefined), undefined);
 	assert.equal(parseClaudeUsage(null), undefined);
 	assert.equal(parseClaudeUsage({}), undefined);
-	assert.equal(parseClaudeUsage({ five_hour: { utilization: 3 } }), undefined);
-	assert.equal(parseClaudeUsage({ five_hour: { utilization: "3" }, seven_day: { utilization: 46 } }), undefined);
+	assert.equal(parseClaudeUsage({ five_hour: null, seven_day: null }), undefined);
+	assert.equal(parseClaudeUsage({ five_hour: { utilization: "3" }, seven_day: { utilization: "46" } }), undefined);
+});
+
+/**
+ * Some subscription accounts get `five_hour: null` while the weekly windows are
+ * populated. Dropping the whole snapshot for that blanked the Claude meter.
+ */
+test("parseClaudeUsage keeps the windows an account has when one is absent", () => {
+	assert.deepEqual(
+		parseClaudeUsage({
+			five_hour: null,
+			seven_day: { utilization: 34 },
+			limits: [{ kind: "weekly_scoped", percent: 4 }],
+		}),
+		{ sevenDay: 66, scopedWeekly: 96 },
+	);
+	assert.deepEqual(parseClaudeUsage({ five_hour: { utilization: 3 } }), { fiveHour: 97 });
+	assert.deepEqual(parseClaudeUsage({ five_hour: { utilization: "3" }, seven_day: { utilization: 46 } }), {
+		sevenDay: 54,
+	});
+});
+
+test("parseClaudeHeaders reads the unified rate-limit windows", () => {
+	assert.deepEqual(parseClaudeHeaders(teamHeaders), {
+		value: { fiveHour: 99, sevenDay: 100 },
+		resetsAt: 1_794_273_000_000,
+	});
+	assert.deepEqual(parseClaudeHeaders(personalHeaders), { value: { sevenDay: 65 }, resetsAt: 1_794_553_200_000 });
+});
+
+test("parseClaudeHeaders ignores responses without window headers", () => {
+	assert.equal(parseClaudeHeaders({}), undefined);
+	assert.equal(parseClaudeHeaders({ "anthropic-ratelimit-unified-status": "allowed" }), undefined);
+	assert.equal(parseClaudeHeaders({ "anthropic-ratelimit-unified-7d-utilization": "n/a" }), undefined);
 });
 
 test("parseCodexUsage reads both windows when the plan has a 5-hour limit", () => {
@@ -216,6 +268,11 @@ test("renderUsageSegment omits missing providers", () => {
 	assert.equal(stripAnsi(codexOnly ?? ""), "\uec81 80");
 	assert.equal(stripAnsi(renderUsageSegment({ codex: { fiveHour: 80 } }) ?? ""), "\uec81 80");
 	assert.equal(renderUsageSegment({}), undefined);
+});
+
+test("renderUsageSegment renders the Claude windows that exist", () => {
+	assert.equal(stripAnsi(renderUsageSegment({ claude: { sevenDay: 66, scopedWeekly: 96 } }) ?? ""), "\uec82 66·96");
+	assert.equal(renderUsageSegment({ claude: {} }), undefined);
 });
 
 test("renderUsageSegment drops a codex entry carrying no percents", () => {
@@ -1342,4 +1399,73 @@ test("UsageTracker retries a boundary once, not on every tick, when the poll kee
 	await tracker.refresh();
 	assert.equal(calls.length, 3, "the retry window resumes governing once the boundary is answered");
 	assert.deepEqual(tracker.snapshot().claude, { fiveHour: 97, sevenDay: 54 });
+});
+
+/**
+ * Every Claude response carries the account's windows in its rate-limit headers,
+ * so the meter must not depend on the usage endpoint, which rate limits hard.
+ */
+test("UsageTracker shows header usage while the usage endpoint is rate limited", async () => {
+	const authPath = await writeAuthFile({ anthropic: fullAuth.anthropic });
+	let changes = 0;
+	const tracker = makeTracker({
+		authPath,
+		activeProvider: "anthropic",
+		fetchFn: fakeFetch({ [CLAUDE_URL]: 429 }),
+		onChange: () => changes++,
+	});
+	await tracker.refresh();
+	assert.equal(tracker.snapshot().claude, undefined);
+
+	await tracker.observeClaudeHeaders("anthropic", personalHeaders);
+	assert.deepEqual(tracker.snapshot().claude, { sevenDay: 65 });
+	assert.equal(changes, 1);
+	const entry = JSON.parse(await readFile(`${authPath}.usage-cache.json`, "utf8")).accounts.anthropic;
+	assert.deepEqual(entry.claude, { sevenDay: 65 });
+	assert.equal(entry.resetsAt, 1_794_553_200_000);
+	assert.ok(entry.backoff > 0, "the endpoint's backoff is left in place");
+
+	await tracker.observeClaudeHeaders("anthropic", personalHeaders);
+	assert.equal(changes, 1, "an unchanged value does not repaint");
+});
+
+test("UsageTracker keeps the endpoint's scoped weekly value when headers arrive", async () => {
+	const authPath = await writeAuthFile({ anthropic: fullAuth.anthropic });
+	const tracker = makeTracker({ authPath, fetchFn: fakeFetch({ [CLAUDE_URL]: claudeScopedPayload }) });
+	await tracker.refresh();
+	assert.equal(tracker.snapshot().claude?.scopedWeekly, 24);
+
+	await tracker.observeClaudeHeaders("anthropic", teamHeaders);
+	assert.deepEqual(tracker.snapshot().claude, { fiveHour: 99, sevenDay: 100, scopedWeekly: 24 });
+});
+
+test("UsageTracker stores another account's header usage without displaying it", async () => {
+	const authPath = await writeAuthFile({
+		anthropic: fullAuth.anthropic,
+		"anthropic-work": { type: "oauth", access: "work-token", refresh: "r", expires: 0 },
+	});
+	let changes = 0;
+	const tracker = makeTracker({
+		authPath,
+		activeProvider: "anthropic",
+		fetchFn: fakeFetch({}),
+		onChange: () => changes++,
+	});
+	await tracker.observeClaudeHeaders("anthropic-work", teamHeaders);
+	assert.equal(tracker.snapshot().claude, undefined);
+	assert.equal(changes, 0);
+	const cache = JSON.parse(await readFile(`${authPath}.usage-cache.json`, "utf8"));
+	assert.deepEqual(cache.accounts["anthropic-work"].claude, { fiveHour: 99, sevenDay: 100 });
+	assert.equal(cache.accounts.anthropic, undefined);
+});
+
+test("UsageTracker ignores header usage for other providers and logged-out accounts", async () => {
+	const authPath = await writeAuthFile({ "openai-codex": fullAuth["openai-codex"] });
+	let changes = 0;
+	const tracker = makeTracker({ authPath, fetchFn: fakeFetch({}), onChange: () => changes++ });
+	await tracker.observeClaudeHeaders("openai-codex", teamHeaders);
+	await tracker.observeClaudeHeaders("anthropic", teamHeaders);
+	await tracker.observeClaudeHeaders(undefined, teamHeaders);
+	assert.equal(changes, 0);
+	await assert.rejects(readFile(`${authPath}.usage-cache.json`, "utf8"), { code: "ENOENT" });
 });
