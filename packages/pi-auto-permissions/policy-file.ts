@@ -9,9 +9,10 @@
  * Because this file and the config decide what the reviewer allows, a change
  * to either by the agent is itself reviewed, whichever tool makes it.
  */
-import { readFileSync, realpathSync } from "node:fs";
+import { readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { autoPermissionsConfigPath } from "./config.js";
 
 export const POLICY_FILENAME = "POLICY.md";
@@ -42,17 +43,51 @@ export function readPolicy(path: string): string | undefined {
   return content.trim() || undefined;
 }
 
-/** Resolve symlinks, for a file that may not exist yet: its directory's real path plus its name. */
-function canonical(path: string): string {
+const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/gu;
+
+/**
+ * The absolute path Pi's file tools resolve `path` to. Pi does not export its
+ * normalization (unicode spaces, a leading `@`, `~`, `file://` URLs), so it is
+ * mirrored here; pi-contract.test.ts pins it against the real write tool.
+ */
+export function resolveToolPath(path: string, cwd: string): string {
+  let normalized = path.replace(UNICODE_SPACES, " ");
+  if (normalized.startsWith("@")) normalized = normalized.slice(1);
+  if (normalized === "~") {
+    normalized = homedir();
+  } else if (normalized.startsWith("~/") || (process.platform === "win32" && normalized.startsWith("~\\"))) {
+    normalized = join(homedir(), normalized.slice(2));
+  } else if (/^file:\/\//u.test(normalized)) {
+    try {
+      normalized = fileURLToPath(normalized);
+    } catch {
+      // Not a usable file URL; Pi's tool fails on it too.
+    }
+  }
+  return resolve(cwd, normalized);
+}
+
+const MAX_LINK_DEPTH = 40;
+
+/**
+ * Resolve symlinks for a path that may not exist yet. A write through a
+ * dangling symlink creates the link's target, so the link is followed by
+ * hand; otherwise the nearest existing ancestor is resolved and the rest of
+ * the path kept.
+ */
+function canonical(path: string, depth = 0): string {
   try {
     return realpathSync(path);
   } catch {
-    try {
-      return join(realpathSync(dirname(path)), basename(path));
-    } catch {
-      return path;
-    }
+    if (depth >= MAX_LINK_DEPTH) return path;
   }
+  try {
+    return canonical(resolve(dirname(path), readlinkSync(path)), depth + 1);
+  } catch {
+    // Not a symlink: it does not exist, or it is an ordinary missing file.
+  }
+  const parent = dirname(path);
+  return parent === path ? path : join(canonical(parent, depth + 1), basename(path));
 }
 
 /** Which of the reviewer's files `path` names, as a file tool resolves it from `cwd`. */
@@ -61,11 +96,25 @@ export function reviewerFileAt(
   cwd: string,
   files: ReviewerFiles = reviewerFiles(),
 ): keyof ReviewerFiles | undefined {
-  const expanded = path === "~" || path.startsWith("~/") ? join(homedir(), path.slice(1)) : path;
-  const target = canonical(resolve(cwd, expanded));
+  const target = canonical(resolveToolPath(path, cwd));
   if (target === canonical(files.policy)) return "policy";
   if (target === canonical(files.config)) return "config";
   return undefined;
+}
+
+/**
+ * Whether a shell command names one of the reviewer's files: its directory by
+ * absolute path, or the directory's name together with a file's name, which
+ * covers `~`, `$VAR` and `cd` spellings. Such a command is reviewed even when
+ * no rule matches it. This reads raw command text, so a glob or a variable
+ * holding the whole path gets past it; a reviewed shell (reviewAllShell) does
+ * not depend on it.
+ */
+export function commandNamesReviewerFile(command: string, files: ReviewerFiles = reviewerFiles()): boolean {
+  const dir = dirname(files.config);
+  if (command.includes(dir)) return true;
+  return command.includes(basename(dir))
+    && (command.includes(basename(files.policy)) || command.includes(basename(files.config)));
 }
 
 /** The reviewer prompt section for the policy and the reviewer's own files. */

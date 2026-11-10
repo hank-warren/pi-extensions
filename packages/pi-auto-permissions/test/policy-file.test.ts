@@ -3,7 +3,8 @@ import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "n
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { policySection, readPolicy, reviewerFileAt, reviewerFiles } from "../policy-file.ts";
+import { pathToFileURL } from "node:url";
+import { commandNamesReviewerFile, policySection, readPolicy, resolveToolPath, reviewerFileAt, reviewerFiles } from "../policy-file.ts";
 
 function scratch(): { dir: string; files: ReturnType<typeof reviewerFiles> } {
 	const dir = mkdtempSync(join(tmpdir(), "ap-policy-"));
@@ -69,5 +70,48 @@ describe("recognising a write to the reviewer's files", () => {
 		mkdirSync(join(home, "ap"), { recursive: true });
 		const files = reviewerFiles(join(home, "ap", "config.json"));
 		assert.equal(reviewerFileAt("~/ap/POLICY.md", "/somewhere", files), "policy");
+	});
+
+	test("resolves the spellings Pi's file tools accept: a leading @, a file URL, unicode spaces", () => {
+		const { dir, files } = scratch();
+		assert.equal(reviewerFileAt(`@${files.config}`, "/", files), "config");
+		assert.equal(reviewerFileAt("@POLICY.md", dir, files), "policy");
+		assert.equal(reviewerFileAt(pathToFileURL(files.policy).href, "/", files), "policy");
+		assert.equal(resolveToolPath("a\u00A0b.md", "/x"), "/x/a b.md");
+		assert.equal(resolveToolPath("@~/notes.md", "/x"), join(homedir(), "notes.md"));
+	});
+
+	test("follows a dangling symlink to a policy file that does not exist yet", () => {
+		const { files } = scratch();
+		const elsewhere = mkdtempSync(join(tmpdir(), "ap-policy-dangling-"));
+		symlinkSync(files.policy, join(elsewhere, "notes"));
+		assert.equal(reviewerFileAt(join(elsewhere, "notes"), "/", files), "policy");
+		symlinkSync(join(elsewhere, "notes"), join(elsewhere, "notes-2"));
+		assert.equal(reviewerFileAt(join(elsewhere, "notes-2"), "/", files), "policy", "through a chain of links");
+		symlinkSync(join(elsewhere, "loop-b"), join(elsewhere, "loop-a"));
+		symlinkSync(join(elsewhere, "loop-a"), join(elsewhere, "loop-b"));
+		assert.equal(reviewerFileAt(join(elsewhere, "loop-a"), "/", files), undefined, "a link loop ends");
+	});
+});
+
+describe("recognising a shell command that names the reviewer's files", () => {
+	const files = reviewerFiles("/home/u/.pi/agent/pi-auto-permissions/config.json");
+
+	test("by the directory's absolute path, or its name together with a file's name", () => {
+		for (const command of [
+			"truncate -s 0 /home/u/.pi/agent/pi-auto-permissions/POLICY.md",
+			"cd /home/u/.pi/agent/pi-auto-permissions && rm *",
+			"printf x >> ~/.pi/agent/pi-auto-permissions/POLICY.md",
+			'cp /tmp/c.json "$PI_CODING_AGENT_DIR/pi-auto-permissions/config.json"',
+			"cd ~/.pi/agent/pi-auto-permissions; truncate -s 0 POLICY.md",
+		]) assert.equal(commandNamesReviewerFile(command, files), true, command);
+	});
+
+	test("not by a file name alone, or the directory's name alone", () => {
+		for (const command of [
+			"cat config.json",
+			"ls packages/pi-auto-permissions",
+			"git commit -m 'update POLICY.md wording'",
+		]) assert.equal(commandNamesReviewerFile(command, files), false, command);
 	});
 });

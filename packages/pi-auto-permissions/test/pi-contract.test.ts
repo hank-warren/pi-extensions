@@ -17,10 +17,11 @@
  */
 
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import {
 	createFauxCore,
 	fauxAssistantMessage,
@@ -38,6 +39,7 @@ import {
 	type ExtensionAPI,
 } from "@earendil-works/pi-coding-agent";
 import autoPermissionsExtension from "../index.ts";
+import { resolveToolPath } from "../policy-file.ts";
 
 const PROVIDER = "ap-contract";
 const MODEL_ID = "agent";
@@ -236,6 +238,32 @@ test("Pi appends an approval's note to the bash result the model reads next", as
 		if (previousConfig === undefined) delete process.env.PI_AUTO_PERMISSIONS_CONFIG;
 		else process.env.PI_AUTO_PERMISSIONS_CONFIG = previousConfig;
 		rmSync(dir, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("Pi's write tool lands where resolveToolPath says, for every spelling of a path it accepts", async () => {
+	const createWriteTool = (PiCodingAgent as Record<string, unknown>).createWriteTool as
+		| ((cwd: string) => { execute(id: string, params: { path: string; content: string }, signal?: AbortSignal): Promise<unknown> })
+		| undefined;
+	assert.ok(createWriteTool, "Pi exports createWriteTool");
+	const cwd = mkdtempSync(join(tmpdir(), "pi-ap-contract-paths-"));
+	const tool = createWriteTool(cwd);
+	const target = join(cwd, "policy copy.md");
+	try {
+		const spellings = [
+			"policy copy.md",
+			`@${target}`,
+			"@policy copy.md",
+			pathToFileURL(target).href,
+			"policy\u00A0copy.md",
+		];
+		for (const [index, spelling] of spellings.entries()) {
+			assert.equal(resolveToolPath(spelling, cwd), target, `resolveToolPath(${JSON.stringify(spelling)})`);
+			await tool.execute(`write-${index}`, { path: spelling, content: `spelling ${index}` });
+			assert.equal(readFileSync(target, "utf8"), `spelling ${index}`, `Pi wrote ${JSON.stringify(spelling)} to the same file`);
+		}
+	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });

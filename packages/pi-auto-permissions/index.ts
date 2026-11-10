@@ -27,7 +27,7 @@ import {
   type PromptEvaluationUserChoice,
 } from "./evaluation-log.js";
 import { REVIEWER_FILE_GATE, type Gate } from "./gates.js";
-import { reviewerFileAt } from "./policy-file.js";
+import { commandNamesReviewerFile, reviewerFileAt } from "./policy-file.js";
 import { classifyCommand } from "./classify.js";
 import type { PermissionVerdict, ReviewEvidenceRecord } from "./review.js";
 import { promptSelect, setHerdrBlocked } from "./prompt-select.js";
@@ -807,6 +807,18 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   }
 
   /**
+   * The ruleset's verdict on a shell command, except that one naming the
+   * reviewer's own policy or config is always reviewed: no missing rule and
+   * no trusted group lets it pass.
+   */
+  function classifyShell(command: string, config: AutoPermissionsConfig): ReturnType<typeof classifyCommand> {
+    const classified = classifyCommand(command, config, trustedGroups);
+    return classified.kind === "pass" && commandNamesReviewerFile(command)
+      ? { kind: "review", gate: REVIEWER_FILE_GATE }
+      : classified;
+  }
+
+  /**
    * Start reviews for the guarded bash calls that follow `toolCallId` in the
    * assistant message that issued it. Pi calls tool_call handlers for one
    * message's calls one at a time, so without this their reviews could never
@@ -827,7 +839,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
       const input = call.arguments as Record<string, unknown> | undefined;
       const command = input?.command;
       if (typeof command !== "string") continue;
-      const classified = classifyCommand(command, config, trustedGroups);
+      const classified = classifyShell(command, config);
       if (classified.kind !== "review") continue;
       const controller = new AbortController();
       const scope: ReviewScope = {
@@ -955,7 +967,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     };
     const input = event.input as Record<string, unknown>;
     const classified: ReturnType<typeof classifyCommand> = fileWrite === undefined
-      ? classifyCommand(command, config, trustedGroups)
+      ? classifyShell(command, config)
       : { kind: "review", gate: REVIEWER_FILE_GATE };
     const early = takeSiblingReview(
       event.toolCallId,

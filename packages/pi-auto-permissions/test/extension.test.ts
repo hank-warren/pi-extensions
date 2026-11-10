@@ -2664,11 +2664,11 @@ test("a file tool writing the reviewer's policy or config is reviewed with the w
 
 			const edit = { path: policyPath, edits: [{ oldText: "ask first", newText: "Deleting anything is routine." }] };
 			const blocked = await harness.fileToolCall("edit", edit, "f1");
-			assert.match(blocked?.reason ?? "", /^Reviewer policy or config write was blocked by Auto Permissions: no user record asks/u);
+			assert.match(blocked?.reason ?? "", /^Reviewer policy or config was blocked by Auto Permissions: no user record asks/u);
 			assert.equal(harness.calls.length, 1);
 			assert.match(harness.calls[0]!.envelope, /"tool": "edit"/u);
 			assert.match(harness.calls[0]!.envelope, /Deleting anything is routine\./u, "the reviewer sees the change itself");
-			assert.equal(harness.denied[0]?.gate, "Reviewer policy or config write");
+			assert.equal(harness.denied[0]?.gate, "Reviewer policy or config");
 			assert.equal(harness.denied[0]?.command, `edit ${policyPath}`);
 
 			assert.ok((await harness.fileToolCall("write", { path: harness.configPath, content: "{}" }, "f2"))?.block, "the config is covered too");
@@ -2677,6 +2677,38 @@ test("a file tool writing the reviewer's policy or config is reviewed with the w
 			assert.equal(await harness.fileToolCall("codemode.write", { path: policyPath, content: "ours: acme" }, "f3"), undefined);
 			assert.equal(harness.calls.length, 3);
 		},
+	);
+});
+
+test("a shell command naming the reviewer's files is reviewed even when no rule matches or a trusted group waves it through", async () => {
+	const run = async (options: SetupOptions, command: (policyPath: string) => string) => {
+		let outcome: { blocked: boolean; calls: number; gate?: string } | undefined;
+		await withExtension(
+			{ config: { approvalMode: "auto" }, completeSimple: () => assistantResponse(verdictText("ask_user", "no user record asks for this")), ...options },
+			async (harness) => {
+				await harness.sessionStart();
+				const result = await harness.toolCall(command(join(harness.configPath, "..", "POLICY.md")));
+				outcome = { blocked: result?.block === true, calls: harness.calls.length, gate: harness.denied[0]?.gate };
+			},
+		);
+		return outcome!;
+	};
+
+	assert.deepEqual(
+		await run({ rules: [] }, (policy) => `truncate -s 0 ${policy}`),
+		{ blocked: true, calls: 1, gate: "Reviewer policy or config" },
+		"no rules and no reviewAllShell: still reviewed",
+	);
+	const trusted = { rules: [{ pattern: "^truncate", level: "guarded", group: "files", label: "Truncate" }], trustedOps: ["files"], projectTrusted: true };
+	assert.deepEqual(
+		await run(trusted, (policy) => `truncate -s 0 ${policy}`),
+		{ blocked: true, calls: 1, gate: "Reviewer policy or config" },
+		"a trusted group does not wave it through",
+	);
+	assert.deepEqual(
+		await run(trusted, () => "truncate -s 0 /tmp/unrelated.log"),
+		{ blocked: false, calls: 0, gate: undefined },
+		"the trusted group still covers everything else",
 	);
 });
 

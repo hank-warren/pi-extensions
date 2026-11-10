@@ -188,7 +188,10 @@ In an untrusted project only the agent directory's own files are read. Set `revi
 
 ### The agent cannot rewrite it unreviewed
 
-A change to `POLICY.md` or to the config file is reviewed whichever tool makes it: a shell command, or the `edit` and `write` tools, which are otherwise not gated. The guardian sees the whole change and approves it only when you asked for that change to that file. No rule, policy statement or trusted group turns this off; disabling the extension does.
+A change to `POLICY.md` or to the config file is reviewed whichever tool makes it, and the guardian approves it only when you asked for that change to that file. No rule, policy statement or trusted group turns this off; disabling the extension does.
+
+- **`edit` and `write`**, which are otherwise not gated, are reviewed when their path resolves to one of the two files, with the whole change in the request. The path is resolved the way Pi's file tools resolve it (a leading `@`, `~`, a `file://` URL) and through symlinks, including a symlink whose target does not exist yet.
+- **Shell commands** that name the config directory, or its name together with either file's name, are reviewed even when no rule matches and `reviewAllShell` is off. This reads the command text, so a glob or a variable holding the whole path gets past it; with `reviewAllShell` on, every shell command is reviewed anyway and the guardian's block list covers these files.
 
 ## Define trusted infrastructure
 
