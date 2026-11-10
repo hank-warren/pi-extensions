@@ -77,8 +77,6 @@ function styled(style: string, text: string): string {
 
 const CLAUDE_ICON = "\uec82";
 const OPENAI_ICON = "\uec81";
-/** Stands in for a Claude window the account does not have. */
-const MISSING_WINDOW = "\u2013";
 
 function bandColor(remaining: number, palette: StatuslinePalette): string {
 	return { green: palette.ok, yellow: palette.warn, orange: palette.caution, red: palette.danger }[
@@ -94,15 +92,13 @@ export function renderUsageSegment(
 	const dot = styled(palette.dim, "\u00b7");
 	const parts: string[] = [];
 	if (usage.claude) {
-		// Slots are positional, so a missing window keeps its place: a bare `66·96` reads as 5-hour·weekly.
-		const { fiveHour, sevenDay, scopedWeekly } = usage.claude;
-		const slots = scopedWeekly === undefined ? [fiveHour, sevenDay] : [fiveHour, sevenDay, scopedWeekly];
-		if (slots.some((remaining) => remaining !== undefined)) {
-			const claude = slots
-				.map((remaining) => (remaining === undefined ? styled(palette.dim, MISSING_WINDOW) : percent(remaining)))
-				.join(dot);
-			parts.push(`${styled(palette.text, CLAUDE_ICON)} ${claude}`);
-		}
+		// A window the account does not have takes no slot: a plan without a
+		// 5-hour limit renders weekly, then scoped weekly.
+		const claude = [usage.claude.fiveHour, usage.claude.sevenDay, usage.claude.scopedWeekly]
+			.filter((remaining): remaining is number => remaining !== undefined)
+			.map(percent)
+			.join(dot);
+		if (claude.length > 0) parts.push(`${styled(palette.text, CLAUDE_ICON)} ${claude}`);
 	}
 	if (usage.codex) {
 		// Shortest window first, mirroring Claude. Plans without a 5-hour limit

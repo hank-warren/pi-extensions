@@ -217,16 +217,11 @@ test("renderUsageSegment appends the scoped weekly percent when present", () => 
 	assert.ok(segment?.includes("\x1b[38;2;255;176;85m24\x1b[0m"), "24 remaining renders orange");
 });
 
-test("renderUsageSegment holds a missing claude window's slot with a dim dash", () => {
+test("renderUsageSegment gives a missing claude window no slot", () => {
 	const segment = renderUsageSegment({ claude: { sevenDay: 66, scopedWeekly: 96 } });
-	assert.equal(stripAnsi(segment ?? ""), "\uec82 \u2013\u00b766\u00b796");
-	assert.ok(segment?.includes("\x1b[2m\u2013\x1b[0m"), "the placeholder renders dim, not in a band color");
-	assert.equal(stripAnsi(renderUsageSegment({ claude: { sevenDay: 66 } }) ?? ""), "\uec82 \u2013\u00b766");
-	assert.equal(stripAnsi(renderUsageSegment({ claude: { fiveHour: 97 } }) ?? ""), "\uec82 97\u00b7\u2013");
-	assert.equal(
-		stripAnsi(renderUsageSegment({ claude: { fiveHour: 97, scopedWeekly: 24 } }) ?? ""),
-		"\uec82 97\u00b7\u2013\u00b724",
-	);
+	assert.equal(stripAnsi(segment ?? ""), "\uec82 66\u00b796", "weekly, then scoped weekly");
+	assert.equal(stripAnsi(renderUsageSegment({ claude: { sevenDay: 66 } }) ?? ""), "\uec82 66");
+	assert.equal(stripAnsi(renderUsageSegment({ claude: { fiveHour: 97 } }) ?? ""), "\uec82 97");
 });
 
 test("renderUsageSegment drops a claude entry carrying no percents", () => {
