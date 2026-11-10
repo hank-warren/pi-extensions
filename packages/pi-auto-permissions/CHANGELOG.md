@@ -1,5 +1,19 @@
 # @hank-warren/pi-auto-permissions
 
+## 0.28.0
+
+### Minor Changes
+
+- The guardian reviews permission, not quality, and a failed review gets one retry.
+
+  - **Narrower `revise`.** The reviewer prompt limits `revise` to a block-listed command that a narrower one could replace, a command that breaks something the user said, and a delete whose target is an unresolved shell variable. It states every condition in one reason, as conditions and not as a drafted command, and does not raise a new objection once they are met. Objections to how well a command does its job no longer hold it back. A file or directory the evidence shows the session making counts as session-created.
+  - **One revision per command.** A second `revise` in a later turn, with nothing approved in between, is handled like `ask_user` instead of going back to the agent. Revisions of commands issued in the same turn do not count against each other.
+  - **Notes.** An approval can carry a `note`: one line, cut at 200 characters, appended to that command's output as `Auto Permissions note: …`. The command runs either way.
+  - **One retry.** A review that fails on an unusable answer (no JSON, an invalid decision) or an overloaded provider is tried once more before it counts as failed. Rate limits and timeouts are not retried.
+  - **Block wording.** A blocked command's message no longer suggests getting the same result another way; it says to finish the task a way that does not need the blocked action.
+
+  Existing reviewer lineages rebuild once after upgrade, because the reviewer prompt changed.
+
 ## 0.27.0
 
 ### Minor Changes
