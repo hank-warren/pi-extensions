@@ -27,7 +27,7 @@ import {
   type PromptEvaluationUserChoice,
 } from "./evaluation-log.js";
 import { REVIEWER_FILE_GATE, type Gate } from "./gates.js";
-import { commandNamesReviewerFile, reviewerFileAt } from "./policy-file.js";
+import { commandNamesReviewerFile, describeReviewerFileWrite, reviewerFileAt } from "./policy-file.js";
 import { classifyCommand } from "./classify.js";
 import type { PermissionVerdict, ReviewEvidenceRecord } from "./review.js";
 import { promptSelect, setHerdrBlocked } from "./prompt-select.js";
@@ -190,15 +190,15 @@ function isBashTool(name: string): boolean {
 }
 
 /**
- * The path a file tool is about to edit or write, when it is the reviewer's
- * own policy or config; undefined for any other call.
+ * A file tool's edit or write to the reviewer's own policy or config, as the
+ * text it is reviewed, shown and recorded under; undefined for any other call.
  */
 function reviewerFileWrite(toolName: string, input: unknown, cwd: string): string | undefined {
   const base = toolName.slice(toolName.lastIndexOf(".") + 1);
   if (base !== "edit" && base !== "write") return undefined;
   const path = (input as { path?: unknown } | undefined)?.path;
   if (typeof path !== "string") return undefined;
-  return reviewerFileAt(path, cwd) ? path : undefined;
+  return reviewerFileAt(path, cwd) ? describeReviewerFileWrite(toolName, path, input) : undefined;
 }
 
 function sameKeys(a: readonly string[], b: readonly string[]): boolean {
@@ -944,9 +944,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     const fileWrite = isBashTool(event.toolName) ? undefined : reviewerFileWrite(event.toolName, event.input, ctx.cwd);
     if (!isBashTool(event.toolName) && fileWrite === undefined) return;
     if (hcLookup) await hcLookup;
-    const command = fileWrite === undefined
-      ? (event.input as { command: string }).command
-      : `${event.toolName} ${fileWrite}`;
+    const command = fileWrite ?? (event.input as { command: string }).command;
     const lifecycleSignal = reviewer.lifecycleSignal;
 
     let config: AutoPermissionsConfig;

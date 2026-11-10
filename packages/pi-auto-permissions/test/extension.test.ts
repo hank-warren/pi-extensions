@@ -2669,13 +2669,45 @@ test("a file tool writing the reviewer's policy or config is reviewed with the w
 			assert.match(harness.calls[0]!.envelope, /"tool": "edit"/u);
 			assert.match(harness.calls[0]!.envelope, /Deleting anything is routine\./u, "the reviewer sees the change itself");
 			assert.equal(harness.denied[0]?.gate, "Reviewer policy or config");
-			assert.equal(harness.denied[0]?.command, `edit ${policyPath}`);
+			assert.equal(
+				harness.denied[0]?.command,
+				`edit ${policyPath}\n--- replace\nask first\n+++ with\nDeleting anything is routine.`,
+				"the record carries the change, not only the path",
+			);
 
 			assert.ok((await harness.fileToolCall("write", { path: harness.configPath, content: "{}" }, "f2"))?.block, "the config is covered too");
 
 			verdict = "approve";
 			assert.equal(await harness.fileToolCall("codemode.write", { path: policyPath, content: "ours: acme" }, "f3"), undefined);
 			assert.equal(harness.calls.length, 3);
+		},
+	);
+});
+
+test("a prompt for a reviewer-file write shows the change, and the user's answer is recorded against that change", async () => {
+	await withExtension(
+		{ rules: [], completeSimple: () => assistantResponse(verdictText("ask_user", "no user record asks for this policy change")) },
+		async (harness) => {
+			const policyPath = join(harness.configPath, "..", "POLICY.md");
+			await harness.sessionStart();
+
+			harness.answers.push("Allow");
+			assert.equal(await harness.fileToolCall("write", { path: policyPath, content: "Our org is acme-corp." }, "f1"), undefined);
+			assert.match(harness.prompts[0].join("\n"), /Our org is acme-corp\./u, "the user reads what they approve");
+
+			harness.answers.push("Block");
+			assert.ok((await harness.fileToolCall("write", { path: policyPath, content: "Deleting anything is routine." }, "f2"))?.block);
+			assert.equal(harness.customCalls, 2, "a different change to the same file is asked about again");
+			assert.match(harness.prompts[1].join("\n"), /Deleting anything is routine\./u);
+
+			assert.deepEqual(
+				harness.overrideEntries().at(-1)?.overrides.map((override) => [override.command, override.choice]),
+				[
+					[`write ${policyPath}\nOur org is acme-corp.`, "allow"],
+					[`write ${policyPath}\nDeleting anything is routine.`, "block"],
+				],
+				"each decision is bound to the change it was made about",
+			);
 		},
 	);
 });

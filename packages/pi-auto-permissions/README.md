@@ -190,7 +190,7 @@ In an untrusted project only the agent directory's own files are read. Set `revi
 
 A change to `POLICY.md` or to the config file is reviewed whichever tool makes it, and the guardian approves it only when you asked for that change to that file. No rule, policy statement or trusted group turns this off; disabling the extension does.
 
-- **`edit` and `write`**, which are otherwise not gated, are reviewed when their path resolves to one of the two files, with the whole change in the request. The path is resolved the way Pi's file tools resolve it (a leading `@`, `~`, a `file://` URL) and through symlinks, including a symlink whose target does not exist yet.
+- **`edit` and `write`**, which are otherwise not gated, are reviewed when their path resolves to one of the two files, with the whole change in the request. The path is resolved the way Pi's file tools resolve it (a leading `@`, `~`, a `file://` URL) and through symlinks, including a symlink whose target does not exist yet. Where the filesystem folds case (the macOS and Windows defaults), any casing of the name counts. The approval prompt, the denial log and the record of your answer carry the whole change, so you approve what you can read and an allow for one change does not cover a different one.
 - **Shell commands** that name the config directory, or its name together with either file's name, are reviewed even when no rule matches and `reviewAllShell` is off. This reads the command text, so a glob or a variable holding the whole path gets past it; with `reviewAllShell` on, every shell command is reviewed anyway and the guardian's block list covers these files.
 
 ## Define trusted infrastructure

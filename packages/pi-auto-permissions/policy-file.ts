@@ -9,7 +9,7 @@
  * Because this file and the config decide what the reviewer allows, a change
  * to either by the agent is itself reviewed, whichever tool makes it.
  */
-import { readFileSync, readlinkSync, realpathSync } from "node:fs";
+import { readFileSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -105,15 +105,60 @@ function canonical(path: string, depth = 0): string {
   return parent === path ? path : join(canonical(parent, depth + 1), basename(path));
 }
 
+function flipCase(name: string): string {
+  return name.replace(/\p{L}/gu, (letter) => (letter === letter.toLowerCase() ? letter.toUpperCase() : letter.toLowerCase()));
+}
+
+/**
+ * Whether file names in `dir` are matched without regard to case, as on the
+ * default macOS and Windows filesystems. Asked of the nearest existing
+ * ancestor whose name has a letter: if the same entry answers to that name
+ * with its case flipped, the filesystem folds case.
+ */
+export function caseInsensitiveAt(dir: string): boolean {
+  for (let current = resolve(dir); ; current = dirname(current)) {
+    const name = basename(current);
+    const flipped = flipCase(name);
+    if (flipped !== name) {
+      let entry;
+      try {
+        entry = statSync(current);
+      } catch {
+        entry = undefined; // Does not exist yet: ask its parent.
+      }
+      if (entry) {
+        try {
+          const other = statSync(join(dirname(current), flipped));
+          return other.dev === entry.dev && other.ino === entry.ino;
+        } catch {
+          return false;
+        }
+      }
+    }
+    if (dirname(current) === current) return process.platform === "darwin" || process.platform === "win32";
+  }
+}
+
+/** Options for tests, which cannot mount a case-insensitive filesystem. */
+export interface ReviewerFileMatchOptions {
+  caseInsensitive?: (dir: string) => boolean;
+}
+
 /** Which of the reviewer's files `path` names, as a file tool resolves it from `cwd`. */
 export function reviewerFileAt(
   path: string,
   cwd: string,
   files: ReviewerFiles = reviewerFiles(),
+  options: ReviewerFileMatchOptions = {},
 ): keyof ReviewerFiles | undefined {
   const target = canonical(resolveToolPath(path, cwd));
-  if (target === canonical(files.policy)) return "policy";
-  if (target === canonical(files.config)) return "config";
+  // On a filesystem that folds case, `policy.md` is POLICY.md whether or not it exists yet.
+  const fold = (options.caseInsensitive ?? caseInsensitiveAt)(dirname(files.config))
+    ? (value: string) => value.toLowerCase()
+    : (value: string) => value;
+  const same = (file: string) => fold(target) === fold(canonical(file));
+  if (same(files.policy)) return "policy";
+  if (same(files.config)) return "config";
   return undefined;
 }
 
@@ -125,11 +170,41 @@ export function reviewerFileAt(
  * holding the whole path gets past it; a reviewed shell (reviewAllShell) does
  * not depend on it.
  */
-export function commandNamesReviewerFile(command: string, files: ReviewerFiles = reviewerFiles()): boolean {
+export function commandNamesReviewerFile(
+  command: string,
+  files: ReviewerFiles = reviewerFiles(),
+  options: ReviewerFileMatchOptions = {},
+): boolean {
   const dir = dirname(files.config);
-  if (command.includes(dir)) return true;
-  return command.includes(basename(dir))
-    && (command.includes(basename(files.policy)) || command.includes(basename(files.config)));
+  const fold = (options.caseInsensitive ?? caseInsensitiveAt)(dir)
+    ? (value: string) => value.toLowerCase()
+    : (value: string) => value;
+  const text = fold(command);
+  if (text.includes(fold(dir))) return true;
+  return text.includes(fold(basename(dir)))
+    && (text.includes(fold(basename(files.policy))) || text.includes(fold(basename(files.config))));
+}
+
+/**
+ * A reviewer-file write as the text every later step works from: the approval
+ * prompt, the denial log and the record of the user's decision. It carries the
+ * whole change, so the user approves what they can read, and an allow for one
+ * change is never mistaken for an allow of a different one to the same file.
+ */
+export function describeReviewerFileWrite(toolName: string, path: string, input: unknown): string {
+  const args = (input ?? {}) as { content?: unknown; edits?: unknown };
+  const head = `${toolName} ${path}`;
+  if (typeof args.content === "string") return `${head}\n${args.content}`;
+  if (Array.isArray(args.edits)) {
+    const edits = args.edits.map((edit) => {
+      const { oldText, newText } = (edit ?? {}) as { oldText?: unknown; newText?: unknown };
+      return typeof oldText === "string" && typeof newText === "string"
+        ? `--- replace\n${oldText}\n+++ with\n${newText}`
+        : JSON.stringify(edit);
+    });
+    return [head, ...edits].join("\n");
+  }
+  return `${head}\n${JSON.stringify(input)}`;
 }
 
 /** The reviewer prompt section for the policy and the reviewer's own files. */

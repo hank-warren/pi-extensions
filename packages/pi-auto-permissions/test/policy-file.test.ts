@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { describe, test } from "node:test";
 import { pathToFileURL } from "node:url";
-import { commandNamesReviewerFile, normalizeToolPath, policySection, readPolicy, resolveToolPath, reviewerFileAt, reviewerFiles } from "../policy-file.ts";
+import { caseInsensitiveAt, commandNamesReviewerFile, describeReviewerFileWrite, normalizeToolPath, policySection, readPolicy, resolveToolPath, reviewerFileAt, reviewerFiles } from "../policy-file.ts";
 
 function scratch(): { dir: string; files: ReturnType<typeof reviewerFiles> } {
 	const dir = mkdtempSync(join(tmpdir(), "ap-policy-"));
@@ -92,6 +92,26 @@ describe("recognising a write to the reviewer's files", () => {
 		assert.equal(normalizeToolPath("/c/Users/alice/config.json", "linux"), "/c/Users/alice/config.json", "and never elsewhere");
 	});
 
+	test("on a filesystem that folds case, another casing of the name is the same file, existing or not", () => {
+		const { dir, files } = scratch();
+		const folds = { caseInsensitive: () => true };
+		const exact = { caseInsensitive: () => false };
+		assert.equal(reviewerFileAt(join(dir, "policy.md"), "/", files, folds), "policy", "before the policy exists");
+		assert.equal(reviewerFileAt(join(dir, "CONFIG.JSON"), "/", files, folds), "config");
+		assert.equal(reviewerFileAt(join(dir, "policy.md.bak"), "/", files, folds), undefined);
+		assert.equal(reviewerFileAt(join(dir, "policy.md"), "/", files, exact), undefined, "a different file where case matters");
+		writeFileSync(files.policy, "x");
+		assert.equal(reviewerFileAt(join(dir, "Policy.MD"), "/", files, folds), "policy", "and once it exists");
+	});
+
+	test("detects case folding from the nearest existing directory", () => {
+		const { dir } = scratch();
+		const flipped = join(dirname(dir), basename(dir).replace(/[a-z]/giu, (c) => (c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase())));
+		const folds = existsSync(flipped);
+		assert.equal(caseInsensitiveAt(dir), folds);
+		assert.equal(caseInsensitiveAt(join(dir, "not-yet", "deeper")), folds, "asked of a directory that does not exist yet");
+	});
+
 	test("follows a dangling symlink to a policy file that does not exist yet", () => {
 		const { files } = scratch();
 		const elsewhere = mkdtempSync(join(tmpdir(), "ap-policy-dangling-"));
@@ -118,11 +138,28 @@ describe("recognising a shell command that names the reviewer's files", () => {
 		]) assert.equal(commandNamesReviewerFile(command, files), true, command);
 	});
 
+	test("in any casing where the filesystem folds case, and only there", () => {
+		const command = "truncate -s 0 ~/.pi/agent/PI-AUTO-PERMISSIONS/policy.md";
+		assert.equal(commandNamesReviewerFile(command, files, { caseInsensitive: () => true }), true);
+		assert.equal(commandNamesReviewerFile(command, files, { caseInsensitive: () => false }), false);
+	});
+
 	test("not by a file name alone, or the directory's name alone", () => {
 		for (const command of [
 			"cat config.json",
 			"ls packages/pi-auto-permissions",
 			"git commit -m 'update POLICY.md wording'",
 		]) assert.equal(commandNamesReviewerFile(command, files), false, command);
+	});
+});
+
+describe("describing a reviewer-file write", () => {
+	test("carries the whole change, so two changes to one file never read the same", () => {
+		assert.equal(describeReviewerFileWrite("write", "/x/POLICY.md", { path: "/x/POLICY.md", content: "ours: acme\n" }), "write /x/POLICY.md\nours: acme\n");
+		assert.equal(
+			describeReviewerFileWrite("edit", "/x/POLICY.md", { path: "/x/POLICY.md", edits: [{ oldText: "ask first", newText: "routine" }, { oldText: "a", newText: "b" }] }),
+			"edit /x/POLICY.md\n--- replace\nask first\n+++ with\nroutine\n--- replace\na\n+++ with\nb",
+		);
+		assert.equal(describeReviewerFileWrite("write", "/x/config.json", { path: "/x/config.json" }), 'write /x/config.json\n{"path":"/x/config.json"}');
 	});
 });
