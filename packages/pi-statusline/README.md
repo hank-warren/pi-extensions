@@ -71,7 +71,7 @@ Up to 0.2.x this package hardcoded five alias pairs and stripped a `platform-` p
 
 When Pi's `~/.pi/agent/auth.json` contains OAuth credentials for Anthropic (Claude subscription) and/or OpenAI Codex, line 1 shows **percent remaining** for each rate-limit window after the context meter:
 
-- ` 97·54` — Claude 5-hour, then weekly remaining percent (Nerd Font `nf-cod-claude` icon). Subscriptions with a model-scoped weekly limit (e.g. Fable) show it as a third number — ` 97·54·24` — and it is omitted when the account has none.
+- ` 97·54` — Claude 5-hour, then weekly remaining percent (Nerd Font `nf-cod-claude` icon). Subscriptions with a model-scoped weekly limit (e.g. Fable) show it as a third number — ` 97·54·24` — and it is omitted when the account has none. An account without a 5-hour (or weekly) window keeps that slot as a dim dash — ` –·66·96` — so the remaining numbers stay in their usual positions.
 - ` 92·99` — Codex 5-hour, then weekly remaining percent (`nf-cod-openai` icon). Which windows exist is a property of the plan, so the slots are filled from the payload's window spans rather than from its plan name: a plan with no 5-hour limit shows the weekly number alone — ` 45` — and a free plan, whose single window is monthly, shows that one number in the same place.
 
 Numbers are colored by remaining headroom: green above 60, yellow 41–60, orange 16–40, red at 15 and below.
@@ -96,7 +96,7 @@ A provider answering **429** is left alone before being polled again. When the r
 
 Cached values also expire at a **window boundary**, not just by age. Each entry records the soonest moment any of its windows rolls over — from Anthropic's `resets_at`, or Codex's `reset_at` (absolute, preferred) or `reset_after_seconds` (relative, resolved against our clock). Once that moment passes, the stored percentages describe the window that just *ended*: they are not merely old, they are wrong, and no age-based expiry can see it. Such a value is never adopted from the cache and never kept as a last-known-good, and the account becomes pollable immediately rather than waiting out its interval, so the post-reset numbers appear promptly. An active 429 backoff still outranks a boundary — a rate-limited endpoint is the last thing to argue with the moment its window turns over. A value carrying no boundary at all, which is what an entry written by an older statusline looks like, never expires this way.
 
-Cache entries stay compatible in both directions: a Codex entry written by a statusline older than 0.6.0 carries no 5-hour value, so a newer one renders it as a single weekly number until its own next poll fills the second slot, and an older reader ignores the extra value entirely.
+Cache entries stay compatible in both directions: a Codex entry written by a statusline older than 0.6.0 carries no 5-hour value, so a newer one renders it as a single weekly number until its own next poll fills the second slot, and an older reader ignores the extra value entirely. A Claude entry without a 5-hour or weekly value is written only by 0.13.0 and later; a session still running an older statusline shows `undefined` in that slot until it restarts.
 
 An account answering `429` is parked for fifteen minutes (tracked per account, so a rate-limited Anthropic never stops codex from updating) and stops counting as pending, since retrying harder is what earns the rate limit in the first place. Every cache entry is keyed to a fingerprint (a sha256 prefix, never the token itself) of the credential that fetched it: switching accounts — or rotating a token — discards that entry's numbers and backoff and polls immediately, so an exhausted old account's meters never masquerade as the new account's. A logged-out account fails the same check, so the file garbage-collects itself.
 
@@ -233,7 +233,7 @@ One JSON object on stdin, and `COLUMNS` in the environment (the footer's current
 }
 ```
 
-`git` is `null` outside a repository, `usage_remaining.claude` / `.codex` are `null` without credentials for that provider, and `context_window.used_tokens` is `null` before Pi can estimate it. Handle absence rather than assuming a field.
+`git` is `null` outside a repository, `usage_remaining.claude` / `.codex` are `null` without credentials for that provider, each window inside them (`five_hour`, `seven_day`, `scoped_weekly`, `weekly`) is `null` when the account has no such window, and `context_window.used_tokens` is `null` before Pi can estimate it. Handle absence rather than assuming a field.
 
 ### What the command should print
 

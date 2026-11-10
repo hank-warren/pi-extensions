@@ -77,6 +77,8 @@ function styled(style: string, text: string): string {
 
 const CLAUDE_ICON = "\uec82";
 const OPENAI_ICON = "\uec81";
+/** Stands in for a Claude window the account does not have. */
+const MISSING_WINDOW = "\u2013";
 
 function bandColor(remaining: number, palette: StatuslinePalette): string {
 	return { green: palette.ok, yellow: palette.warn, orange: palette.caution, red: palette.danger }[
@@ -92,9 +94,15 @@ export function renderUsageSegment(
 	const dot = styled(palette.dim, "\u00b7");
 	const parts: string[] = [];
 	if (usage.claude) {
-		let claude = `${percent(usage.claude.fiveHour)}${dot}${percent(usage.claude.sevenDay)}`;
-		if (usage.claude.scopedWeekly !== undefined) claude += `${dot}${percent(usage.claude.scopedWeekly)}`;
-		parts.push(`${styled(palette.text, CLAUDE_ICON)} ${claude}`);
+		// Slots are positional, so a missing window keeps its place: a bare `66·96` reads as 5-hour·weekly.
+		const { fiveHour, sevenDay, scopedWeekly } = usage.claude;
+		const slots = scopedWeekly === undefined ? [fiveHour, sevenDay] : [fiveHour, sevenDay, scopedWeekly];
+		if (slots.some((remaining) => remaining !== undefined)) {
+			const claude = slots
+				.map((remaining) => (remaining === undefined ? styled(palette.dim, MISSING_WINDOW) : percent(remaining)))
+				.join(dot);
+			parts.push(`${styled(palette.text, CLAUDE_ICON)} ${claude}`);
+		}
 	}
 	if (usage.codex) {
 		// Shortest window first, mirroring Claude. Plans without a 5-hour limit
@@ -391,8 +399,8 @@ export default function statuslineExtension(pi: ExtensionAPI): void {
 			usage_remaining: {
 				claude: usage.claude
 					? {
-							five_hour: usage.claude.fiveHour,
-							seven_day: usage.claude.sevenDay,
+							five_hour: usage.claude.fiveHour ?? null,
+							seven_day: usage.claude.sevenDay ?? null,
 							scoped_weekly: usage.claude.scopedWeekly ?? null,
 						}
 					: null,
