@@ -34,6 +34,18 @@ export const ALL_SHELL_GATE: Gate = {
   label: "shell command",
 };
 
+/**
+ * The gate for a file-tool edit or write to the reviewer's own policy or
+ * config, and for a shell command that names either file. Not a rule: no
+ * pattern, config or trusted group can turn it off.
+ */
+export const REVIEWER_FILE_GATE: Gate = {
+  pattern: /(?:)/,
+  level: "guarded",
+  group: "oversight",
+  label: "Reviewer policy or config",
+};
+
 export function findGates(command: string, rules: readonly Gate[]): Gate[] {
   return rules.filter((gate) => {
     gate.pattern.lastIndex = 0;

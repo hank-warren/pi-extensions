@@ -26,7 +26,8 @@ import {
   permissionPromptOptions,
   type PromptEvaluationUserChoice,
 } from "./evaluation-log.js";
-import type { Gate } from "./gates.js";
+import { REVIEWER_FILE_GATE, type Gate } from "./gates.js";
+import { commandNamesReviewerFile, describeReviewerFileWrite, reviewerFileAt } from "./policy-file.js";
 import { classifyCommand } from "./classify.js";
 import type { PermissionVerdict, ReviewEvidenceRecord } from "./review.js";
 import { promptSelect, setHerdrBlocked } from "./prompt-select.js";
@@ -186,6 +187,18 @@ interface AssistantToolCall {
 
 function isBashTool(name: string): boolean {
   return name === "bash" || name.endsWith(".bash");
+}
+
+/**
+ * A file tool's edit or write to the reviewer's own policy or config, as the
+ * text it is reviewed, shown and recorded under; undefined for any other call.
+ */
+function reviewerFileWrite(toolName: string, input: unknown, cwd: string): string | undefined {
+  const base = toolName.slice(toolName.lastIndexOf(".") + 1);
+  if (base !== "edit" && base !== "write") return undefined;
+  const path = (input as { path?: unknown } | undefined)?.path;
+  if (typeof path !== "string") return undefined;
+  return reviewerFileAt(path, cwd) ? describeReviewerFileWrite(toolName, path, input) : undefined;
 }
 
 function sameKeys(a: readonly string[], b: readonly string[]): boolean {
@@ -794,6 +807,18 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   }
 
   /**
+   * The ruleset's verdict on a shell command, except that one naming the
+   * reviewer's own policy or config is always reviewed: no missing rule and
+   * no trusted group lets it pass.
+   */
+  function classifyShell(command: string, config: AutoPermissionsConfig): ReturnType<typeof classifyCommand> {
+    const classified = classifyCommand(command, config, trustedGroups);
+    return classified.kind === "pass" && commandNamesReviewerFile(command)
+      ? { kind: "review", gate: REVIEWER_FILE_GATE }
+      : classified;
+  }
+
+  /**
    * Start reviews for the guarded bash calls that follow `toolCallId` in the
    * assistant message that issued it. Pi calls tool_call handlers for one
    * message's calls one at a time, so without this their reviews could never
@@ -814,7 +839,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
       const input = call.arguments as Record<string, unknown> | undefined;
       const command = input?.command;
       if (typeof command !== "string") continue;
-      const classified = classifyCommand(command, config, trustedGroups);
+      const classified = classifyShell(command, config);
       if (classified.kind !== "review") continue;
       const controller = new AbortController();
       const scope: ReviewScope = {
@@ -915,9 +940,11 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   });
 
   pi.on("tool_call", async (event, ctx) => {
-    if (!isBashTool(event.toolName)) return;
+    // Bash is reviewed; so is a file tool changing the reviewer's own policy or config.
+    const fileWrite = isBashTool(event.toolName) ? undefined : reviewerFileWrite(event.toolName, event.input, ctx.cwd);
+    if (!isBashTool(event.toolName) && fileWrite === undefined) return;
     if (hcLookup) await hcLookup;
-    const command = (event.input as { command: string }).command;
+    const command = fileWrite ?? (event.input as { command: string }).command;
     const lifecycleSignal = reviewer.lifecycleSignal;
 
     let config: AutoPermissionsConfig;
@@ -929,7 +956,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     }
     if (!config.enabled) return;
     const parentToolCallId = (event as { parentToolCallId?: string }).parentToolCallId;
-    if (!parentToolCallId) startSiblingReviews(event.toolCallId, ctx, config, lifecycleSignal);
+    if (!parentToolCallId && fileWrite === undefined) startSiblingReviews(event.toolCallId, ctx, config, lifecycleSignal);
     const scriptToolCallId = parentToolCallId ? scriptRoots.get(parentToolCallId) ?? parentToolCallId : undefined;
     const target: ReviewTarget = {
       toolName: event.toolName,
@@ -937,7 +964,9 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
       ...(scriptToolCallId ? { scriptToolCallId } : {}),
     };
     const input = event.input as Record<string, unknown>;
-    const classified = classifyCommand(command, config, trustedGroups);
+    const classified: ReturnType<typeof classifyCommand> = fileWrite === undefined
+      ? classifyShell(command, config)
+      : { kind: "review", gate: REVIEWER_FILE_GATE };
     const early = takeSiblingReview(
       event.toolCallId,
       input,
