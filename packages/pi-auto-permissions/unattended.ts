@@ -59,11 +59,11 @@ export function parseApprovers(raw: string | undefined): string[] {
 export const UNATTENDED_PROMPT_SECTION = "auto_permissions_unattended";
 
 export const UNATTENDED_PERMISSIONS_PROMPT = `## Auto Permissions (unattended)
-Nobody answers approval prompts in this session. A Bash command that Auto Permissions cannot approve on its own is blocked, not sent to a human. When that happens, do not retry it unchanged: get the result another way, or ask the user to approve it in your reply (through whatever channel you use to reply), naming the exact command and why it is needed, and stop. Run it again only after a new message from the user approves it.`;
+Nobody answers approval prompts in this session. A Bash command that Auto Permissions cannot approve on its own is blocked, not sent to a human. When that happens, do not retry it unchanged or reach the same effect with a different command: finish the task a way that does not need it, or ask the user to approve it in your reply (through whatever channel you use to reply), naming the exact command and why it is needed, and stop. Run it again only after a new message from the user approves it.`;
 
 /** What the agent is told when a command needs approval in an unattended session. */
 export function unattendedBlockReason(gateLabel: string, reason: string): string {
-  return `${gateLabel} needs the user's approval: ${reason}\nNobody answers approval prompts in this session, so the command was blocked. Get the result another way, or ask the user to approve this exact command in your reply and stop. Retrying it before a new message from the user approves it will be blocked again.`;
+  return `${gateLabel} needs the user's approval: ${reason}\nNobody answers approval prompts in this session, so the command was blocked. Finish the task a way that does not need it, or ask the user to approve this exact command in your reply and stop. Retrying it before a new message from the user approves it will be blocked again.`;
 }
 
 const APPROVERS_CONFIGURED = (approvers: readonly string[]) =>

@@ -8,6 +8,7 @@ import {
   AFK_PERMISSIONS_PROMPT,
   AFK_PROMPT_SECTION,
   afkBlockReason,
+  ReviseStreak,
   approvalModeStatus,
   autoBlockReason,
   BlockCounter,
@@ -32,7 +33,7 @@ import { promptSelect, setHerdrBlocked } from "./prompt-select.js";
 import { RemotePrompts, type RemotePromptHandle } from "./remote-answers.js";
 import { createReviewDisplay } from "./review-display.js";
 import { createSessionOverrides } from "./session-overrides.js";
-import { createGuardianReviewer } from "./guardian-reviewer.js";
+import { createGuardianReviewer, isRetryableReviewFailure } from "./guardian-reviewer.js";
 import { detectHcTerminal, hcTerminalFromEnv, type HcTerminal } from "./hc-terminal.js";
 import type { InstructionFile } from "./instruction-files.js";
 import { registerSettingsCommand } from "./settings-command.js";
@@ -224,6 +225,9 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   let hcTerminal: HcTerminal | undefined;
   let hcLookup: Promise<void> | undefined;
   const blocks = new BlockCounter();
+  const revisions = new ReviseStreak();
+  /** Notes on approved calls, waiting for the call's result to carry them to the agent. */
+  const approvalNotes = new Map<string, string>();
   let turnGeneration = 0;
   const reviseFirst = new Map<string, number>();
   let lastConfigError: string | undefined;
@@ -531,6 +535,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
       }
       if (classification?.allowsExecution) {
         blocks.approved();
+        revisions.approved();
         return settle(scope, { display: "approved", reason: "approved by user" });
       }
       return settle(scope, {
@@ -599,8 +604,18 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
         const stop = scope.callSignal && abandon
           ? AbortSignal.any([scope.callSignal, abandon])
           : scope.callSignal ?? abandon;
-        const review = reviewer.review(scope, input, stop);
-        const verdict = await (stop ? untilAborted(review, stop) : review);
+        const once = () => {
+          const review = reviewer.review(scope, input, stop);
+          return stop ? untilAborted(review, stop) : review;
+        };
+        let verdict: PermissionVerdict;
+        try {
+          verdict = await once();
+        } catch (error) {
+          // One more try when the failure is the kind a second request fixes.
+          if (!isRetryableReviewFailure(error) || lifecycleStale() || reviewCancelled(callSignal) || abandoned()) throw error;
+          verdict = await once();
+        }
         if (!lifecycleStale() && reviewCancelled(ctx.signal)) reviewer.discardLineage();
         attempt = { kind: "verdict", verdict, evidenceKeys: keys };
       } catch (error) {
@@ -701,9 +716,20 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     const { verdict } = outcome;
     if (verdict.decision === "approve") {
       blocks.approved();
-      return settle(scope, { display: "approved", reason: verdict.reason });
+      revisions.approved();
+      const { toolCallId } = scope.target;
+      if (verdict.note && toolCallId) approvalNotes.set(toolCallId, verdict.note);
+      return settle(scope, {
+        display: "approved",
+        reason: verdict.reason,
+        ...(verdict.note ? { detail: `note: ${verdict.note}` } : {}),
+      });
     }
     if (verdict.decision === "revise") {
+      // The agent already had its revision: this one is the user's call.
+      if (revisions.repeats(turnGeneration)) {
+        return needsHuman(scope, `Revised twice in a row. ${verdict.reason}`, "guardian", lifecycleSignal);
+      }
       return settle(scope, {
         display: "revise",
         verdict: "revise",
@@ -864,9 +890,23 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     }
   });
 
+  // An approval's note reaches the agent on the result of the call it was about.
+  pi.on("tool_result", (event) => {
+    const note = approvalNotes.get(event.toolCallId);
+    if (note === undefined) return;
+    approvalNotes.delete(event.toolCallId);
+    return {
+      content: [...event.content, { type: "text" as const, text: `Auto Permissions note: ${note}` }],
+      // Replacing content alone would drop the structured content.
+      ...(event.structuredContent !== undefined ? { structuredContent: event.structuredContent } : {}),
+    };
+  });
+
   pi.on("tool_execution_end", (event) => {
     const { toolCallId } = event as { toolCallId?: unknown };
     if (typeof toolCallId !== "string") return;
+    // A call that ended without a result (aborted after approval) takes its note with it.
+    approvalNotes.delete(toolCallId);
     rememberFinished(toolCallId);
     const controller = scriptsEnded.get(toolCallId);
     if (!controller) return;
@@ -1020,6 +1060,8 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     unattendedSession = detectUnattended() !== undefined;
     sessionApprovalMode = undefined;
     blocks.reset();
+    revisions.reset();
+    approvalNotes.clear();
     if (config) showApprovalMode(ctx, approvalModeOf(config));
     reviseFirst.clear();
     reviewer.startSession(ctx.cwd);

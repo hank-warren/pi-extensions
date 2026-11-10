@@ -259,6 +259,8 @@ interface Harness {
 	toolExecutionStart(toolCallId: string, parentToolCallId?: string): Promise<void>;
 	/** Report a tool call finished, as Pi does when a codemode script ends. */
 	toolExecutionEnd(toolCallId: string, parentToolCallId?: string): Promise<void>;
+	/** Deliver a finished bash call's result to `tool_result`, returning the extension's patch. */
+	toolResult(toolCallId: string, output: string): Promise<{ content: Array<{ type: string; text: string }> } | undefined>;
 	settingsCommand(args?: string): Promise<void>;
 	denials(): DenialLine[];
 	overrideEntries(): Array<{ seq: number; overrides: Array<Record<string, unknown>> }>;
@@ -354,6 +356,14 @@ async function withExtension(options: SetupOptions, run: (harness: Harness) => P
 					harness.ctx,
 				);
 			}
+		},
+		async toolResult(toolCallId: string, output: string) {
+			const handler = mock.events.get("tool_result")?.[0] as EventHandler | undefined;
+			assert.ok(handler, "the extension registers a tool_result handler");
+			return (await handler(
+				{ type: "tool_result", toolName: "bash", toolCallId, input: {}, content: [{ type: "text", text: output }], isError: false },
+				harness.ctx,
+			)) as { content: Array<{ type: string; text: string }> } | undefined;
 		},
 		async settingsCommand(args = "") {
 			const command = mock.commands.get("auto-permissions");
@@ -2371,6 +2381,7 @@ test("50 · auto mode blocks an ask_user verdict with the reason and keeps the a
 			assert.ok(result?.block);
 			assert.match(result.reason, /^Git push was blocked by Auto Permissions: pushing to main is block-listed/u);
 			assert.match(result.reason, /Do not retry it unchanged\. Carry on with the parts of the task/u);
+			assert.match(result.reason, /do not reach the same effect with a different command/u);
 			assert.match(result.reason, /ask the user to approve it/u);
 			assert.equal(harness.customCalls, 0, "no prompt opens");
 			assert.equal(harness.denied[0]?.verdict, "block");
@@ -2479,6 +2490,109 @@ test("54 · an unattended session stays afk: the mode cannot be switched", async
 			assert.equal(harness.context.notifications.at(-1)?.level, "warning");
 			assert.match(harness.context.notifications.at(-1)?.message ?? "", /always afk/u);
 		}));
+});
+
+test("55 · the guardian gets one revision: a second in a later turn, with nothing approved between, goes to the user", async () => {
+	let verdict: "approve" | "revise" = "revise";
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			completeSimple: () => assistantResponse(verdictText(verdict, verdict === "approve" ? "fine" : "push to a branch, not main")),
+		},
+		async (harness) => {
+			await harness.sessionStart();
+
+			// Two commands issued together are not a retry of each other.
+			assert.match((await harness.toolCall("git push origin main", "c1"))?.reason ?? "", /^Auto Permissions requested revision/u);
+			assert.match((await harness.toolCall("git push origin main --tags", "c2"))?.reason ?? "", /^Auto Permissions requested revision/u);
+			assert.equal(harness.customCalls, 0);
+
+			await harness.turnEnd();
+			harness.answers.push("Block");
+			assert.deepEqual(await harness.toolCall("git push origin main -v", "c3"), { block: true, reason: "Blocked by user" });
+			assert.equal(harness.customCalls, 1, "the second revision is the user's call");
+			assert.match(harness.prompts[0].join("\n"), /Revised twice in a row\. push to a branch, not main/u);
+			assert.equal(harness.denied.at(-1)?.verdict, "block");
+
+			// An approval ends the run: the next revision goes back to the agent.
+			await harness.turnEnd();
+			verdict = "approve";
+			assert.equal(await harness.toolCall("git push origin feature", "c4"), undefined);
+			await harness.turnEnd();
+			verdict = "revise";
+			assert.match((await harness.toolCall("git push origin main", "c5"))?.reason ?? "", /^Auto Permissions requested revision/u);
+			assert.equal(harness.customCalls, 1);
+		},
+	);
+});
+
+test("56 · an approval's note reaches the agent once, on that call's result, cut to one sentence's length", async () => {
+	let note: string | undefined = `the alias points at the wrong model ${"x".repeat(400)}`;
+	await withExtension(
+		{
+			rules: [GUARDED_RULE],
+			completeSimple: () => assistantResponse(JSON.stringify({ decision: "approve", reason: "fine", ...(note ? { note } : {}) })),
+		},
+		async (harness) => {
+			await harness.sessionStart();
+
+			assert.equal(await harness.toolCall("git push origin feature", "c1"), undefined, "a note never holds the command back");
+			assert.match(harness.displays.at(-1)?.detail ?? "", /^note: the alias points at the wrong model/u);
+			const patched = await harness.toolResult("c1", "pushed");
+			assert.deepEqual(patched?.content[0], { type: "text", text: "pushed" });
+			assert.match(patched?.content[1]?.text ?? "", /^Auto Permissions note: the alias points at the wrong model x+…$/u);
+			assert.equal(patched?.content[1]?.text.length, "Auto Permissions note: ".length + 200);
+			assert.equal(await harness.toolResult("c1", "pushed"), undefined, "the note is delivered once");
+
+			note = undefined;
+			assert.equal(await harness.toolCall("git push origin feature", "c2"), undefined);
+			assert.equal(await harness.toolResult("c2", "pushed"), undefined, "an approval without a note leaves the result alone");
+
+			// A call that ends without a result takes its note with it.
+			note = "stale";
+			assert.equal(await harness.toolCall("git push origin feature", "c3"), undefined);
+			await harness.toolExecutionEnd("c3");
+			assert.equal(await harness.toolResult("c3", "pushed"), undefined);
+		},
+	);
+});
+
+test("57 · a review that fails on unusable output or an overloaded provider is tried once more; a rate limit is not", async () => {
+	const run = async (script: GuardianScript, config: Record<string, unknown> = {}) => {
+		let outcome: { result: BlockResult; calls: number; prompts: number } | undefined;
+		await withExtension({ rules: [GUARDED_RULE], config, completeSimple: script }, async (harness) => {
+			await harness.sessionStart();
+			harness.answers.push("Block");
+			const result = await harness.toolCall("git push origin feature");
+			outcome = { result, calls: harness.calls.length, prompts: harness.customCalls };
+		});
+		return outcome!;
+	};
+	const approve = () => assistantResponse(verdictText("approve", "fine"));
+
+	assert.deepEqual(
+		await run((_call, index) => (index === 0 ? assistantResponse("I think this is fine.") : approve())),
+		{ result: undefined, calls: 2, prompts: 0 },
+		"prose instead of a verdict is asked again",
+	);
+	assert.deepEqual(
+		await run((_call, index) => {
+			if (index === 0) throw new Error("529 Our servers are currently overloaded. Please try again later.");
+			return approve();
+		}),
+		{ result: undefined, calls: 2, prompts: 0 },
+		"an overloaded provider is asked again",
+	);
+
+	const twice = await run(() => assistantResponse('{"decision":"approve"'));
+	assert.equal(twice.calls, 2, "one retry, not a loop");
+	assert.equal(twice.prompts, 1, "then the failure goes where failed reviews go");
+
+	const limited = await run(() => {
+		throw new Error('429 {"type":"error","error":{"type":"rate_limit_error","message":"cooling down"}}');
+	});
+	assert.equal(limited.calls, 1, "a rate limit is not retried");
+	assert.equal(limited.prompts, 1);
 });
 
 test("the guardian reads the instruction files Pi loaded for the agent, sorted by where they live", async () => {

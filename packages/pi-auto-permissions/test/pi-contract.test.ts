@@ -163,6 +163,83 @@ test("Pi delivers message_end before the tool_call handlers it then runs one at 
 	}
 });
 
+test("Pi appends an approval's note to the bash result the model reads next", async () => {
+	const previousConfig = process.env.PI_AUTO_PERMISSIONS_CONFIG;
+	const dir = mkdtempSync(join(tmpdir(), "pi-ap-contract-"));
+	const cwd = mkdtempSync(join(tmpdir(), "pi-ap-contract-cwd-"));
+	const configPath = join(dir, "config.json");
+	writeFileSync(configPath, JSON.stringify({
+		reviewer: { provider: PROVIDER, model: MODEL_ID, timeoutMs: 30_000 },
+		rules: [{ pattern: "^echo contract", level: "guarded", group: "contract", label: "Contract echo" }],
+		usageLog: { enabled: false },
+		denialLog: { enabled: false },
+	}));
+	process.env.PI_AUTO_PERMISSIONS_CONFIG = configPath;
+
+	const core = createFauxCore({ provider: PROVIDER, models: [{ id: MODEL_ID, contextWindow: 200_000, maxTokens: 4096 }] });
+	let modelSaw = "";
+	core.setResponses([
+		fauxAssistantMessage(fauxToolCall("bash", { command: "echo contract-note" }, { id: "call-note" }), { stopReason: "toolUse" }),
+		(context) => {
+			assert.ok(isReviewerRequest(context), "the call is reviewed");
+			return fauxAssistantMessage(fauxText(JSON.stringify({ decision: "approve", reason: "fine", note: "the marker name looks wrong" })));
+		},
+		(context) => {
+			// What the agent's model is sent after the tool ran.
+			modelSaw = JSON.stringify(context.messages.at(-1)?.content ?? "");
+			return fauxAssistantMessage("done");
+		},
+	]);
+	const registerFaux = (pi: ExtensionAPI) => {
+		pi.registerProvider(PROVIDER, {
+			api: core.api,
+			baseUrl: "http://127.0.0.1:9",
+			apiKey: "contract-test",
+			streamSimple: core.streamSimple,
+			models: [{
+				id: MODEL_ID,
+				name: "Contract agent",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200_000,
+				maxTokens: 4096,
+			}],
+		});
+	};
+	const resourceLoader = new DefaultResourceLoader({
+		cwd,
+		agentDir: getAgentDir(),
+		noExtensions: true,
+		extensionFactories: [registerFaux, autoPermissionsExtension],
+	});
+	await resourceLoader.reload();
+	const { session } = await createAgentSession({
+		cwd,
+		resourceLoader,
+		sessionManager: SessionManager.inMemory(cwd),
+		model: core.getModel(),
+	});
+
+	try {
+		await session.bindExtensions({});
+		await session.prompt("run the contract command");
+
+		assert.ok(modelSaw.includes("contract-note"), `the command ran and its output reached the model (${modelSaw})`);
+		assert.ok(
+			modelSaw.includes("Auto Permissions note: the marker name looks wrong"),
+			`the note rides on the same result (${modelSaw})`,
+		);
+		assert.equal(core.getPendingResponseCount(), 0, "no scripted response was left unused");
+	} finally {
+		session.dispose();
+		if (previousConfig === undefined) delete process.env.PI_AUTO_PERMISSIONS_CONFIG;
+		else process.env.PI_AUTO_PERMISSIONS_CONFIG = previousConfig;
+		rmSync(dir, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 /**
  * Codemode arrived in Pi 0.99; the pinned test runtime predates it, so this
  * runs where codemode exists (the nightly drift job, a local latest install)
