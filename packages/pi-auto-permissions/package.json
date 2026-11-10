@@ -55,6 +55,7 @@
     "gates.ts",
     "hc-terminal.ts",
     "instruction-files.ts",
+    "policy-file.ts",
     "jsonl-sidecar.ts",
     "override-evidence.ts",
     "review.ts",

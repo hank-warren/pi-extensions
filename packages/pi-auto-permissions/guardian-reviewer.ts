@@ -10,7 +10,8 @@ import {
 } from "./config.js";
 import { resolveGuardianCompleteSimple } from "./guardian-transport.js";
 import type { HcTerminal } from "./hc-terminal.js";
-import { instructionFilesSection, sortInstructionFiles, type InstructionFile } from "./instruction-files.js";
+import { contextInstructionFiles, instructionFilesSection, type InstructionFile } from "./instruction-files.js";
+import { policySection, readPolicy, reviewerFiles } from "./policy-file.js";
 import { detectSubagentContext } from "./subagent-context.js";
 import { detectUnattended, unattendedSystemPrompt } from "./unattended.js";
 import { mergeOverrideEvidence } from "./override-evidence.js";
@@ -317,10 +318,13 @@ export function createGuardianReviewer(
     const timeoutMs = config.reviewer?.timeoutMs ?? DEFAULT_REVIEWER_TIMEOUT_MS;
 
     const mainSessionId = ctx.sessionManager.getSessionId();
+    let userPolicySection: string;
     let instructionsSection: string | undefined;
     try {
+      const files = reviewerFiles();
+      userPolicySection = policySection(files, readPolicy(files.policy));
       instructionsSection = config.reviewEvidence.projectInstructions
-        ? instructionFilesSection(sortInstructionFiles(
+        ? instructionFilesSection(contextInstructionFiles(
           deps.instructionFiles?.() ?? cwdInstructionFiles(ctx.cwd),
           getAgentDir(),
           ctx.isProjectTrusted(),
@@ -356,7 +360,7 @@ export function createGuardianReviewer(
       ...(config.reviewEvidence.userMessageTypes.length ? [INJECTED_USER_MESSAGE_SYSTEM_PROMPT] : []),
     ].join("\n\n");
     // The files go last: policy stays contiguous, and the long file text ends the prompt.
-    const systemPrompt = instructionsSection ? `${policyPrompt}\n\n${instructionsSection}` : policyPrompt;
+    const systemPrompt = [policyPrompt, userPolicySection, ...(instructionsSection ? [instructionsSection] : [])].join("\n\n");
     const fingerprint = reviewerFingerprint(mainSessionId, model, config, systemPrompt, reasoning);
     // Collected before the first await: callers snapshot the same stream right
     // before calling, and rely on it describing what the guardian judged.

@@ -47,7 +47,7 @@ What happens when the guardian cannot approve a command (an `ask_user` verdict, 
 
 Set the default with the **Approval mode** row in `/auto-permissions` or `"approvalMode": "auto" | "careful" | "afk"` in the config, and switch one session with `/auto-permissions auto`, `/auto-permissions careful` or `/auto-permissions afk`. A session switch lasts until the session ends, switches again, or the default changes in the menu, and a new or resumed session starts in the configured default. A blocked command lands in the denial log, so **Recent denials → Allow on retry** clears it too.
 
-To keep the agent working while being careful about specific things, say so in your message ("don't push", "treat vistra as read-only"): the guardian blocks matching actions until a later message lifts the boundary. Boundaries you state live in the transcript, so a compaction can drop them; for anything that must always hold, write it in your own `AGENTS.md` (see [Policy from your instruction files](#policy-from-your-instruction-files)) or use a deny rule.
+To keep the agent working while being careful about specific things, say so in your message ("don't push", "treat vistra as read-only"): the guardian blocks matching actions until a later message lifts the boundary. Boundaries you state live in the transcript, so a compaction can drop them; for anything that must always hold, write it in your policy file (see [Your policy file](#your-policy-file)) or use a deny rule.
 
 Subagents keep their own revise-first behavior (see [Subagent sessions](#subagent-sessions)), and an unattended session is always `afk` (see [Unattended sessions](#unattended-sessions)).
 
@@ -157,29 +157,42 @@ Set `enabled` to `false` to disable the extension. Invalid configuration fails c
 
 Set `"reviewAllShell": true` to review every bash command that matches no rule under a generic `shell command` gate (group `all-shell`), the analogue of Claude Code's `classifyAllShell`. The rules then act as a severity layer on top of blanket coverage: deny rules still block outright, and everything else — named by a rule or not — goes to the guardian. The trade is one guardian call per command; pair it with a cheap reviewer model. A command whose matching group is listed in `.pi/trusted-ops` was explicitly waved through and is not re-captured by the blanket gate; trusting `all-shell` itself opts a project out of blanket review while keeping the ruleset live. Lineage caching and the evaluation log apply to `all-shell` reviews unchanged.
 
-## Policy from your instruction files
+## Your policy file
 
-The guardian reads the same `AGENTS.md` / `CLAUDE.md` files Pi loaded into the agent's prompt: the agent directory's, and those in the working directory and its parents. Pi reports them each turn, so the guardian and the agent never disagree about which files apply. Where a file lives decides what it can do:
-
-| File | Treated as | It can |
-|---|---|---|
-| Directly in the agent directory (`~/.pi/agent/AGENTS.md`), or outside any git repository and outside the agent directory's installed packages (`~/repos/AGENTS.md`) | **Your policy** | Name what is yours (orgs, hosts, services), make an action routine even if it is block-listed, and require approval for an action. |
-| Inside a git repository, or in a package installed under the agent directory | **Project guidance** | Only tighten: its restrictions bind, and it can make an already-allowed step routine. It never clears a block-listed action, because anyone who can change the repository can edit it. |
-
-So write the boundaries you care about where the agent reads them too, for example in `~/repos/AGENTS.md`:
+What you allow lives in one Markdown file beside the config: `~/.pi/agent/pi-auto-permissions/POLICY.md` (next to wherever `PI_AUTO_PERMISSIONS_CONFIG` points, when that is set). It is plain prose, read on every review, and it is the only place that can name what is yours, make a block-listed action routine, or say what a go-ahead covers. Pi never loads it into the agent's prompt, so the agent's instruction files stay about the work and the reviewer's rules stay here.
 
 ```markdown
-## Approvals
-- Our GitHub orgs acme-corp and example-labs are our own source control.
-- Removing merged worktrees under ~/repos/worktrees is routine cleanup.
-- Customer production hosts (*-prod-*.example.internal) need the exact operation and host named before any change.
+# Mine
+- Our GitHub orgs acme-corp and example-labs, and the registry registry.example.com.
+
+# What a go-ahead covers
+- "merge" covers rebasing the branch, fixing CI on it and `gh pr merge --squash`.
+- "deploy" covers merging the PR opened for it and the repository's documented deploy.
+
+# Routine
+- Removing merged worktrees under ~/repos/worktrees.
+
+# Always ask
+- Customer production hosts (*-prod-*.example.internal): no changes unless I name the exact operation and host.
 ```
 
-In an untrusted project only the agent directory's files are used. Set `reviewEvidence.projectInstructions` to `false` to turn the files off. They end the reviewer prompt and take part in its fingerprint, so editing one starts a fresh reviewer lineage.
+The headings are yours; the guardian reads the prose. A statement that names an action and where it applies clears or adds a block; a general one ("work autonomously", "be careful") does neither. Between two statements the more specific wins, and between equally specific ones the one that asks wins. With no policy file, only the built-in rules apply.
+
+### The agent's instruction files are context
+
+The guardian also reads the `AGENTS.md` / `CLAUDE.md` files Pi loaded into the agent's prompt: the agent directory's, and those in the working directory and its parents. Pi reports them each turn, so the guardian sees exactly what the agent sees. They are context: they tell the guardian what the project is and what a documented workflow consists of, so "deploy it" can be matched to the steps the repository's file describes. They never authorize anything, and the guardian does not enforce their conventions; those are the agent's to follow.
+
+In an untrusted project only the agent directory's own files are read. Set `reviewEvidence.projectInstructions` to `false` to leave the files out. The policy and the files take part in the reviewer prompt's fingerprint, so editing one starts a fresh reviewer lineage.
+
+**Upgrading from 0.26 or 0.27:** an `AGENTS.md` outside a repository no longer acts as your policy. Move the statements you wrote for the guardian (what is yours, what is routine, what always asks) into `POLICY.md`.
+
+### The agent cannot rewrite it unreviewed
+
+A change to `POLICY.md` or to the config file is reviewed whichever tool makes it: a shell command, or the `edit` and `write` tools, which are otherwise not gated. The guardian sees the whole change and approves it only when you asked for that change to that file. No rule, policy statement or trusted group turns this off; disabling the extension does.
 
 ## Define trusted infrastructure
 
-`guardianPolicy` is the reviewer-only alternative to your instruction files: entries the agent never sees, kept in the user-scoped config. The rules decide *which* commands are reviewed; `guardianPolicy` tells the guardian *how to judge them* against your infrastructure. All four lists are prose — write entries the way you would describe your environment to a new engineer:
+`guardianPolicy` is the structured alternative to [your policy file](#your-policy-file): the same kind of statements, kept as four lists in the user-scoped config. The rules decide *which* commands are reviewed; `guardianPolicy` tells the guardian *how to judge them* against your infrastructure. All four lists are prose — write entries the way you would describe your environment to a new engineer:
 
 ```json
 {
@@ -304,7 +317,7 @@ A codemode script runs shell commands from inside it, so judging one of its `bas
 
 Scripts are capped at 8000 characters (head and tail, with an elision marker), and a full reviewer rebuild keeps the source of only the five newest; older ones collapse to `SCRIPT codemode [<call id>] (source elided)`.
 
-Instruction files are covered in [Policy from your instruction files](#policy-from-your-instruction-files).
+The policy file and the agent's instruction files are covered in [Your policy file](#your-policy-file).
 
 ### Interactive dialog answers
 

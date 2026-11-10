@@ -26,7 +26,8 @@ import {
   permissionPromptOptions,
   type PromptEvaluationUserChoice,
 } from "./evaluation-log.js";
-import type { Gate } from "./gates.js";
+import { REVIEWER_FILE_GATE, type Gate } from "./gates.js";
+import { reviewerFileAt } from "./policy-file.js";
 import { classifyCommand } from "./classify.js";
 import type { PermissionVerdict, ReviewEvidenceRecord } from "./review.js";
 import { promptSelect, setHerdrBlocked } from "./prompt-select.js";
@@ -186,6 +187,18 @@ interface AssistantToolCall {
 
 function isBashTool(name: string): boolean {
   return name === "bash" || name.endsWith(".bash");
+}
+
+/**
+ * The path a file tool is about to edit or write, when it is the reviewer's
+ * own policy or config; undefined for any other call.
+ */
+function reviewerFileWrite(toolName: string, input: unknown, cwd: string): string | undefined {
+  const base = toolName.slice(toolName.lastIndexOf(".") + 1);
+  if (base !== "edit" && base !== "write") return undefined;
+  const path = (input as { path?: unknown } | undefined)?.path;
+  if (typeof path !== "string") return undefined;
+  return reviewerFileAt(path, cwd) ? path : undefined;
 }
 
 function sameKeys(a: readonly string[], b: readonly string[]): boolean {
@@ -915,9 +928,13 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
   });
 
   pi.on("tool_call", async (event, ctx) => {
-    if (!isBashTool(event.toolName)) return;
+    // Bash is reviewed; so is a file tool changing the reviewer's own policy or config.
+    const fileWrite = isBashTool(event.toolName) ? undefined : reviewerFileWrite(event.toolName, event.input, ctx.cwd);
+    if (!isBashTool(event.toolName) && fileWrite === undefined) return;
     if (hcLookup) await hcLookup;
-    const command = (event.input as { command: string }).command;
+    const command = fileWrite === undefined
+      ? (event.input as { command: string }).command
+      : `${event.toolName} ${fileWrite}`;
     const lifecycleSignal = reviewer.lifecycleSignal;
 
     let config: AutoPermissionsConfig;
@@ -929,7 +946,7 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
     }
     if (!config.enabled) return;
     const parentToolCallId = (event as { parentToolCallId?: string }).parentToolCallId;
-    if (!parentToolCallId) startSiblingReviews(event.toolCallId, ctx, config, lifecycleSignal);
+    if (!parentToolCallId && fileWrite === undefined) startSiblingReviews(event.toolCallId, ctx, config, lifecycleSignal);
     const scriptToolCallId = parentToolCallId ? scriptRoots.get(parentToolCallId) ?? parentToolCallId : undefined;
     const target: ReviewTarget = {
       toolName: event.toolName,
@@ -937,7 +954,9 @@ export default function autoPermissionsExtension(pi: ExtensionAPI) {
       ...(scriptToolCallId ? { scriptToolCallId } : {}),
     };
     const input = event.input as Record<string, unknown>;
-    const classified = classifyCommand(command, config, trustedGroups);
+    const classified: ReturnType<typeof classifyCommand> = fileWrite === undefined
+      ? classifyCommand(command, config, trustedGroups)
+      : { kind: "review", gate: REVIEWER_FILE_GATE };
     const early = takeSiblingReview(
       event.toolCallId,
       input,
