@@ -45,26 +45,41 @@ export function readPolicy(path: string): string | undefined {
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/gu;
 
+/** Pi's conversion of Git Bash, MSYS, Cygwin and WSL drive paths (/c/x, /mnt/c/x) to native Windows form. */
+function windowsShellPath(path: string): string {
+  if (!path.startsWith("/") || path.startsWith("//") || path.includes("\\")) return path;
+  const match = path.match(/^\/(?:mnt\/|cygdrive\/)?([a-z])(?:\/(.*))?$/iu);
+  if (!match) return path;
+  return `${match[1]!.toUpperCase()}:\\${match[2]?.replaceAll("/", "\\") ?? ""}`;
+}
+
 /**
- * The absolute path Pi's file tools resolve `path` to. Pi does not export its
- * normalization (unicode spaces, a leading `@`, `~`, `file://` URLs), so it is
- * mirrored here; pi-contract.test.ts pins it against the real write tool.
+ * A path as Pi's file tools normalize it before resolving it: unicode spaces,
+ * a leading `@`, Windows shell drive paths, `~`, and `file://` URLs. Pi does
+ * not export this, so it is mirrored here; pi-contract.test.ts pins it against
+ * the real write tool.
  */
-export function resolveToolPath(path: string, cwd: string): string {
+export function normalizeToolPath(path: string, platform: NodeJS.Platform = process.platform): string {
   let normalized = path.replace(UNICODE_SPACES, " ");
   if (normalized.startsWith("@")) normalized = normalized.slice(1);
-  if (normalized === "~") {
-    normalized = homedir();
-  } else if (normalized.startsWith("~/") || (process.platform === "win32" && normalized.startsWith("~\\"))) {
-    normalized = join(homedir(), normalized.slice(2));
-  } else if (/^file:\/\//u.test(normalized)) {
+  if (platform === "win32") normalized = windowsShellPath(normalized);
+  if (normalized === "~") return homedir();
+  if (normalized.startsWith("~/") || (platform === "win32" && normalized.startsWith("~\\"))) {
+    return join(homedir(), normalized.slice(2));
+  }
+  if (/^file:\/\//u.test(normalized)) {
     try {
-      normalized = fileURLToPath(normalized);
+      return fileURLToPath(normalized);
     } catch {
       // Not a usable file URL; Pi's tool fails on it too.
     }
   }
-  return resolve(cwd, normalized);
+  return normalized;
+}
+
+/** The absolute path Pi's file tools resolve `path` to from `cwd`. */
+export function resolveToolPath(path: string, cwd: string): string {
+  return resolve(cwd, normalizeToolPath(path));
 }
 
 const MAX_LINK_DEPTH = 40;

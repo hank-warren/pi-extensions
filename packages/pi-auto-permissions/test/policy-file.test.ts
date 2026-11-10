@@ -4,7 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 import { pathToFileURL } from "node:url";
-import { commandNamesReviewerFile, policySection, readPolicy, resolveToolPath, reviewerFileAt, reviewerFiles } from "../policy-file.ts";
+import { commandNamesReviewerFile, normalizeToolPath, policySection, readPolicy, resolveToolPath, reviewerFileAt, reviewerFiles } from "../policy-file.ts";
 
 function scratch(): { dir: string; files: ReturnType<typeof reviewerFiles> } {
 	const dir = mkdtempSync(join(tmpdir(), "ap-policy-"));
@@ -79,6 +79,17 @@ describe("recognising a write to the reviewer's files", () => {
 		assert.equal(reviewerFileAt(pathToFileURL(files.policy).href, "/", files), "policy");
 		assert.equal(resolveToolPath("a\u00A0b.md", "/x"), "/x/a b.md");
 		assert.equal(resolveToolPath("@~/notes.md", "/x"), join(homedir(), "notes.md"));
+	});
+
+	test("on Windows, converts Git Bash, MSYS, Cygwin and WSL drive paths as Pi does", () => {
+		const win = (path: string) => normalizeToolPath(path, "win32");
+		assert.equal(win("/c/Users/alice/.pi/agent/pi-auto-permissions/config.json"), "C:\\Users\\alice\\.pi\\agent\\pi-auto-permissions\\config.json");
+		assert.equal(win("/mnt/d/work/POLICY.md"), "D:\\work\\POLICY.md");
+		assert.equal(win("@/cygdrive/c/x/POLICY.md"), "C:\\x\\POLICY.md");
+		assert.equal(win("/c"), "C:\\");
+		assert.equal(win("//server/share/POLICY.md"), "//server/share/POLICY.md", "a UNC path is left alone");
+		assert.equal(win("/Users/alice/POLICY.md"), "/Users/alice/POLICY.md", "not a drive path");
+		assert.equal(normalizeToolPath("/c/Users/alice/config.json", "linux"), "/c/Users/alice/config.json", "and never elsewhere");
 	});
 
 	test("follows a dangling symlink to a policy file that does not exist yet", () => {
