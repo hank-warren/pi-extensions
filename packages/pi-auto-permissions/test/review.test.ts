@@ -12,8 +12,10 @@ import {
 	DEFAULT_EVIDENCE_CAPS,
 	FULL_REBUILD_KEEP_TOOL_RECORDS,
 	parsePermissionVerdict,
+	ReviewerOutputError,
 	SCRIPT_EVIDENCE_SYSTEM_PROMPT,
 	subagentContextSystemPrompt,
+	VERDICT_NOTE_MAX_CHARS,
 } from "../review.ts";
 
 function throwsWith(fn: () => unknown, needle: string): void {
@@ -488,6 +490,26 @@ describe("permission verdicts", () => {
 			decision: "revise",
 			reason: "message must be lowercase",
 		});
+	});
+
+	test("keeps a note on an approval only, on one line and cut to its cap", () => {
+		assert.deepEqual(parsePermissionVerdict('{"decision":"approve","reason":"ok","note":"  wrong\\n target  "}'), {
+			decision: "approve",
+			reason: "ok",
+			note: "wrong target",
+		});
+		const long = parsePermissionVerdict(JSON.stringify({ decision: "approve", reason: "ok", note: "n".repeat(500) }));
+		assert.equal(long.note?.length, VERDICT_NOTE_MAX_CHARS);
+		assert.ok(long.note?.endsWith("…"));
+		assert.equal(parsePermissionVerdict('{"decision":"revise","reason":"narrow it","note":"also this"}').note, undefined);
+		assert.equal(parsePermissionVerdict('{"decision":"approve","reason":"ok","note":"   "}').note, undefined);
+		assert.equal(parsePermissionVerdict('{"decision":"approve","reason":"ok","note":7}').note, undefined);
+	});
+
+	test("an unusable answer is a ReviewerOutputError, so the caller can ask again", () => {
+		for (const text of ["no verdict here", '{"decision":"approve"', '{"decision":"deny","reason":"no"}', '{"decision":"approve","reason":""}']) {
+			assert.throws(() => parsePermissionVerdict(text), ReviewerOutputError);
+		}
 	});
 
 	test("rejects malformed decisions", () => {

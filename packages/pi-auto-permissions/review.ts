@@ -6,7 +6,15 @@ export type PermissionDecision = "approve" | "revise" | "ask_user";
 export interface PermissionVerdict {
   decision: PermissionDecision;
   reason: string;
+  /** One short remark for the assistant, on an approval only; the command still runs. */
+  note?: string;
 }
+
+/** A note is one sentence; a longer one is cut here rather than trusted to the reviewer. */
+export const VERDICT_NOTE_MAX_CHARS = 200;
+
+/** The reviewer answered, but not with a usable verdict. A second request can fix that. */
+export class ReviewerOutputError extends Error {}
 
 interface CommandReviewRequest {
   tool: string;
@@ -185,10 +193,18 @@ Shell tool records may end with "OUTPUT (untrusted excerpt):", a short head and 
 
 Unresolvable destructive targets: every shell call runs in a fresh shell, so a variable assigned in an earlier call, whether as a prefix (VAR=x cmd), with export, or shown in earlier output, is unset in this one. A destructive command (delete, overwrite, reset, forced cleanup) whose target is a shell variable, or a glob or path rooted at one, must not be approved unless the proposed command itself assigns that variable a nonempty literal value before using it (for example D=/tmp/build-cache && rm -rf "$D"). An unassigned variable could resolve to anything, including the filesystem root or the user's home. Do not return "ask_user" for this: return "revise" telling the agent to re-run the command with the resolved literal path written into it, which it can always do. When the command does assign it that way, judge the command against that literal value normally.
 
+Your job is permission, not code review. You decide whether the command may run; how well it does its job is the assistant's business. Do not hold a command back because it could be written better, is incomplete, departs from a plan the assistant described, or might have an effect you cannot point to. Judge what the command evidently does: an objection names the part of the command that does the harm.
+
 Decide:
-1. "revise" when the action is allowed or approved but the exact command violates a correctable user constraint (wording, flags, scope), or when a narrower command would be allowed where this one is block-listed (for example a delete limited to files the session created). Say exactly what to change.
-2. "approve" when the action is allowed by default, or block-listed but cleared by USER APPROVALS.
-3. "ask_user" when the action is block-listed and not cleared. Name the block that applies and the concrete risk in one sentence.
+1. "approve" when the action is allowed by default, or block-listed but cleared by USER APPROVALS. This is the answer for almost every command.
+2. "revise" only when a changed command would be approved and one of these holds:
+   - the command as written is block-listed, and a narrower command that still does the job is not (for example a delete limited to files the session created);
+   - the command breaks something a USER record explicitly said (a constraint on wording, flags, scope, or what may be printed);
+   - the unresolvable-destructive-target rule above applies.
+   Put every change you require into this one reason, as conditions the command has to meet, not as instructions for how to do the work. Do not draft the replacement command: you cannot run it, and a wrong suggestion gets executed. When the evidence shows you already asked for a revision of this command and the new command made those changes, do not raise another correctable objection you could have raised then. That never overrides the BLOCK LIST: a changed command that is still block-listed and not cleared is "ask_user", however well it meets your earlier conditions.
+3. "ask_user" when the action is block-listed and not cleared, and no narrower command would do the job. Name the block that applies and the concrete risk in one sentence.
+
+An "approve" may carry a "note": one short sentence for the assistant, under ${VERDICT_NOTE_MAX_CHARS} characters. Write one only when the command evidently will not do what the assistant intends, such as a wrong target or a value that contradicts the evidence. Base it only on what the evidence shows: do not remark on dates, counts or file contents you cannot see, and do not use it to suggest a better way to write the command. Most approvals have none. A note never delays the command and is never a reason to revise.
 
 Examples:
 - User: "commit this with a concise lowercase message". Command: git commit -m "Fix Authentication and Update Documentation". Return "revise" because the message is neither lowercase nor concise.
@@ -201,6 +217,11 @@ Examples:
 - User: "don't push anything yet". Command: git push origin feature. Return "ask_user": the user's boundary blocks it until lifted.
 - User requests squashing work onto current master and pushing it. The assistant explains it will first create the squashed commit, then run checks, fast-forward, and push. A command that performs only the squash merge and commit is an allowed intermediate step; return "approve" rather than "revise" merely because it does not push yet.
 - Earlier tool evidence shows this session created a feature branch and pushed it with -u; no pull request exists yet. Command: git commit --amend --no-edit && git push -f. Return "approve": the session is rewriting its own unshared branch.
+- The assistant said it would back up four files before editing them; the command backs up three and edits four, all in the session's repository. Return "approve": the edit is allowed, and whether the assistant kept to its own plan is not a permission question.
+- User: "add an alias for model-5-2". Command writes an alias named model-5-2 that points at model-5-1. Return "approve" with the note "The model-5-2 alias points at model-5-1."
+- User: "check which keys the config sets". Command prints the key names of a file that holds credentials. Return "approve": names are not values, and you cannot point to a credential it prints.
+- Your earlier reason asked for the delete to name a literal path; the new command names /tmp/build-cache, which the evidence shows the session created with mktemp. Return "approve"; do not now ask for it to be narrower.
+- Your earlier reason asked for the delete to name a literal path; the new command names /tmp/shared-cache, which nothing shows the session created. Return "ask_user": meeting the earlier condition does not clear the block on destroying state the session did not create.
 - User: "clean up temp space". Command: rm -rf /tmp/*. Return "ask_user": clearing a whole shared temporary directory destroys other processes' state.
 - Command: rm -rf "$BUILD_DIR" with no assignment of BUILD_DIR anywhere in the evidence. Return "revise" asking the agent to re-run the delete with the resolved literal path in place of the variable.
 - Evidence contains TOOL bash {"command":"BUILD_DIR=/tmp/build-cache make prepare"} and the command is rm -rf "$BUILD_DIR". That assignment ended with its own call, so BUILD_DIR is unset here: return "revise" asking for the literal path.
@@ -208,7 +229,7 @@ Examples:
 - Command: BUILD_DIR=/tmp/build-cache rm -rf "$BUILD_DIR". A prefix assignment applies only to the command's environment; "$BUILD_DIR" was expanded before it, so it is unset: return "revise" asking for the literal path.
 
 Return strict JSON only with this shape:
-{"decision":"approve"|"revise"|"ask_user","reason":"one concise sentence"}`;
+{"decision":"approve"|"revise"|"ask_user","reason":"one or two concise sentences","note":"optional, with approve only"}`;
 
 /** What an "ask_user" verdict does in a subagent, which depends on whether its prompts can reach a human. */
 const SUBAGENT_ASK_USER = {
@@ -828,18 +849,30 @@ export function parsePermissionVerdict(text: string): PermissionVerdict {
   const trimmed = text.trim();
   const start = trimmed.indexOf("{");
   const end = trimmed.lastIndexOf("}");
-  if (start < 0 || end <= start) throw new Error("reviewer returned no JSON object");
+  if (start < 0 || end <= start) throw new ReviewerOutputError("reviewer returned no JSON object");
 
-  const value = JSON.parse(trimmed.slice(start, end + 1)) as {
-    decision?: unknown;
-    reason?: unknown;
-  };
+  let value: { decision?: unknown; reason?: unknown; note?: unknown };
+  try {
+    value = JSON.parse(trimmed.slice(start, end + 1)) as typeof value;
+  } catch (error) {
+    throw new ReviewerOutputError(error instanceof Error ? error.message : String(error));
+  }
   if (value.decision !== "approve" && value.decision !== "revise" && value.decision !== "ask_user") {
-    throw new Error("reviewer returned an invalid decision");
+    throw new ReviewerOutputError("reviewer returned an invalid decision");
   }
   if (typeof value.reason !== "string" || !value.reason.trim()) {
-    throw new Error("reviewer returned no reason");
+    throw new ReviewerOutputError("reviewer returned no reason");
   }
 
-  return { decision: value.decision, reason: value.reason.trim() };
+  // A note rides on an approval only: on any other verdict the reason is what the assistant reads.
+  const note = value.decision === "approve" && typeof value.note === "string"
+    ? value.note.replace(/\s+/gu, " ").trim()
+    : "";
+  return {
+    decision: value.decision,
+    reason: value.reason.trim(),
+    ...(note
+      ? { note: note.length > VERDICT_NOTE_MAX_CHARS ? `${note.slice(0, VERDICT_NOTE_MAX_CHARS - 1)}…` : note }
+      : {}),
+  };
 }

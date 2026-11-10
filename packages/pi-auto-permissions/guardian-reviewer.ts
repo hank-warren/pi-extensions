@@ -26,6 +26,7 @@ import {
   INJECTED_USER_MESSAGE_SYSTEM_PROMPT,
   OVERRIDE_FEEDBACK_SYSTEM_PROMPT,
   parsePermissionVerdict,
+  ReviewerOutputError,
   SCRIPT_EVIDENCE_SYSTEM_PROMPT,
   subagentContextSystemPrompt,
   type PermissionVerdict,
@@ -153,6 +154,18 @@ function assistantText(content: readonly unknown[]): string {
     })
     .filter(Boolean)
     .join("\n");
+}
+
+/**
+ * A failed review that a second request can fix: the reviewer answered with
+ * something that is not a verdict, or the provider was overloaded. A rate
+ * limit or a timeout is not: asking again at once meets the same wall.
+ */
+export function isRetryableReviewFailure(error: unknown): boolean {
+  if (error instanceof ReviewerOutputError) return true;
+  const message = error instanceof Error ? error.message : String(error);
+  if (/rate.?limit|\b429\b/iu.test(message)) return false;
+  return /overloaded|internal server error|\b(?:502|503|529)\b/iu.test(message);
 }
 
 /** Before Pi reports its loaded files (older Pi, or a review before the first turn), the cwd's own file. */

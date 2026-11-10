@@ -50,25 +50,53 @@ export class BlockCounter {
   }
 }
 
+/**
+ * Tracks revisions the agent has already seen, so the guardian gets one
+ * revision per command: a second one, in a later turn and with nothing
+ * approved in between, goes to the user instead of back to the agent.
+ * Revisions in the same turn are separate commands issued together, not a
+ * retry, so they do not count against each other.
+ */
+export class ReviseStreak {
+  private since: number | undefined;
+
+  approved(): void {
+    this.since = undefined;
+  }
+
+  /** Record a revision in `turn`; true when it repeats one from an earlier turn. */
+  repeats(turn: number): boolean {
+    if (this.since === undefined) {
+      this.since = turn;
+      return false;
+    }
+    return this.since !== turn;
+  }
+
+  reset(): void {
+    this.since = undefined;
+  }
+}
+
 const FAILED_REVIEW_NOTE = "The review itself failed, so running the same command again later may succeed.";
 
 /** What the agent is told when `auto` blocks a command. */
 export function autoBlockReason(gateLabel: string, reason: string, failed: boolean): string {
   return `${gateLabel} was blocked by Auto Permissions: ${reason}
-${failed ? `${FAILED_REVIEW_NOTE} ` : "Do not retry it unchanged. "}Carry on with the parts of the task that do not need it, or get the same result another way. If it is genuinely required, finish what you can, then name the exact command in your final message and ask the user to approve it; it is reviewed again once they reply.`;
+${failed ? `${FAILED_REVIEW_NOTE} ` : "Do not retry it unchanged. "}Carry on with the parts of the task that do not need it, or finish the task a way that does not need the blocked action; do not reach the same effect with a different command. If it is genuinely required, finish what you can, then name the exact command in your final message and ask the user to approve it; it is reviewed again once they reply.`;
 }
 
 /** What the agent is told when `afk` blocks a command. */
 export function afkBlockReason(gateLabel: string, reason: string, failed: boolean): string {
   return `${gateLabel} was blocked by Auto Permissions: ${reason}
-The user is away, so nothing is sent to them now. ${failed ? `${FAILED_REVIEW_NOTE} ` : "Do not retry it unchanged. "}Carry on with the rest of the task or get the same result another way, and list this command and why it is needed in your final message so the user can approve it when they are back.`;
+The user is away, so nothing is sent to them now. ${failed ? `${FAILED_REVIEW_NOTE} ` : "Do not retry it unchanged. "}Carry on with the rest of the task, or finish it a way that does not need the blocked action, and list this command and why it is needed in your final message so the user can approve it when they are back.`;
 }
 
 /** The system prompt section that carries AFK_PERMISSIONS_PROMPT on Pi versions with a structured prompt. */
 export const AFK_PROMPT_SECTION = "auto_permissions_afk";
 
 export const AFK_PERMISSIONS_PROMPT = `## Auto Permissions (user away)
-The user is away. Bash commands that Auto Permissions cannot approve on its own are blocked, not sent to them. When one is blocked, do not retry it unchanged: carry on with the rest of the task or get the result another way. In your final message, list each blocked command and why it is needed, so the user can approve it when they are back.`;
+The user is away. Bash commands that Auto Permissions cannot approve on its own are blocked, not sent to them. When one is blocked, do not retry it unchanged or reach the same effect with a different command: carry on with the rest of the task. In your final message, list each blocked command and why it is needed, so the user can approve it when they are back.`;
 
 /** Footer status text for a mode, or undefined for the default. */
 export function approvalModeStatus(mode: ApprovalMode): string | undefined {
