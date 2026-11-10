@@ -1,5 +1,15 @@
 # @hank-warren/pi-statusline
 
+## 0.13.0
+
+### Minor Changes
+
+- Keep the Claude usage meter for accounts without a 5-hour window.
+
+  Anthropic's usage endpoint returns `five_hour: null` for plans with no 5-hour limit, and the meter disappeared for those accounts. It now shows the windows the account has: weekly, then the model-scoped weekly limit. Accounts with a 5-hour window render as before.
+
+  Custom items: `usage_remaining.claude.five_hour` and `usage_remaining.claude.seven_day` are now `null` when the account has no such window. A command that compares them without a fallback should add one, e.g. `.five_hour // 100`.
+
 ## 0.12.0
 
 ### Minor Changes

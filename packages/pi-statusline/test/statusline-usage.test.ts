@@ -46,6 +46,22 @@ const claudeScopedPayload = {
 	],
 };
 
+/** Transcribed from issue #89: a subscription account with no 5-hour window. */
+const claudeNoFiveHourPayload = {
+	five_hour: null,
+	seven_day: { utilization: 34.0, resets_at: "2026-11-14T07:59:59+00:00" },
+	limits: [
+		{ kind: "weekly_all", group: "weekly", percent: 34, is_active: true },
+		{
+			kind: "weekly_scoped",
+			group: "weekly",
+			percent: 4,
+			scope: { model: { display_name: "Fable" } },
+			is_active: false,
+		},
+	],
+};
+
 /** A plan with no 5-hour limit: one weekly window and nothing else. */
 const codexWeeklyOnlyPayload = {
 	plan_type: "pro",
@@ -112,8 +128,20 @@ test("parseClaudeUsage rejects malformed payloads", () => {
 	assert.equal(parseClaudeUsage(undefined), undefined);
 	assert.equal(parseClaudeUsage(null), undefined);
 	assert.equal(parseClaudeUsage({}), undefined);
-	assert.equal(parseClaudeUsage({ five_hour: { utilization: 3 } }), undefined);
-	assert.equal(parseClaudeUsage({ five_hour: { utilization: "3" }, seven_day: { utilization: 46 } }), undefined);
+	assert.equal(parseClaudeUsage({ five_hour: null, seven_day: null }), undefined);
+	assert.equal(parseClaudeUsage({ five_hour: { utilization: "3" }, seven_day: { utilization: "46" } }), undefined);
+	assert.equal(
+		parseClaudeUsage({ five_hour: null, seven_day: null, limits: [{ kind: "weekly_scoped", percent: 4 }] }),
+		undefined,
+		"a scoped limit alone is not a meter",
+	);
+});
+
+test("parseClaudeUsage keeps the windows an account has when the other is null", () => {
+	assert.deepEqual(parseClaudeUsage(claudeNoFiveHourPayload), { sevenDay: 66, scopedWeekly: 96 });
+	assert.deepEqual(parseClaudeUsage({ five_hour: null, seven_day: { utilization: 34 } }), { sevenDay: 66 });
+	assert.deepEqual(parseClaudeUsage({ five_hour: { utilization: 3 }, seven_day: null }), { fiveHour: 97 });
+	assert.deepEqual(parseClaudeUsage({ five_hour: { utilization: 3 } }), { fiveHour: 97 });
 });
 
 test("parseCodexUsage reads both windows when the plan has a 5-hour limit", () => {
@@ -187,6 +215,18 @@ test("renderUsageSegment appends the scoped weekly percent when present", () => 
 	const segment = renderUsageSegment({ claude: { fiveHour: 97, sevenDay: 54, scopedWeekly: 24 } });
 	assert.equal(stripAnsi(segment ?? ""), "\uec82 97\u00b754\u00b724");
 	assert.ok(segment?.includes("\x1b[38;2;255;176;85m24\x1b[0m"), "24 remaining renders orange");
+});
+
+test("renderUsageSegment gives a missing claude window no slot", () => {
+	const segment = renderUsageSegment({ claude: { sevenDay: 66, scopedWeekly: 96 } });
+	assert.equal(stripAnsi(segment ?? ""), "\uec82 66\u00b796", "weekly, then scoped weekly");
+	assert.equal(stripAnsi(renderUsageSegment({ claude: { sevenDay: 66 } }) ?? ""), "\uec82 66");
+	assert.equal(stripAnsi(renderUsageSegment({ claude: { fiveHour: 97 } }) ?? ""), "\uec82 97");
+});
+
+test("renderUsageSegment drops a claude entry carrying no percents", () => {
+	assert.equal(renderUsageSegment({ claude: {} }), undefined);
+	assert.equal(stripAnsi(renderUsageSegment({ claude: {}, codex: { weekly: 7 } }) ?? ""), "\uec81 7");
 });
 
 test("renderUsageSegment renders icons with remaining percents in band colors", () => {
@@ -1189,6 +1229,11 @@ test("claudeResetAt takes the soonest window and ignores unusable ones", () => {
 		RESET_MS,
 		"an unparseable timestamp does not hide a usable sibling",
 	);
+	assert.equal(
+		claudeResetAt(claudeNoFiveHourPayload),
+		Date.parse("2026-11-14T07:59:59+00:00"),
+		"a null five-hour window leaves the weekly boundary",
+	);
 	assert.equal(claudeResetAt({}), undefined, "no windows, no boundary");
 	assert.equal(claudeResetAt(null), undefined);
 });
@@ -1211,6 +1256,25 @@ test("codexResetAt prefers the absolute reset and falls back to the relative one
 	};
 	assert.equal(codexResetAt(relative, now), now + 90_000, "a relative reset is resolved against our clock");
 	assert.equal(codexResetAt(codexPlusPayload, now), undefined, "a payload with no reset fields has no boundary");
+});
+
+test("UsageTracker publishes and caches a claude account with no five-hour window", async () => {
+	const authPath = await writeAuthFile(claudeOnlyAuth);
+	const now = Date.parse("2026-11-10T00:00:00+00:00");
+	const tracker = makeTracker({
+		authPath,
+		fetchFn: fakeFetch({ [CLAUDE_URL]: claudeNoFiveHourPayload }),
+		now: () => now,
+	});
+	await tracker.refresh();
+	assert.deepEqual(tracker.snapshot(), { claude: { sevenDay: 66, scopedWeekly: 96 } });
+
+	// A second process adopts the entry from the shared cache without polling.
+	const calls: FetchCall[] = [];
+	const sibling = makeTracker({ authPath, fetchFn: fakeFetch({}, calls), now: () => now });
+	await sibling.refresh();
+	assert.equal(calls.length, 0);
+	assert.deepEqual(sibling.snapshot(), { claude: { sevenDay: 66, scopedWeekly: 96 } });
 });
 
 test("UsageTracker does not adopt a cached value whose window has rolled", async () => {

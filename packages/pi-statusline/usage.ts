@@ -14,7 +14,11 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
  * which is also what an entry written by an older statusline looks like.
  */
 export interface UsageSnapshot {
-	claude?: { fiveHour: number; sevenDay: number; scopedWeekly?: number };
+	/**
+	 * Claude reports a 5-hour window, a weekly one, or both, depending on the
+	 * account; `five_hour` is `null` for subscriptions without that limit.
+	 */
+	claude?: { fiveHour?: number; sevenDay?: number; scopedWeekly?: number };
 	/**
 	 * Codex reports one or two windows depending on the plan: a short (5-hour)
 	 * window, a long one, or both. Every field is optional because which of them
@@ -100,21 +104,25 @@ interface ClaudeLimitEntry {
 }
 
 /**
- * Parse the Anthropic OAuth usage payload into remaining percents. Accounts
- * with a model-scoped weekly limit (e.g. Fable) expose it in the `limits`
- * array as `weekly_scoped`; accounts without one simply omit the entry.
+ * Parse the Anthropic OAuth usage payload into remaining percents. A window
+ * the account does not have arrives as `null` and leaves its slot empty; only
+ * a payload with neither window is rejected. Accounts with a model-scoped
+ * weekly limit (e.g. Fable) expose it in the `limits` array as
+ * `weekly_scoped`; accounts without one simply omit the entry.
  */
 export function parseClaudeUsage(json: unknown): UsageSnapshot["claude"] | undefined {
 	if (typeof json !== "object" || json === null) return undefined;
 	const body = json as {
-		five_hour?: { utilization?: unknown; resets_at?: unknown };
-		seven_day?: { utilization?: unknown; resets_at?: unknown };
+		five_hour?: { utilization?: unknown; resets_at?: unknown } | null;
+		seven_day?: { utilization?: unknown; resets_at?: unknown } | null;
 		limits?: unknown;
 	};
 	const fiveHour = toRemaining(body.five_hour?.utilization);
 	const sevenDay = toRemaining(body.seven_day?.utilization);
-	if (fiveHour === undefined || sevenDay === undefined) return undefined;
-	const result: UsageSnapshot["claude"] = { fiveHour, sevenDay };
+	if (fiveHour === undefined && sevenDay === undefined) return undefined;
+	const result: NonNullable<UsageSnapshot["claude"]> = {};
+	if (fiveHour !== undefined) result.fiveHour = fiveHour;
+	if (sevenDay !== undefined) result.sevenDay = sevenDay;
 	if (Array.isArray(body.limits)) {
 		const scoped = body.limits.find(
 			(entry): entry is ClaudeLimitEntry =>
@@ -205,7 +213,10 @@ function slotCodexWindows(json: unknown): { shortest?: SpannedCodexWindow; longe
  */
 export function claudeResetAt(json: unknown): number | undefined {
 	if (typeof json !== "object" || json === null) return undefined;
-	const body = json as { five_hour?: { resets_at?: unknown }; seven_day?: { resets_at?: unknown } };
+	const body = json as {
+		five_hour?: { resets_at?: unknown } | null;
+		seven_day?: { resets_at?: unknown } | null;
+	};
 	return earliestReset([parseIsoReset(body.five_hour?.resets_at), parseIsoReset(body.seven_day?.resets_at)]);
 }
 
