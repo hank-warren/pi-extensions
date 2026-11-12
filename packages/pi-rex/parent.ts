@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } 
 import { isAbsolute, join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
-import { CHILD_DIR_ENV, CHILD_NAME_ENV, type Inbound, type Report } from "./child.ts";
+import { CHILD_DIR_ENV, CHILD_NAME_ENV, type Inbound, type Report, TOOLS_FILE } from "./child.ts";
 import type { Rex, RexEvent } from "./rex.ts";
 import { spoolDrain, spoolWatch, spoolWrite } from "./spool.ts";
 import { loadTemplate, type Template, templateDirs } from "./templates.ts";
@@ -44,7 +44,7 @@ const spawnParams = Type.Object({
 	template: Type.Optional(Type.String({ description: "A saved role by name: its instructions go before the task and its pi arguments (model, tools) apply." })),
 	model: Type.Optional(Type.String({ description: "provider/id. Default: the template's, else Pi's default model." })),
 	thinking: Type.Optional(Type.Union([Type.Literal("off"), Type.Literal("minimal"), Type.Literal("low"), Type.Literal("medium"), Type.Literal("high"), Type.Literal("xhigh"), Type.Literal("max")])),
-	tools: Type.Optional(Type.Array(Type.String(), { description: "Allowlist of tool names, e.g. [\"read\", \"bash\", \"codemode\"] for read-only work. Default: every tool." })),
+	tools: Type.Optional(Type.Array(Type.String(), { description: "Allowlist of tool names, e.g. [\"read\", \"bash\", \"codemode\"] for read-only work; [] gives it no tools. Enforced on every call, including calls its codemode scripts make. Default: the template's, else every tool." })),
 	placement: Type.Optional(Type.Union([Type.Literal("tab"), Type.Literal("split")], { description: "tab (default): a new unfocused tab in this Rex session. split: a pane to the right of this one." })),
 });
 const nameParams = Type.Object({ name: Type.String({ description: "The child's name." }) });
@@ -93,6 +93,16 @@ export function forwardedExtensions(argv: string[], cwd: string): string[] {
 		index += 1;
 	}
 	return out;
+}
+
+/** The allowlist a template's pi arguments set with `--tools`/`-t` or `--no-tools`/`-nt`, if any. The last one wins, as in Pi. */
+export function templateTools(args: string[]): string[] | undefined {
+	let tools: string[] | undefined;
+	args.forEach((arg, index) => {
+		if (arg === "--no-tools" || arg === "-nt") tools = [];
+		else if ((arg === "--tools" || arg === "-t") && args[index + 1] !== undefined) tools = args[index + 1].split(",").map((name) => name.trim()).filter(Boolean);
+	});
+	return tools;
 }
 
 export class RexParent {
@@ -280,6 +290,10 @@ export class RexParent {
 			`---\nYou are "${name}", an agent started by another Pi session. The last message of each of your turns is delivered to that session automatically, so end each turn with the result or the blocker. Do not start other agents.`,
 		].filter(Boolean).join("\n\n"), { mode: 0o600 });
 
+		// The child enforces the allowlist on every call; --tools alone only chooses what is declared.
+		const tools = params.tools ?? templateTools(template?.args ?? []);
+		if (tools) writeFileSync(join(dir, TOOLS_FILE), JSON.stringify(tools), { mode: 0o600 });
+
 		const split = params.placement === "split";
 		const args = ["run", "-s", session, "--focus=false", "--label", name, "--cwd", cwd, "--json"];
 		if (split) args.push("--split", "right", "-b", self);
@@ -321,7 +335,13 @@ export class RexParent {
 		const child = this.find(name);
 		if (child.state === "exited") return child;
 		child.stopRequested = true;
-		await this.deps.rex.run(["block", "close", "-s", child.session, child.block], signal);
+		try {
+			await this.deps.rex.run(["block", "close", "-s", child.session, child.block], signal);
+		} catch (error) {
+			// Still running: its reports and notices must keep waking the parent.
+			child.stopRequested = false;
+			throw error;
+		}
 		this.exited(child);
 		return child;
 	}

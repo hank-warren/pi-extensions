@@ -25,7 +25,7 @@ function piCommand(): string[] {
 export default function piRex(pi: ExtensionAPI): void {
 	const child = childIdentity();
 	if (child) {
-		registerChild(pi, child.dir, child.name);
+		registerChild(pi, child);
 		return;
 	}
 

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { spoolWatch, spoolWrite } from "./spool.ts";
@@ -16,6 +17,16 @@ export interface Inbound {
 	text: string;
 }
 
+/** The child's tool allowlist, written by the parent beside the task. */
+export const TOOLS_FILE = "tools.json";
+
+export interface ChildIdentity {
+	dir: string;
+	name: string;
+	/** Allowlist of tool names and `*` patterns; undefined allows every tool. */
+	tools?: string[];
+}
+
 /** Where a child keeps its identity for the life of its process; exported so tests can reset it. */
 export const CHILD_SLOT = Symbol.for("pi-rex.child");
 
@@ -25,13 +36,30 @@ export const CHILD_SLOT = Symbol.for("pi-rex.child");
  * session start, and a reload runs this extension again in the same process,
  * which must come back as the same child.
  */
-export function childIdentity(): { dir: string; name: string } | undefined {
-	const slot = globalThis as { [CHILD_SLOT]?: { dir: string; name: string } };
+export function childIdentity(): ChildIdentity | undefined {
+	const slot = globalThis as { [CHILD_SLOT]?: ChildIdentity };
 	if (slot[CHILD_SLOT]) return slot[CHILD_SLOT];
 	const dir = process.env[CHILD_DIR_ENV];
 	if (!dir) return undefined;
-	slot[CHILD_SLOT] = { dir, name: process.env[CHILD_NAME_ENV] ?? "child" };
+	let tools: string[] | undefined;
+	try {
+		const parsed = JSON.parse(readFileSync(join(dir, TOOLS_FILE), "utf8")) as unknown;
+		if (Array.isArray(parsed)) tools = parsed.filter((item): item is string => typeof item === "string");
+	} catch {
+		// No allowlist: every tool.
+	}
+	slot[CHILD_SLOT] = { dir, name: process.env[CHILD_NAME_ENV] ?? "child", tools };
 	return slot[CHILD_SLOT];
+}
+
+/** `*` matches any characters, as in Pi's `--tools`. */
+function toolPattern(entry: string): RegExp {
+	return new RegExp(`^${entry.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`);
+}
+
+/** Whether a tool may run under a child's allowlist; no allowlist allows everything. */
+export function toolAllowed(name: string, allow: string[] | undefined): boolean {
+	return !allow || allow.some((entry) => toolPattern(entry).test(name));
 }
 
 type Message = { role?: string; content?: unknown; stopReason?: string; errorMessage?: string };
@@ -55,10 +83,11 @@ export function lastAssistant(messages: unknown): { text: string; error?: string
 
 /**
  * Runs inside a Pi started by RexSpawn. Registers no tools, so a child cannot
- * spawn agents. Each settled run is reported to the parent, and messages the
- * parent sends are delivered as user messages.
+ * spawn agents. Each settled run is reported to the parent, messages the
+ * parent sends are delivered as user messages, and the tool allowlist is
+ * enforced on every call.
  */
-export function registerChild(pi: ExtensionAPI, dir: string, name: string): void {
+export function registerChild(pi: ExtensionAPI, { dir, name, tools }: ChildIdentity): void {
 	let last: { text: string; error?: string } | undefined;
 	let stop: (() => void) | undefined;
 
@@ -73,6 +102,14 @@ export function registerChild(pi: ExtensionAPI, dir: string, name: string): void
 			if (ctx.isIdle()) pi.sendUserMessage(message.text);
 			else pi.sendUserMessage(message.text, { deliverAs: "steer" });
 		});
+	});
+
+	// Pi's `--tools` only chooses what is declared: MCP and codemode-exposed tools
+	// stay callable from scripts. So every call, nested ones included, is checked here.
+	pi.on("tool_call", (event) => {
+		const tool = (event as { toolName: string }).toolName;
+		if (toolAllowed(tool, tools)) return;
+		return { block: true, reason: tools?.length ? `${tool} is not among this agent's tools (${tools.join(", ")}). Use one of those instead.` : `${tool} is unavailable: this agent has no tools.` };
 	});
 
 	pi.on("agent_end", (event) => {

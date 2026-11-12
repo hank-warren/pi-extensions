@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createMockContext, createMockPi } from "../../../test/support/mock-pi.ts";
-import { CHILD_SLOT, lastAssistant } from "../child.ts";
+import { CHILD_SLOT, lastAssistant, toolAllowed } from "../child.ts";
 import piRex from "../index.ts";
-import { type Child, childMessage, forwardedExtensions, registerTools, RexParent, slug } from "../parent.ts";
+import { childMessage, forwardedExtensions, registerTools, RexParent, slug, templateTools } from "../parent.ts";
 import { parseEvent, type Rex, type RexEvent } from "../rex.ts";
 import { spoolDrain, spoolWrite } from "../spool.ts";
 import { loadTemplate, parseTemplate, splitCommand } from "../templates.ts";
@@ -58,6 +58,13 @@ test("templates: herdr-core format, pi commands only", () => {
 });
 
 test("small helpers", () => {
+	assert.deepEqual(templateTools(["--model", "a/b", "--tools", "read, bash"]), ["read", "bash"]);
+	assert.deepEqual(templateTools(["-t", "read", "--no-tools"]), []);
+	assert.equal(templateTools(["--model", "a/b"]), undefined);
+	assert.ok(toolAllowed("anything", undefined));
+	assert.ok(toolAllowed("srv__gh__get", ["read", "srv__gh__*"]));
+	assert.ok(!toolAllowed("bash", ["read", "srv__gh__*"]));
+	assert.ok(!toolAllowed("read", []));
 	assert.equal(slug("Review Auth!"), "review-auth");
 	assert.equal(slug(undefined), "child");
 	assert.deepEqual(forwardedExtensions(["--model", "x", "-e", "./packages/pi-rex", "--extension", "/abs/ext", "-e", "builtin:codemode"], "/work"), ["-e", "/work/packages/pi-rex", "-e", "/abs/ext", "-e", "builtin:codemode"]);
@@ -76,9 +83,13 @@ test("a child reports each settled run and delivers its inbox", async () => {
 	const mock = createMockPi();
 	let idle = true;
 	const { ctx } = createMockContext({ isIdle: () => idle });
+	writeFileSync(join(dir, "tools.json"), JSON.stringify(["read", "codemode"]));
 	process.env.PI_REX_CHILD = dir;
 	process.env.PI_REX_NAME = "review";
 	piRex(mock.pi);
+	const call = (toolName: string) => (mock.events.get("tool_call") ?? []).map((handler) => (handler as (event: unknown) => unknown)({ toolName }))[0];
+	assert.equal(call("read"), undefined);
+	assert.deepEqual(call("Agent"), { block: true, reason: "Agent is not among this agent's tools (read, codemode). Use one of those instead." });
 	assert.equal(mock.tools.length, 0, "a child registers no tools");
 	spoolWrite(join(dir, "inbox"), { text: "waiting before start" });
 	await fire(mock, "session_start", { reason: "startup" }, ctx);
@@ -102,6 +113,7 @@ test("a child reports each settled run and delivers its inbox", async () => {
 	const reloaded = createMockPi();
 	piRex(reloaded.pi);
 	assert.equal(reloaded.tools.length, 0);
+	assert.ok((reloaded.events.get("tool_call") ?? []).map((handler) => (handler as (event: unknown) => unknown)({ toolName: "bash" }))[0], "the allowlist survives a reload");
 	await fire(reloaded, "session_start", { reason: "reload" }, ctx);
 	await fire(reloaded, "agent_end", { messages: [{ role: "assistant", content: "After reload." }] }, ctx);
 	await fire(reloaded, "agent_settled", {}, ctx);
@@ -163,6 +175,7 @@ test("spawn starts pi in a new unfocused tab with the task in a file", async () 
 		"/usr/bin/node", "/opt/pi/cli.js", "-e", "/ext", "--tools", "read,bash", "--model", "cpa/m", "--thinking", "high", "--name", "review", `@${join(dir, "task.md")}`,
 	]);
 	assert.deepEqual(h.fake.calls[1], ["window", "rename", "-s", SESSION, "window:w1", "review"]);
+	assert.deepEqual(JSON.parse(readFileSync(join(dir, "tools.json"), "utf8")), ["read", "bash"], "the template's allowlist is enforced in the child");
 	const task = readFileSync(join(dir, "task.md"), "utf8");
 	assert.match(task, /^You review diffs\.\n\nReview src\/x\.ts\n\n---\nYou are "review"/);
 	assert.equal(child.state, "starting");
@@ -175,6 +188,7 @@ test("spawn starts pi in a new unfocused tab with the task in a file", async () 
 	const args = h.fake.calls.at(-1) as string[];
 	assert.deepEqual(args.slice(9, 13), ["--split", "right", "-b", SELF]);
 	assert.ok(args.includes("--no-tools"));
+	assert.equal(readFileSync(join(second.dir, "tools.json"), "utf8"), "[]");
 	assert.equal(second.window, undefined);
 	parent.stop();
 	assert.equal(h.fake.listening(), 0);
@@ -265,6 +279,16 @@ test("send, read and stop", async () => {
 
 	assert.equal((await parent.read("fix", 5)).screen, "line 1\n\nline 2");
 	assert.deepEqual(h.fake.calls.at(-1), ["capture", "-s", SESSION, "-b", "block:c1", "--trim"]);
+
+	// A close that fails leaves the child running and still able to wake the parent.
+	const run = h.fake.rex.run;
+	h.fake.rex.run = async () => {
+		throw new Error("rex block: timeout");
+	};
+	await assert.rejects(parent.stopChild("fix"), /timeout/);
+	h.fake.rex.run = run;
+	assert.equal(parent.list()[0].stopRequested, false);
+	assert.equal(parent.list()[0].state, "starting");
 
 	await parent.stopChild("fix");
 	assert.deepEqual(h.fake.calls.at(-1), ["block", "close", "-s", SESSION, "block:c1"]);

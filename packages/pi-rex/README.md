@@ -50,6 +50,8 @@ The parent has no tool that types into a child's terminal, so it cannot answer a
 
 A child registers none of these tools, so it cannot start children of its own.
 
+`tools` (or a template's `--tools`) is an allowlist the child enforces on every tool call, including calls its codemode scripts make. Pi's `--tools` flag alone only chooses which tools are declared to the model; MCP and codemode-exposed tools would stay callable from scripts.
+
 Children keep running when the parent session ends. Their reports wait on disk, and a resumed session (`pi --continue`) finds its children again: reports that arrived meanwhile are stored in the conversation without starting a turn, and a child whose tab has closed is marked exited.
 
 ## Templates
