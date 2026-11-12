@@ -72,6 +72,11 @@ const CLEARED_ENV = [
 	"PI_AGENTS_TOOLS",
 	"PI_AGENTS_DENY_TOOLS",
 	"PI_AGENTS_CONFIG",
+	// pi-rex: what a parent sets for its child, and the Rex terminal a test process runs in.
+	"PI_REX_CHILD",
+	"PI_REX_NAME",
+	"REX_SESSION",
+	"REX_BLOCK",
 	// pi-cliproxyapi-provider's connection, credential and metadata settings.
 	// A host pointed at a live CLIProxyAPI would otherwise steer the provider's
 	// config tests and let its discovery tests reach a real proxy.

@@ -138,6 +138,11 @@ const EXPECTED_SURFACES = {
 	"./packages/pi-image-prune/index.ts": {
 		handlers: ["before_provider_request", "context", "session_start"],
 	},
+	// Parent mode only: a child (PI_REX_CHILD set) registers its report and inbox hooks instead.
+	"./packages/pi-rex/index.ts": {
+		tools: ["RexSpawn", "RexSend", "RexRead", "RexStop", "RexList"],
+		handlers: ["session_shutdown", "session_start"],
+	},
 };
 
 const CATEGORIES = ["tools", "commands", "handlers", "flags", "shortcuts"];
