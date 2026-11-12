@@ -50,7 +50,7 @@ The parent has no tool that types into a child's terminal, so it cannot answer a
 
 A child registers none of these tools, so it cannot start children of its own.
 
-Children keep running when the parent session ends. Their reports wait on disk, and a resumed session (`pi --continue`) finds its children again: reports that arrived meanwhile are added to the next prompt, and a child whose tab has closed is marked exited.
+Children keep running when the parent session ends. Their reports wait on disk, and a resumed session (`pi --continue`) finds its children again: reports that arrived meanwhile are stored in the conversation without starting a turn, and a child whose tab has closed is marked exited.
 
 ## Templates
 

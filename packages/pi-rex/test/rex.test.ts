@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { createMockContext, createMockPi } from "../../../test/support/mock-pi.ts";
-import { lastAssistant, registerChild } from "../child.ts";
+import { CHILD_SLOT, lastAssistant } from "../child.ts";
 import piRex from "../index.ts";
 import { type Child, childMessage, forwardedExtensions, registerTools, RexParent, slug } from "../parent.ts";
 import { parseEvent, type Rex, type RexEvent } from "../rex.ts";
@@ -96,7 +96,20 @@ test("a child reports each settled run and delivers its inbox", async () => {
 	spoolWrite(join(dir, "inbox"), { text: "focus on the first" });
 	await new Promise((resolve) => setTimeout(resolve, 150));
 	assert.deepEqual(mock.sentUserMessages[1], { text: "focus on the first", options: { deliverAs: "steer" } });
-	await fire(mock, "session_shutdown", { reason: "quit" }, ctx);
+	await fire(mock, "session_shutdown", { reason: "reload" }, ctx);
+
+	// A reload runs the extension again in the same process, after the variables are gone: still the same child.
+	const reloaded = createMockPi();
+	piRex(reloaded.pi);
+	assert.equal(reloaded.tools.length, 0);
+	await fire(reloaded, "session_start", { reason: "reload" }, ctx);
+	await fire(reloaded, "agent_end", { messages: [{ role: "assistant", content: "After reload." }] }, ctx);
+	await fire(reloaded, "agent_settled", {}, ctx);
+	const after: unknown[] = [];
+	spoolDrain(join(dir, "outbox"), (report) => after.push(report));
+	assert.deepEqual(after, [{ text: "After reload." }]);
+	await fire(reloaded, "session_shutdown", { reason: "quit" }, ctx);
+	delete (globalThis as { [CHILD_SLOT]?: unknown })[CHILD_SLOT];
 });
 
 function fakeRex() {
@@ -165,6 +178,26 @@ test("spawn starts pi in a new unfocused tab with the task in a file", async () 
 	assert.equal(second.window, undefined);
 	parent.stop();
 	assert.equal(h.fake.listening(), 0);
+});
+
+test("concurrent spawns never share a name or a directory", async () => {
+	const h = parentHarness();
+	const parent = h.make();
+	await parent.start(h.ctx);
+	const [a, b, c] = await Promise.all([parent.spawn({ task: "one" }, h.ctx), parent.spawn({ task: "two" }, h.ctx), parent.spawn({ task: "three", name: "child" }, h.ctx)]);
+	assert.deepEqual([a.name, b.name, c.name], ["child", "child-2", "child-3"]);
+	assert.deepEqual([a, b, c].map((child) => readFileSync(join(child.dir, "task.md"), "utf8").split("\n")[0]), ["one", "two", "three"]);
+	assert.equal(parent.list().length, 3);
+
+	// A failed spawn releases its name.
+	const run = h.fake.rex.run;
+	h.fake.rex.run = async () => {
+		throw new Error("rex run: no server");
+	};
+	await assert.rejects(parent.spawn({ task: "x", name: "retry" }, h.ctx), /no server/);
+	h.fake.rex.run = run;
+	assert.equal((await parent.spawn({ task: "x", name: "retry" }, h.ctx)).name, "retry");
+	parent.stop();
 });
 
 test("spawn refuses outside rex and for a missing cwd", async () => {
@@ -252,7 +285,7 @@ test("a restarted session finds its children and what they reported meanwhile", 
 	assert.equal(second.list()[0].name, "fix");
 	assert.equal(second.list()[0].state, "done", "the report settles a state recorded as starting");
 	assert.equal(h.fake.listening(), 1);
-	assert.deepEqual(messages(h.mock), [{ content: '<rex-child name="fix" state="done">\nDone while you were away.\n</rex-child>', options: { deliverAs: "nextTurn" } }]);
+	assert.deepEqual(messages(h.mock), [{ content: '<rex-child name="fix" state="done">\nDone while you were away.\n</rex-child>', options: { triggerTurn: false } }]);
 	second.stop();
 
 	// Its tab closed while no session was watching.
@@ -261,7 +294,7 @@ test("a restarted session finds its children and what they reported meanwhile", 
 	await third.start(h.ctx);
 	assert.equal(third.list()[0].state, "exited");
 	assert.match(messages(h.mock)[1].content, /state="exited"/);
-	assert.deepEqual(messages(h.mock)[1].options, { deliverAs: "nextTurn" });
+	assert.deepEqual(messages(h.mock)[1].options, { triggerTurn: false });
 	assert.equal(h.fake.listening(), 0);
 	assert.ok(existsSync(join(h.agentDir, "pi-rex", "sess-1", "children.json")));
 });

@@ -8,7 +8,7 @@
  */
 import { existsSync } from "node:fs";
 import { type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { CHILD_DIR_ENV, CHILD_NAME_ENV, registerChild } from "./child.ts";
+import { childIdentity, registerChild } from "./child.ts";
 import { forwardedExtensions, registerTools, RexParent } from "./parent.ts";
 import { rexCli } from "./rex.ts";
 
@@ -23,9 +23,9 @@ function piCommand(): string[] {
 }
 
 export default function piRex(pi: ExtensionAPI): void {
-	const childDir = process.env[CHILD_DIR_ENV];
-	if (childDir) {
-		registerChild(pi, childDir, process.env[CHILD_NAME_ENV] ?? "child");
+	const child = childIdentity();
+	if (child) {
+		registerChild(pi, child.dir, child.name);
 		return;
 	}
 

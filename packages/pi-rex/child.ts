@@ -16,6 +16,24 @@ export interface Inbound {
 	text: string;
 }
 
+/** Where a child keeps its identity for the life of its process; exported so tests can reset it. */
+export const CHILD_SLOT = Symbol.for("pi-rex.child");
+
+/**
+ * This process's child identity, or undefined in a parent. Read from the
+ * environment once and kept on globalThis: the child drops its variables at
+ * session start, and a reload runs this extension again in the same process,
+ * which must come back as the same child.
+ */
+export function childIdentity(): { dir: string; name: string } | undefined {
+	const slot = globalThis as { [CHILD_SLOT]?: { dir: string; name: string } };
+	if (slot[CHILD_SLOT]) return slot[CHILD_SLOT];
+	const dir = process.env[CHILD_DIR_ENV];
+	if (!dir) return undefined;
+	slot[CHILD_SLOT] = { dir, name: process.env[CHILD_NAME_ENV] ?? "child" };
+	return slot[CHILD_SLOT];
+}
+
 type Message = { role?: string; content?: unknown; stopReason?: string; errorMessage?: string };
 
 /** The text of the last assistant message in a run, and its error if it failed. */

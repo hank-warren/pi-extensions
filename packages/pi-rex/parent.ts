@@ -5,7 +5,7 @@ import { type Static, Type } from "typebox";
 import { CHILD_DIR_ENV, CHILD_NAME_ENV, type Inbound, type Report } from "./child.ts";
 import type { Rex, RexEvent } from "./rex.ts";
 import { spoolDrain, spoolWatch, spoolWrite } from "./spool.ts";
-import { loadTemplate, templateDirs } from "./templates.ts";
+import { loadTemplate, type Template, templateDirs } from "./templates.ts";
 
 export const MESSAGE_TYPE = "pi-rex";
 export const TOOL_NAMES = ["RexSpawn", "RexSend", "RexRead", "RexStop", "RexList"];
@@ -99,9 +99,11 @@ export class RexParent {
 	private children = new Map<string, Child>();
 	private watchers = new Map<string, () => void>();
 	private listeners = new Map<string, () => void>();
+	/** Names taken by spawns still waiting on Rex, so concurrent spawns never share a name or its directory. */
+	private starting = new Set<string>();
 	private ctx: ExtensionContext | undefined;
 	private root: string | undefined;
-	/** Reports found while a session starts are added to the next prompt instead of starting a turn. */
+	/** Reports found while a session starts are stored in the conversation without starting a turn. */
 	private quiet = false;
 	private closed = false;
 
@@ -187,7 +189,8 @@ export class RexParent {
 	private notify(child: Child, content: string, wake: boolean): void {
 		this.pi.sendMessage(
 			{ customType: MESSAGE_TYPE, content, display: true, details: { name: child.name, state: child.state } },
-			wake && !this.quiet && !child.stopRequested ? { triggerTurn: true, deliverAs: "followUp" } : { deliverAs: "nextTurn" },
+			// Stored in the session either way. A "nextTurn" message lives only in memory until the next prompt.
+			wake && !this.quiet && !child.stopRequested ? { triggerTurn: true, deliverAs: "followUp" } : { triggerTurn: false },
 		);
 	}
 
@@ -244,7 +247,7 @@ export class RexParent {
 	}
 
 	async spawn(params: Static<typeof spawnParams>, ctx: ExtensionContext, signal?: AbortSignal): Promise<Child> {
-		const { env, rex } = this.deps;
+		const { env } = this.deps;
 		const session = env.REX_SESSION;
 		const self = env.REX_BLOCK;
 		if (!session || !self) throw new Error("This Pi is not running in a Rex terminal (REX_SESSION is not set).");
@@ -255,8 +258,19 @@ export class RexParent {
 
 		const base = slug(params.name);
 		let name = base;
-		for (let suffix = 2; this.children.has(name) && this.children.get(name)?.state !== "exited"; suffix += 1) name = `${base}-${suffix}`;
-		const dir = join(this.root, name);
+		const taken = (candidate: string) => this.starting.has(candidate) || (this.children.has(candidate) && this.children.get(candidate)?.state !== "exited");
+		for (let suffix = 2; taken(name); suffix += 1) name = `${base}-${suffix}`;
+		// Reserved before the first await.
+		this.starting.add(name);
+		try {
+			return await this.launch(name, join(this.root, name), cwd, session, self, params, template, signal);
+		} finally {
+			this.starting.delete(name);
+		}
+	}
+
+	private async launch(name: string, dir: string, cwd: string, session: string, self: string, params: Static<typeof spawnParams>, template: Template | undefined, signal?: AbortSignal): Promise<Child> {
+		const { env, rex } = this.deps;
 		rmSync(dir, { recursive: true, force: true });
 		mkdirSync(join(dir, "outbox"), { recursive: true, mode: 0o700 });
 		const taskFile = join(dir, "task.md");
