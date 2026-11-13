@@ -23,6 +23,7 @@ packages/                      # public, npm-published pi packages
   pi-thinking-step/            # step the thinking level up/down with Alt+= / Alt+-
   pi-auto-name/                # names the session from its work after the first turn; /rename regenerates
   pi-agents/                   # subagents as pi --mode rpc children, drawn with pi's own components: status line, steering, budgets, worktrees
+  pi-rex/                      # agents as interactive pi sessions in Rex tabs; results, blocks and exits pushed to the parent
 docs/                          # template-package/ (copy-to-create package skeleton)
 scripts/                       # validate.py, test.sh, scan-secrets.sh, smoke-load.mjs, create-releases.sh
 test/                          # cross-package composition tests and the shared test support in test/support/

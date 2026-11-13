@@ -26,6 +26,7 @@ Each package under [`packages/`](packages/) is a self-contained Pi package publi
 | [`@hank-warren/pi-auto-name`](packages/pi-auto-name) | Names each session after its work (3-5 words) once the first turn settles, using the session's own model; `/rename` regenerates it. Nothing enters the session's context |
 | [`@hank-warren/pi-agents`](packages/pi-agents) | Subagents that look like Pi: each agent is its own `pi --mode rpc` process with your extensions and AGENTS.md, composed per task or saved as `agents/*.md` files and started from codemode with structured results. A summary line, a drawer on ↓, and a live view drawn with Pi's own components where you can steer; per-call tool allowlists, autocompact, and git worktrees |
 | [`@hank-warren/pi-image-prune`](packages/pi-image-prune) | Prunes the oldest images from outgoing requests in cache-friendly batches, so image-heavy sessions stay under a provider's request size limit instead of failing and compacting. Claude Code's limits on the Anthropic Messages API by default, plus per-model whole-request limits for proxied routes such as CLIProxyAPI's Devin (10 MiB). Fork of `@ogulcancelik/pi-anthropic-image-cap` |
+| [`@hank-warren/pi-rex`](packages/pi-rex) | Pi agents in [Rex](https://www.superlogical.com/rex) tabs: `RexSpawn` starts a full interactive Pi in a new unfocused tab, and each of its results, blocks and exits arrives in the parent session as a message, with no polling. Children can be steered with `RexSend` and are yours to watch or type into |
 
 ## Install
 
