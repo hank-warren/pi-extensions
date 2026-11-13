@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, watch, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, watch, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -16,7 +16,7 @@ export function spoolWrite(dir: string, value: unknown): string {
 	return name;
 }
 
-/** Hand every waiting message to `deliver`, oldest first, removing each one first so it is delivered once. */
+/** Hand every waiting message to `deliver`, oldest first. A message is removed once `deliver` returns; if it throws, that message and the ones after it wait for the next drain. */
 export function spoolDrain<T>(dir: string, deliver: (value: T) => void): void {
 	let names: string[];
 	try {
@@ -29,11 +29,17 @@ export function spoolDrain<T>(dir: string, deliver: (value: T) => void): void {
 		let value: T;
 		try {
 			value = JSON.parse(readFileSync(path, "utf8")) as T;
-			unlinkSync(path);
 		} catch {
+			// Unreadable: drop it rather than block the messages behind it.
+			rmSync(path, { force: true });
 			continue;
 		}
-		deliver(value);
+		try {
+			deliver(value);
+		} catch {
+			return;
+		}
+		rmSync(path, { force: true });
 	}
 }
 

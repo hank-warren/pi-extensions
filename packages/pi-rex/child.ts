@@ -25,6 +25,8 @@ export interface ChildIdentity {
 	name: string;
 	/** Allowlist of tool names and `*` patterns; undefined allows every tool. */
 	tools?: string[];
+	/** Whether the first run, the task Pi was started with, has begun. */
+	started?: boolean;
 }
 
 /** Where a child keeps its identity for the life of its process; exported so tests can reset it. */
@@ -87,21 +89,35 @@ export function lastAssistant(messages: unknown): { text: string; error?: string
  * parent sends are delivered as user messages, and the tool allowlist is
  * enforced on every call.
  */
-export function registerChild(pi: ExtensionAPI, { dir, name, tools }: ChildIdentity): void {
+export function registerChild(pi: ExtensionAPI, identity: ChildIdentity): void {
+	const { dir, name, tools } = identity;
 	let last: { text: string; error?: string } | undefined;
 	let stop: (() => void) | undefined;
 
-	pi.on("session_start", (_event, ctx: ExtensionContext) => {
-		// Every extension has loaded; programs this session starts are not rex children.
-		delete process.env[CHILD_DIR_ENV];
-		delete process.env[CHILD_NAME_ENV];
-		ctx.ui.setStatus("pi-rex", `rex child · ${name}`);
+	const watchInbox = (ctx: ExtensionContext) => {
 		stop?.();
 		stop = spoolWatch<Inbound>(join(dir, "inbox"), (message) => {
 			if (typeof message?.text !== "string" || !message.text) return;
 			if (ctx.isIdle()) pi.sendUserMessage(message.text);
 			else pi.sendUserMessage(message.text, { deliverAs: "steer" });
 		});
+	};
+
+	pi.on("session_start", (_event, ctx: ExtensionContext) => {
+		// Every extension has loaded; programs this session starts are not rex children.
+		delete process.env[CHILD_DIR_ENV];
+		delete process.env[CHILD_NAME_ENV];
+		ctx.ui.setStatus("pi-rex", `rex child · ${name}`);
+		// Pi submits the task it was started with after session_start. A message delivered
+		// before that would start a run of its own and make the task fail as "already
+		// processing", so the inbox waits for the first run. A reload is past that point.
+		if (identity.started) watchInbox(ctx);
+	});
+
+	pi.on("agent_start", (_event, ctx: ExtensionContext) => {
+		if (identity.started) return;
+		identity.started = true;
+		watchInbox(ctx);
 	});
 
 	// Pi's `--tools` only chooses what is declared: MCP and codemode-exposed tools

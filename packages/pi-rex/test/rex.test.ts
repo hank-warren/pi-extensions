@@ -6,7 +6,7 @@ import test from "node:test";
 import { createMockContext, createMockPi } from "../../../test/support/mock-pi.ts";
 import { CHILD_SLOT, lastAssistant, toolAllowed } from "../child.ts";
 import piRex from "../index.ts";
-import { childMessage, forwardedExtensions, registerTools, RexParent, slug, templateTools } from "../parent.ts";
+import { allowlist, childMessage, forwardedExtensions, registerTools, RexParent, slug, templateTools } from "../parent.ts";
 import { parseEvent, type Rex, type RexEvent } from "../rex.ts";
 import { spoolDrain, spoolWrite } from "../spool.ts";
 import { loadTemplate, parseTemplate, splitCommand } from "../templates.ts";
@@ -43,6 +43,15 @@ test("spool delivers each message once, in send order", () => {
 	assert.deepEqual(seen, [1, 2]);
 	assert.deepEqual(readdirSync(dir), [".partial.json.tmp"]);
 	spoolDrain(join(dir, "missing"), () => assert.fail("nothing to deliver"));
+
+	// A delivery that throws keeps its message, and the ones behind it, for the next drain.
+	spoolWrite(dir, { n: 3 });
+	spoolWrite(dir, { n: 4 });
+	spoolDrain<{ n: number }>(dir, () => {
+		throw new Error("busy");
+	});
+	spoolDrain<{ n: number }>(dir, (value) => seen.push(value.n));
+	assert.deepEqual(seen, [1, 2, 3, 4]);
 });
 
 test("templates: herdr-core format, pi commands only", () => {
@@ -61,6 +70,11 @@ test("small helpers", () => {
 	assert.deepEqual(templateTools(["--model", "a/b", "--tools", "read, bash"]), ["read", "bash"]);
 	assert.deepEqual(templateTools(["-t", "read", "--no-tools"]), []);
 	assert.equal(templateTools(["--model", "a/b"]), undefined);
+	assert.deepEqual(allowlist(["read", "bash"]), ["read", "bash"]);
+	assert.deepEqual(allowlist([]), []);
+	assert.equal(allowlist(["+codemode", "-write"]), undefined, "modifiers adjust the defaults; they are not an allowlist");
+	assert.equal(allowlist(undefined), undefined);
+	assert.throws(() => allowlist(["read", "+codemode"]), /mixes plain names/);
 	assert.ok(toolAllowed("anything", undefined));
 	assert.ok(toolAllowed("srv__gh__get", ["read", "srv__gh__*"]));
 	assert.ok(!toolAllowed("bash", ["read", "srv__gh__*"]));
@@ -94,7 +108,11 @@ test("a child reports each settled run and delivers its inbox", async () => {
 	spoolWrite(join(dir, "inbox"), { text: "waiting before start" });
 	await fire(mock, "session_start", { reason: "startup" }, ctx);
 	assert.equal(process.env.PI_REX_CHILD, undefined);
-	assert.deepEqual(mock.sentUserMessages, [{ text: "waiting before start", options: undefined }]);
+	assert.deepEqual(mock.sentUserMessages, [], "held until the task Pi was started with has begun");
+	idle = false;
+	await fire(mock, "agent_start", {}, ctx);
+	assert.deepEqual(mock.sentUserMessages, [{ text: "waiting before start", options: { deliverAs: "steer" } }]);
+	idle = true;
 
 	await fire(mock, "agent_end", { messages: [{ role: "assistant", content: [{ type: "text", text: "Found two bugs." }] }] }, ctx);
 	await fire(mock, "agent_settled", { aborted: false }, ctx);
@@ -114,7 +132,9 @@ test("a child reports each settled run and delivers its inbox", async () => {
 	piRex(reloaded.pi);
 	assert.equal(reloaded.tools.length, 0);
 	assert.ok((reloaded.events.get("tool_call") ?? []).map((handler) => (handler as (event: unknown) => unknown)({ toolName: "bash" }))[0], "the allowlist survives a reload");
+	spoolWrite(join(dir, "inbox"), { text: "after reload" });
 	await fire(reloaded, "session_start", { reason: "reload" }, ctx);
+	assert.deepEqual(reloaded.sentUserMessages, [{ text: "after reload", options: { deliverAs: "steer" } }], "a reloaded child is past its first run");
 	await fire(reloaded, "agent_end", { messages: [{ role: "assistant", content: "After reload." }] }, ctx);
 	await fire(reloaded, "agent_settled", {}, ctx);
 	const after: unknown[] = [];
@@ -183,6 +203,12 @@ test("spawn starts pi in a new unfocused tab with the task in a file", async () 
 	assert.equal(h.statuses.get("pi-rex"), "rex · 1 starting");
 
 	// A second child with the same name gets its own; a split anchors on this pane.
+	// Modifiers pass through to Pi and enforce nothing; a mixed list is refused before anything is started.
+	const modified = await parent.spawn({ task: "m", name: "mod", tools: ["+codemode"] }, h.ctx);
+	assert.ok(!existsSync(join(modified.dir, "tools.json")));
+	assert.deepEqual((h.fake.calls.at(-2) as string[]).slice(-5, -3), ["--tools", "+codemode"]);
+	await assert.rejects(parent.spawn({ task: "m", tools: ["read", "+codemode"] }, h.ctx), /mixes plain names/);
+
 	const second = await parent.spawn({ task: "again", name: "review", placement: "split", tools: [] }, h.ctx);
 	assert.equal(second.name, "review-2");
 	const args = h.fake.calls.at(-1) as string[];
@@ -287,8 +313,22 @@ test("send, read and stop", async () => {
 	};
 	await assert.rejects(parent.stopChild("fix"), /timeout/);
 	h.fake.rex.run = run;
-	assert.equal(parent.list()[0].stopRequested, false);
+	assert.equal(parent.list()[0].stopRequested, undefined);
 	assert.equal(parent.list()[0].state, "starting");
+
+	// A report that arrives while the close is in flight wakes the parent, whether or not the close then succeeds.
+	let release: (() => void) | undefined;
+	h.fake.rex.run = () => new Promise((resolve, reject) => {
+		release = () => reject(new Error("rex block: timeout"));
+	});
+	const failing = parent.stopChild("fix");
+	spoolWrite(join(child.dir, "outbox"), { text: "Finished just now." });
+	await new Promise((resolve) => setTimeout(resolve, 150));
+	release?.();
+	await assert.rejects(failing, /timeout/);
+	h.fake.rex.run = run;
+	assert.deepEqual(messages(h.mock), [{ content: '<rex-child name="fix" state="done">\nFinished just now.\n</rex-child>', options: WAKE }]);
+	h.mock.sentMessages.length = 0;
 
 	await parent.stopChild("fix");
 	assert.deepEqual(h.fake.calls.at(-1), ["block", "close", "-s", SESSION, "block:c1"]);

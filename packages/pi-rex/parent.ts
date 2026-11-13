@@ -44,7 +44,7 @@ const spawnParams = Type.Object({
 	template: Type.Optional(Type.String({ description: "A saved role by name: its instructions go before the task and its pi arguments (model, tools) apply." })),
 	model: Type.Optional(Type.String({ description: "provider/id. Default: the template's, else Pi's default model." })),
 	thinking: Type.Optional(Type.Union([Type.Literal("off"), Type.Literal("minimal"), Type.Literal("low"), Type.Literal("medium"), Type.Literal("high"), Type.Literal("xhigh"), Type.Literal("max")])),
-	tools: Type.Optional(Type.Array(Type.String(), { description: "Allowlist of tool names, e.g. [\"read\", \"bash\", \"codemode\"] for read-only work; [] gives it no tools. Enforced on every call, including calls its codemode scripts make. Default: the template's, else every tool." })),
+	tools: Type.Optional(Type.Array(Type.String(), { description: "Allowlist of tool names, e.g. [\"read\", \"bash\", \"codemode\"] for read-only work; [] gives it no tools. Enforced on every call, including calls its codemode scripts make. A list of only +name/-name entries adjusts Pi's default tools instead and enforces nothing. Default: the template's, else every tool." })),
 	placement: Type.Optional(Type.Union([Type.Literal("tab"), Type.Literal("split")], { description: "tab (default): a new unfocused tab in this Rex session. split: a pane to the right of this one." })),
 });
 const nameParams = Type.Object({ name: Type.String({ description: "The child's name." }) });
@@ -105,12 +105,25 @@ export function templateTools(args: string[]): string[] | undefined {
 	return tools;
 }
 
+/**
+ * The allowlist a `--tools` value sets, or undefined when it sets none. As in Pi, a list
+ * of only `+name`/`-name` entries changes the default selection instead of replacing it.
+ */
+export function allowlist(tools: string[] | undefined): string[] | undefined {
+	if (!tools) return undefined;
+	const modifiers = tools.filter((entry) => /^[+-]/.test(entry)).length;
+	if (modifiers && modifiers < tools.length) throw new Error(`tools mixes plain names with +name/-name entries (${tools.join(", ")}); Pi accepts one kind or the other.`);
+	return modifiers ? undefined : tools;
+}
+
 export class RexParent {
 	private children = new Map<string, Child>();
 	private watchers = new Map<string, () => void>();
 	private listeners = new Map<string, () => void>();
 	/** Names taken by spawns still waiting on Rex, so concurrent spawns never share a name or its directory. */
 	private starting = new Set<string>();
+	/** Children whose tab RexStop is closing. Their exit is expected; anything else they send still wakes the parent until the close succeeds. */
+	private stopping = new Set<string>();
 	private ctx: ExtensionContext | undefined;
 	private root: string | undefined;
 	/** Reports found while a session starts are stored in the conversation without starting a turn. */
@@ -228,7 +241,7 @@ export class RexParent {
 		this.watchers.delete(child.name);
 		child.state = "exited";
 		child.note = undefined;
-		if (!child.stopRequested) this.notify(child, childMessage(child.name, { state: "exited", code: code === undefined ? undefined : String(code) }, "Its tab closed. It can no longer be messaged."), true);
+		if (!child.stopRequested && !this.stopping.has(child.name)) this.notify(child, childMessage(child.name, { state: "exited", code: code === undefined ? undefined : String(code) }, "Its tab closed. It can no longer be messaged."), true);
 		if (!this.list().some((other) => other.session === child.session && other.state !== "exited")) {
 			this.listeners.get(child.session)?.();
 			this.listeners.delete(child.session);
@@ -265,6 +278,8 @@ export class RexParent {
 		const cwd = params.cwd ? resolve(ctx.cwd, params.cwd) : ctx.cwd;
 		if (!existsSync(cwd) || !statSync(cwd).isDirectory()) throw new Error(`cwd ${cwd} is not a directory`);
 		const template = params.template ? loadTemplate(params.template, templateDirs(this.deps.agentDir())) : undefined;
+		// The child enforces the allowlist on every call; --tools alone only chooses what is declared.
+		const tools = allowlist(params.tools ?? templateTools(template?.args ?? []));
 
 		const base = slug(params.name);
 		let name = base;
@@ -273,13 +288,13 @@ export class RexParent {
 		// Reserved before the first await.
 		this.starting.add(name);
 		try {
-			return await this.launch(name, join(this.root, name), cwd, session, self, params, template, signal);
+			return await this.launch(name, join(this.root, name), cwd, session, self, params, template, tools, signal);
 		} finally {
 			this.starting.delete(name);
 		}
 	}
 
-	private async launch(name: string, dir: string, cwd: string, session: string, self: string, params: Static<typeof spawnParams>, template: Template | undefined, signal?: AbortSignal): Promise<Child> {
+	private async launch(name: string, dir: string, cwd: string, session: string, self: string, params: Static<typeof spawnParams>, template: Template | undefined, tools: string[] | undefined, signal?: AbortSignal): Promise<Child> {
 		const { env, rex } = this.deps;
 		rmSync(dir, { recursive: true, force: true });
 		mkdirSync(join(dir, "outbox"), { recursive: true, mode: 0o700 });
@@ -290,8 +305,6 @@ export class RexParent {
 			`---\nYou are "${name}", an agent started by another Pi session. The last message of each of your turns is delivered to that session automatically, so end each turn with the result or the blocker. Do not start other agents.`,
 		].filter(Boolean).join("\n\n"), { mode: 0o600 });
 
-		// The child enforces the allowlist on every call; --tools alone only chooses what is declared.
-		const tools = params.tools ?? templateTools(template?.args ?? []);
 		if (tools) writeFileSync(join(dir, TOOLS_FILE), JSON.stringify(tools), { mode: 0o600 });
 
 		const split = params.placement === "split";
@@ -334,15 +347,19 @@ export class RexParent {
 	async stopChild(name: string, signal?: AbortSignal): Promise<Child> {
 		const child = this.find(name);
 		if (child.state === "exited") return child;
-		child.stopRequested = true;
+		this.stopping.add(child.name);
 		try {
 			await this.deps.rex.run(["block", "close", "-s", child.session, child.block], signal);
 		} catch (error) {
-			// Still running: its reports and notices must keep waking the parent.
-			child.stopRequested = false;
-			throw error;
+			// Rex may have reported the exit before the command failed; otherwise the child is still running.
+			if (child.state !== "exited") throw error;
+		} finally {
+			this.stopping.delete(child.name);
 		}
+		// Only now is the child known to be gone, so only now are its last reports stored without waking the parent.
+		child.stopRequested = true;
 		this.exited(child);
+		this.changed();
 		return child;
 	}
 }
